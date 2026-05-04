@@ -56,6 +56,9 @@ data/performer_documents/*
 data/reviewed/*.json
 data/title_corpus/*
 !data/title_corpus/.gitkeep
+data/operator_feedback/*.jsonl
+data/tutorial_keyframes/
+data/ui_uploads/
 
 # Claude Code per-machine settings (project-level allow/deny lists, hooks, etc.)
 .claude/settings.local.json

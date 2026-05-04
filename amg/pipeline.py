@@ -15,6 +15,7 @@ This is the heart of v11. It runs the phases in order:
 
 Time budget enforced throughout. Per-phase timeouts honored.
 """
+import json
 import time
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -29,15 +30,17 @@ from amg.config import (
     BATCH_LOCK_FILE,
     MIN_FREE_SPACE_GB,
     REQUIRE_2257_DOC,
+    SCORE_TIER_3_SUCCESS_FLOOR,
 )
 from amg.ingest.inventory import find_companion_files, make_work_dir, make_covers_dir
 from amg.ingest.studio_profiles import detect_studio, get_or_create_profile
+from amg.ingest.folder_context import resolve_folder_context
 from amg.ingest.performer_code import (
-    parse_performer_code,
+    parse_performer_code_with_context,
     get_authoritative_performer_count,
     detect_scene_type_from_code,
 )
-from amg.ingest.title_parser import parse_title, derive_primary_scene_type
+from amg.ingest.title_parser import parse_title_with_context, derive_primary_scene_type
 from amg.video.metadata import get_metadata
 from amg.video.frames import calibrate_thresholds
 from amg.scoring.ai_client import AIClient
@@ -50,7 +53,7 @@ from amg.scanning.cluster import expand_clusters
 from amg.scanning.fallback import run_floor_enforcement_cascade
 from amg.compliance.doc_2257 import verify_2257
 from amg.compliance.audit_log import audit_event
-from amg.output.covers import save_covers
+from amg.output.covers import save_covers, score_and_save_provided_thumbnails
 from amg.output.contact_sheet import build_contact_sheet
 from amg.output.decision_log import write_decision_log
 from amg.output.quota_fill import select_quota_fill, quota_satisfied, quota_progress
@@ -103,10 +106,18 @@ def process_scene(
     phase_results = {}
 
     # --- PHASE 1: INVENTORY ---
-    studio_name = detect_studio(video_path)
+    folder_ctx = resolve_folder_context(video_path)
+    if folder_ctx.is_generic_filename:
+        log.info("[ingest] Generic scene filename detected — using folder-context fallback",
+                 ancestors=folder_ctx.ancestor_names[:3],
+                 source_folder=str(folder_ctx.source_folder) if folder_ctx.source_folder else None,
+                 metadata_docs=len(folder_ctx.metadata_documents))
+    studio_name = folder_ctx.studio or detect_studio(video_path)
     studio_profile = get_or_create_profile(studio_name) if studio_name else None
-    code_info = parse_performer_code(video_path)
-    title_info = parse_title(video_path)
+    code_info = parse_performer_code_with_context(video_path, folder_ctx)
+    title_info = parse_title_with_context(video_path, folder_ctx)
+    title_info["folder_performers"] = folder_ctx.performers
+    title_info["folder_location"] = folder_ctx.location
 
     primary_type = derive_primary_scene_type(
         title_info.get("detected_genres", []),
@@ -119,11 +130,12 @@ def process_scene(
             primary_type = scene_type_from_code
 
     title_info["primary_scene_type"] = primary_type
-    log.info("Inventory complete",
+    log.info("[ingest] Inventory complete",
              studio=studio_name,
              code=code_info.get("code") if code_info else None,
              scene_type=primary_type,
-             genres=title_info.get("detected_genres", []))
+             genres=title_info.get("detected_genres", []),
+             folder_context=str(folder_ctx.source_folder) if folder_ctx.source_folder else None)
 
     # --- PHASE 2: COMPLIANCE ---
     compliance = verify_2257(video_path)
@@ -303,12 +315,12 @@ def process_scene(
             "expansions": cluster_result.get("expansions_count", 0),
             "candidates_found": len([c for c in cluster_result["cluster_candidates"]
                                      if c.get("scored_frame")
-                                     and c["scored_frame"].score >= 5.0]),
+                                     and c["scored_frame"].score >= SCORE_TIER_3_SUCCESS_FLOOR]),
         }
         # Add cluster results that scored well
         for c in cluster_result["cluster_candidates"]:
             scored = c.get("scored_frame")
-            if scored and scored.parse_succeeded and scored.score >= 5.0:
+            if scored and scored.parse_succeeded and scored.score >= SCORE_TIER_3_SUCCESS_FLOOR:
                 candidates.append(c)
             all_scored.append(c)
     elif time.time() < deadline and candidates:
@@ -373,6 +385,7 @@ def process_scene(
 
     saved_covers = []
     contact_sheet_path = None
+    provided_thumb_stats = None
 
     if not dry_run:
         with phase_timer("output") as t:
@@ -384,6 +397,34 @@ def process_scene(
                 performer_name=performer_name,
                 performer_code=code_info.get("code", "") if code_info else "",
             )
+
+            # Optional: if creator/agency supplied thumbnails in the scene folder,
+            # score them with AI and import only strong ones.
+            imported_from_provided, provided_thumb_stats = score_and_save_provided_thumbnails(
+                video_path=video_path,
+                output_dir=covers_dir,
+                ai_client=ai_client,
+                search_root=folder_ctx.source_folder or video_path.parent,
+                performer_name=performer_name,
+                performer_code=code_info.get("code", "") if code_info else "",
+                rank_start=len(saved_covers) + 1,
+                cover_cap=cover_cap,
+            )
+            if imported_from_provided:
+                saved_covers.extend(imported_from_provided)
+                log.info(
+                    "[provided_thumbs] imported",
+                    imported=len(imported_from_provided),
+                    total_after=len(saved_covers),
+                )
+
+            # Persist full grading results for audit/review.
+            if provided_thumb_stats:
+                try:
+                    with open(work_dir / "provided_thumbnails.json", "w") as f:
+                        json.dump(provided_thumb_stats, f, indent=2)
+                except Exception as e:
+                    log.warn(f"[provided_thumbs] could not write grading file: {e}")
 
             # Contact sheet
             if saved_covers:
@@ -408,7 +449,46 @@ def process_scene(
                     },
                     quality_flag=quality_flag,
                 )
-        phase_results["output"] = {"duration_sec": t.elapsed}
+        phase_results["output"] = {
+            "duration_sec": t.elapsed,
+            "provided_thumbnails_discovered": (provided_thumb_stats or {}).get("discovered", 0),
+            "provided_thumbnails_scanned": (provided_thumb_stats or {}).get("scanned", 0),
+            "provided_thumbnails_accepted": (provided_thumb_stats or {}).get("accepted", 0),
+            "provided_thumbnails_imported": (provided_thumb_stats or {}).get("imported", 0),
+        }
+
+    # --- PHASE 11: SCENE INSIGHT + AI TITLE/DESCRIPTION ---
+    # Best-effort. Always degrades safely on AI offline / parse fail.
+    insight_dict = None
+    title_payload = None
+    if not dry_run and saved_covers:
+        try:
+            with phase_timer("scene_insight") as t_ins:
+                insight_dict, title_payload = _generate_scene_insight_and_titles(
+                    studio_name=studio_name,
+                    folder_ctx=folder_ctx,
+                    primary_type=primary_type,
+                    title_info=title_info,
+                    saved_covers=saved_covers,
+                    contact_sheet_path=contact_sheet_path,
+                    work_dir=work_dir,
+                    ai_client=ai_client,
+                )
+            phase_results["scene_insight"] = {
+                "duration_sec": t_ins.elapsed,
+                "insight_ok": insight_dict is not None,
+                "ai_titles_ok": bool(title_payload and title_payload.get("ai_used")),
+                "n_titles": len(title_payload.get("titles", [])) if title_payload else 0,
+            }
+        except Exception as e:
+            log.warn(f"[scene_insight] failed: {e}")
+            phase_results["scene_insight"] = {"duration_sec": 0, "error": str(e)}
+
+    if insight_dict:
+        title_info["insight"] = insight_dict
+    if title_payload:
+        title_info["ai_titles"] = title_payload.get("titles", [])
+        title_info["long_description"] = title_payload.get("long_description", "")
 
     # --- DECISION LOG ---
     total_duration = time.time() - pipeline_start
@@ -497,6 +577,105 @@ def process_scene(
         work_dir=work_dir,
         decision_log_path=decision_log_path,
     )
+
+
+def _generate_scene_insight_and_titles(
+    *,
+    studio_name,
+    folder_ctx,
+    primary_type,
+    title_info,
+    saved_covers,
+    contact_sheet_path,
+    work_dir,
+    ai_client,
+):
+    """Phase 11 helper: vision insight + AI-driven titles & long description.
+
+    Always returns ``(insight_dict_or_None, title_payload_or_None)`` and
+    persists ``insight.json`` to the work dir for the UI / CLI to consume.
+    Failures are logged and swallowed.
+    """
+    import json as _json
+    from amg.scoring.scene_describer import (
+        describe_scene_from_covers,
+        generate_titles_with_insight,
+        summarize_positions,
+    )
+
+    # 1. Vision insight (one AI call against the contact sheet).
+    cover_paths = [Path(c["path"]) for c in saved_covers if c.get("path")]
+    insight = describe_scene_from_covers(
+        contact_sheet_path=Path(contact_sheet_path) if contact_sheet_path else None,
+        cover_paths=cover_paths,
+        ai_client=ai_client,
+    )
+    if insight:
+        log.info("[scene_insight] description ready",
+                 setting=insight.setting, mood=insight.mood,
+                 features=len(insight.notable_features))
+
+    # 2. Performer name resolution. Prefer metadata-supplied names, else fall
+    #    back to studio profile, else placeholder. Folder context wins.
+    performers = list(folder_ctx.performers or [])
+    if not performers:
+        regulars = (
+            (title_info.get("folder_performers") or [])
+            or (
+                # studio_profile.regular performers — read defensively
+                ((title_info.get("studio_profile") or {}).get("performers") or {}).get("regular", [])
+            )
+        )
+        if regulars:
+            performers = list(regulars)
+
+    pos_summary = summarize_positions(saved_covers)
+    description_for_prompt = (
+        title_info.get("description")
+        or folder_ctx.title
+        or title_info.get("metadata_title")
+        or ""
+    )
+
+    title_payload = generate_titles_with_insight(
+        studio=studio_name,
+        performers=performers,
+        scene_type=primary_type,
+        genres=title_info.get("detected_genres", []),
+        description=description_for_prompt,
+        insight=insight,
+        position_summary=pos_summary,
+        ai_client=ai_client,
+    )
+
+    # 3. Persist insight.json so UI/CLI can show it without re-running AI.
+    try:
+        if work_dir:
+            Path(work_dir).mkdir(parents=True, exist_ok=True)
+            payload = {
+                "studio": studio_name,
+                "performers": performers,
+                "scene_type": primary_type,
+                "genres": title_info.get("detected_genres", []),
+                "operator_description": description_for_prompt,
+                "folder_context": {
+                    "is_generic_filename": folder_ctx.is_generic_filename,
+                    "source_folder": str(folder_ctx.source_folder) if folder_ctx.source_folder else None,
+                    "metadata_documents_found": len(folder_ctx.metadata_documents),
+                    "ancestor_names": folder_ctx.ancestor_names,
+                },
+                "insight": insight.to_dict() if insight else None,
+                "position_summary": pos_summary,
+                "ai_titles": title_payload.get("titles", []),
+                "long_description": title_payload.get("long_description", ""),
+                "ai_used": title_payload.get("ai_used", False),
+            }
+            with open(Path(work_dir) / "insight.json", "w") as f:
+                _json.dump(payload, f, indent=2)
+    except Exception as e:
+        log.warn(f"[scene_insight] failed to write insight.json: {e}")
+
+    return (insight.to_dict() if insight else None), title_payload
 
 
 def _build_result(**kwargs):

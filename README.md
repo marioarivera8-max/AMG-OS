@@ -52,7 +52,7 @@ Target performance: **90-150 seconds per scene** on M4 Pro 24GB.
 amg batch ~/Incoming/                              # Process scenes
 amg review "27 BBGG - couple swap"                 # Pick title, cover, etc.
 amg ready "27 BBGG - couple swap"                  # Verify distribution-ready
-amg find --genre swinger --min-score 8.0           # Search library
+amg find --genre swinger --min-score 80            # Search library (0–100 scores)
 amg dvd-compile <id1> <id2> <id3> <id4> --theme "Swinger Weekend"
 amg dashboard                                       # Weekly review
 ```

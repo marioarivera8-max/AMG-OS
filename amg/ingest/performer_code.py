@@ -26,17 +26,42 @@ PERFORMER_CODE_PATTERN = re.compile(r'^\s*\d+\s+([BG]{1,12})\s+-\s')
 
 def parse_performer_code(video_path: Path) -> Optional[dict]:
     """
-    Extract performer code from filename or parent folder name.
+    Extract performer code from filename or any ancestor folder name.
+
+    Walks up to MAX_ANCESTOR_DEPTH ancestor folders so generic-named scene
+    files inside a creator-submitted folder still pick up the code.
 
     Returns dict with full classification or None if no code found.
     """
-    candidate_strings = [video_path.parent.name, video_path.stem]
+    from amg.ingest.folder_context import resolve_folder_context
+
+    ctx = resolve_folder_context(video_path)
+    return parse_performer_code_with_context(video_path, ctx)
+
+
+def parse_performer_code_with_context(video_path: Path, ctx) -> Optional[dict]:
+    """
+    Extract performer code given a pre-resolved FolderContext.
+
+    Order of preference:
+      1. Explicit ``performer_code`` field in any metadata JSON we found.
+      2. Performer-code regex match against the filename (if non-generic) and
+         each ancestor folder name, deepest first.
+    """
+    candidate_strings: list[str] = []
+    if not ctx.is_generic_filename:
+        candidate_strings.append(video_path.stem)
+    candidate_strings.extend(ctx.ancestor_names)
+
+    if ctx.performer_code:
+        # Validate it parses cleanly through our regex shape.
+        if PERFORMER_CODE_PATTERN.match(f"0 {ctx.performer_code} - x"):
+            return _classify_code(ctx.performer_code)
 
     for s in candidate_strings:
-        match = PERFORMER_CODE_PATTERN.match(s)
+        match = PERFORMER_CODE_PATTERN.match(s or "")
         if match:
-            code = match.group(1)
-            return _classify_code(code)
+            return _classify_code(match.group(1))
 
     return None
 

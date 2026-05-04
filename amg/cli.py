@@ -19,6 +19,7 @@ Commands:
     amg calibrate <studio>      Recalibrate studio thresholds
     amg clean [--older-than]    Clean old work directories
     amg ui                      Start local web UI (run + review)
+    amg feedback-eval           Compare model labels vs operator corrections
 """
 import argparse
 import os
@@ -129,6 +130,19 @@ def main():
     p_ui.add_argument("--port", type=int, default=8080)
     p_ui.add_argument("--no-open", action="store_true", help="Do not open browser automatically")
 
+    # feedback-eval
+    p_fe = subparsers.add_parser("feedback-eval", help="Compare model labels vs operator corrections")
+    p_fe.add_argument("--scene-id", type=str, default=None)
+    p_fe.add_argument("--studio", type=str, default=None)
+
+    # generate-title
+    p_gt = subparsers.add_parser(
+        "generate-title",
+        help="Re-run AI scene insight + title/description generation against existing covers",
+    )
+    p_gt.add_argument("scene", type=str, help="Scene ID (folder name) or path to a video / scene folder")
+    p_gt.add_argument("--print-only", action="store_true", help="Print results, do not update insight.json")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -162,6 +176,8 @@ def _dispatch(args):
     if cmd == "calibrate": return cmd_calibrate(args)
     if cmd == "clean":     return cmd_clean(args)
     if cmd == "ui":        return cmd_ui(args)
+    if cmd == "feedback-eval": return cmd_feedback_eval(args)
+    if cmd == "generate-title": return cmd_generate_title(args)
     return 1
 
 
@@ -173,18 +189,36 @@ def cmd_process(args):
     """Process a single scene."""
     from amg.pipeline import process_scene
     from amg.ingest.inventory import discover_scenes
+    from amg.video.metadata import get_metadata
 
     init_logging()
     path = Path(args.path).resolve()
 
     if path.is_dir():
-        videos = discover_scenes(path, recursive=False)
+        videos = discover_scenes(path, recursive=True)
         if not videos:
             print(f"No video files found in {path}")
             return 1
+        # Pick longest by duration (fallback: largest size) so generic camera
+        # dumps with many files consistently select the primary scene.
+        best = None
+        best_dur = -1.0
+        best_size = -1
+        for v in videos:
+            meta = get_metadata(v)
+            dur = float((meta or {}).get("duration_sec", 0) or 0)
+            try:
+                size = v.stat().st_size
+            except Exception:
+                size = -1
+            if dur > best_dur or (dur == best_dur and size > best_size):
+                best = v
+                best_dur = dur
+                best_size = size
+        video_path = best or videos[0]
         if len(videos) > 1:
-            print(f"Multiple videos in folder; using first: {videos[0].name}")
-        video_path = videos[0]
+            chosen_dur = f"{best_dur:.1f}s" if best_dur > 0 else "unknown duration"
+            print(f"Multiple videos found; selected longest: {video_path.name} ({chosen_dur})")
     else:
         video_path = path
 
@@ -646,6 +680,166 @@ def cmd_ui(args):
 
     app = create_app()
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    return 0
+
+
+def cmd_feedback_eval(args):
+    """Compare model classification outputs against operator corrections."""
+    from amg.learning.feedback_eval import evaluate_feedback, format_feedback_report
+
+    init_logging()
+    metrics = evaluate_feedback(scene_id=args.scene_id, studio=args.studio)
+    print(format_feedback_report(metrics))
+    return 0
+
+
+def cmd_generate_title(args):
+    """Re-run vision insight + AI title/description generation for an existing scene."""
+    import json
+    from amg.ingest.folder_context import resolve_folder_context
+    from amg.ingest.title_parser import parse_title_with_context, derive_primary_scene_type
+    from amg.ingest.performer_code import parse_performer_code_with_context, detect_scene_type_from_code
+    from amg.ingest.studio_profiles import detect_studio
+    from amg.ingest.inventory import discover_scenes, make_work_dir
+    from amg.scoring.scene_describer import (
+        describe_scene_from_covers,
+        generate_titles_with_insight,
+        summarize_positions,
+    )
+
+    init_logging()
+
+    # Resolve scene to a video file + decision log.
+    arg = args.scene
+    target = Path(arg).expanduser()
+    decision_log = None
+    if target.exists():
+        if target.is_dir():
+            videos = discover_scenes(target, recursive=False)
+            if not videos:
+                print(f"No video files found in {target}")
+                return 1
+            video_path = videos[0]
+        else:
+            video_path = target
+    else:
+        # Treat arg as a scene_id; look up decision log.
+        safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in arg)[:120]
+        log_path = DECISION_LOGS_DIR / f"{safe}.json"
+        if not log_path.exists():
+            print(f"No scene found matching: {arg}")
+            return 1
+        with open(log_path) as f:
+            decision_log = json.load(f)
+        scene_path = decision_log.get("scene_path")
+        if not scene_path:
+            print(f"Decision log missing scene_path: {log_path}")
+            return 1
+        video_path = Path(scene_path)
+
+    work_dir = make_work_dir(video_path, version="v11")
+    if not work_dir.exists():
+        print(f"Work dir does not exist (process the scene first): {work_dir}")
+        return 1
+
+    saved_covers = []
+    contact_sheet = None
+    if decision_log is None:
+        safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in video_path.parent.name)[:120]
+        dl_path = DECISION_LOGS_DIR / f"{safe}.json"
+        if dl_path.exists():
+            with open(dl_path) as f:
+                decision_log = json.load(f)
+    if decision_log:
+        saved_covers = (decision_log.get("outcomes") or {}).get("saved_covers", []) or []
+    sheets = sorted(work_dir.glob("00_*_contact_sheet.jpg"))
+    if sheets:
+        contact_sheet = sheets[0]
+
+    if not saved_covers and not contact_sheet:
+        print(f"No covers or contact sheet in {work_dir}")
+        return 1
+
+    # Resolve folder context + ingestion fields.
+    folder_ctx = resolve_folder_context(video_path)
+    studio = folder_ctx.studio or detect_studio(video_path)
+    code_info = parse_performer_code_with_context(video_path, folder_ctx)
+    title_info = parse_title_with_context(video_path, folder_ctx)
+    primary = derive_primary_scene_type(
+        title_info.get("detected_genres", []),
+        code_info.get("total") if code_info else None,
+    )
+    if code_info:
+        from_code = detect_scene_type_from_code(code_info)
+        if from_code != "STANDARD":
+            primary = from_code
+
+    print(f"Scene: {video_path.parent.name}")
+    print(f"  Studio: {studio}")
+    print(f"  Performers (folder): {folder_ctx.performers or '(none — using studio defaults)'}")
+    print(f"  Generic filename: {folder_ctx.is_generic_filename}")
+    print(f"  Description: {title_info.get('description') or '(none)'}")
+    print()
+
+    insight = describe_scene_from_covers(
+        contact_sheet_path=contact_sheet,
+        cover_paths=[Path(c["path"]) for c in saved_covers if c.get("path")],
+    )
+    if insight:
+        print("Insight:")
+        print(f"  Setting: {insight.setting}")
+        print(f"  Location: {insight.location_hint}")
+        print(f"  Features: {', '.join(insight.notable_features) or '(none)'}")
+        print(f"  Mood: {insight.mood}")
+        print(f"  Action: {insight.action_summary}")
+        print()
+    else:
+        print("Insight: (AI offline or unavailable)\n")
+
+    pos_summary = summarize_positions(saved_covers)
+    payload = generate_titles_with_insight(
+        studio=studio,
+        performers=folder_ctx.performers,
+        scene_type=primary,
+        genres=title_info.get("detected_genres", []),
+        description=title_info.get("description") or folder_ctx.title or "",
+        insight=insight,
+        position_summary=pos_summary,
+    )
+
+    print("Title suggestions:" + ("" if payload["ai_used"] else " (template fallback — AI offline)"))
+    for i, t in enumerate(payload["titles"], 1):
+        warn = f"  ⚠ {'; '.join(t['warnings'])}" if t.get("warnings") else ""
+        print(f"  {i}. [{t.get('style','?')}] {t['text']}  ({t['char_count']}c){warn}")
+    if payload.get("long_description"):
+        print()
+        print("Long description:")
+        print(f"  {payload['long_description']}")
+
+    # Persist updated insight.json unless --print-only.
+    if not args.print_only:
+        out = work_dir / "insight.json"
+        out_payload = {
+            "studio": studio,
+            "performers": folder_ctx.performers,
+            "scene_type": primary,
+            "genres": title_info.get("detected_genres", []),
+            "operator_description": title_info.get("description") or "",
+            "folder_context": {
+                "is_generic_filename": folder_ctx.is_generic_filename,
+                "source_folder": str(folder_ctx.source_folder) if folder_ctx.source_folder else None,
+                "metadata_documents_found": len(folder_ctx.metadata_documents),
+                "ancestor_names": folder_ctx.ancestor_names,
+            },
+            "insight": insight.to_dict() if insight else None,
+            "position_summary": pos_summary,
+            "ai_titles": payload["titles"],
+            "long_description": payload.get("long_description", ""),
+            "ai_used": payload.get("ai_used", False),
+        }
+        with open(out, "w") as f:
+            json.dump(out_payload, f, indent=2)
+        print(f"\nWrote {out}")
     return 0
 
 

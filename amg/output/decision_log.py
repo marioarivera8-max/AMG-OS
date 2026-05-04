@@ -176,18 +176,19 @@ def _summarize_outcomes(final_candidates, saved_covers, fallbacks_used):
     top = saved_covers[0] if saved_covers else None
 
     distribution = {
-        "10": sum(1 for s in scores if s >= 10),
-        "9-10": sum(1 for s in scores if 9 <= s < 10),
-        "8-9": sum(1 for s in scores if 8 <= s < 9),
-        "7-8": sum(1 for s in scores if 7 <= s < 8),
-        "6-7": sum(1 for s in scores if 6 <= s < 7),
-        "5-6": sum(1 for s in scores if 5 <= s < 6),
-        "<5": sum(1 for s in scores if s < 5),
+        "100": sum(1 for s in scores if s >= 100),
+        "90-99": sum(1 for s in scores if 90 <= s < 100),
+        "80-89": sum(1 for s in scores if 80 <= s < 90),
+        "70-79": sum(1 for s in scores if 70 <= s < 80),
+        "60-69": sum(1 for s in scores if 60 <= s < 70),
+        "50-59": sum(1 for s in scores if 50 <= s < 60),
+        "<50": sum(1 for s in scores if s < 50),
     }
 
     return {
         "covers_delivered": len(saved_covers),
         "covers_verified": sum(1 for c in saved_covers if c.get("verified")),
+        "saved_covers": saved_covers,
         "scores_distribution": distribution,
         "top_pick_score": top.get("score") if top else 0,
         "top_pick_type": top.get("type") if top else None,

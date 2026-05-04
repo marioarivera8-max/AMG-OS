@@ -10,6 +10,7 @@ from amg.config import (
     QUOTA_POSITION_PER_LABEL_TARGET,
     QUOTA_POSITION_MAX_LABELS,
     QUOTA_MIN_GAP_SEC,
+    POSITION_CLASSIFIER_MIN_PEN_CONF,
 )
 
 
@@ -54,6 +55,10 @@ def _bucket_of(c: dict) -> str:
     if t == "BUILDUP":
         return "buildup"
     if t == "PENETRATION":
+        pen_visible = bool(getattr(scored, "penetration_visible", False))
+        pen_conf = float(getattr(scored, "penetration_confidence", 0.0) or 0.0)
+        if not pen_visible or pen_conf < POSITION_CLASSIFIER_MIN_PEN_CONF:
+            return "other"
         return "positions"
     if t == "COMPOSITION":
         return "posterpose"

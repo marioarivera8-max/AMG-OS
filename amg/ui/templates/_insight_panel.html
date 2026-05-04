@@ -1,0 +1,100 @@
+<div id="insight-panel">
+  {% if not insight %}
+    <div class="empty muted">
+      No AI insight yet for this scene.
+      <div style="margin-top: 10px;">
+        <button class="btn btn-primary"
+                hx-post="/scene/{{ scene_id }}/insight"
+                hx-target="#insight-panel"
+                hx-swap="outerHTML"
+                hx-indicator="#insight-spinner">
+          ✨ Generate insight + titles
+        </button>
+        <span id="insight-spinner" class="muted htmx-indicator" style="margin-left: 8px;">working… (one AI call)</span>
+      </div>
+    </div>
+  {% else %}
+    {% set ins = insight.insight %}
+    <div class="card">
+      <div class="between">
+        <h3 class="card-section-title" style="margin: 0;">
+          AI scene insight
+          {% if insight.ai_used %}<span class="pill ok">live</span>{% else %}<span class="pill warn">fallback</span>{% endif %}
+        </h3>
+        <button class="btn btn-ghost"
+                hx-post="/scene/{{ scene_id }}/insight"
+                hx-target="#insight-panel"
+                hx-swap="outerHTML"
+                hx-indicator="#insight-spinner">
+          ✨ Regenerate
+        </button>
+      </div>
+      <span id="insight-spinner" class="muted htmx-indicator" style="font-size: 12px;">regenerating…</span>
+
+      {% if ins %}
+        <div class="row" style="margin-top: 10px;">
+          {% if ins.setting %}<span class="chip">setting · {{ ins.setting }}</span>{% endif %}
+          {% if ins.location_hint and ins.location_hint != 'none' %}<span class="chip">loc · {{ ins.location_hint }}</span>{% endif %}
+          {% if ins.mood %}<span class="chip">mood · {{ ins.mood }}</span>{% endif %}
+        </div>
+        {% if ins.notable_features %}
+          <div style="margin-top: 8px;">
+            {% for f in ins.notable_features %}<span class="chip">{{ f }}</span>{% endfor %}
+          </div>
+        {% endif %}
+        {% if ins.action_summary %}
+          <div class="muted" style="margin-top: 10px; font-size: 13px;">{{ ins.action_summary }}</div>
+        {% endif %}
+      {% else %}
+        <div class="muted" style="margin-top: 10px; font-size: 13px;">No vision insight (AI offline).</div>
+      {% endif %}
+
+      {% if insight.position_summary %}
+        <div style="margin-top: 12px;">
+          <div class="muted" style="font-size: 11px; letter-spacing: 0.04em;">POSITION ROLLUP</div>
+          <div style="margin-top: 4px;">
+            {% for k, v in insight.position_summary.items() %}
+              <span class="chip">{{ k }} × {{ v }}</span>
+            {% endfor %}
+          </div>
+        </div>
+      {% endif %}
+
+      {% if insight.folder_context and insight.folder_context.is_generic_filename %}
+        <div class="pill warn" style="margin-top: 10px;">
+          generic filename — pulled from {{ insight.folder_context.source_folder or 'parent folder' }}
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="card" style="margin-top: 12px;">
+      <h3 class="card-section-title">AI title suggestions</h3>
+      {% if insight.ai_titles %}
+        <div class="stack">
+          {% for t in insight.ai_titles %}
+            <label class="row" style="gap: 10px; align-items: flex-start;">
+              <input type="radio" name="title" value="{{ t.text }}" form="review-form" />
+              <div style="flex: 1;">
+                <div style="font-size: 14px;">{{ t.text }}</div>
+                <div class="muted" style="font-size: 11px;">
+                  {{ t.style or "—" }} · {{ t.char_count }}c
+                  {% if t.warnings %} · <span class="warn">{{ t.warnings | join("; ") }}</span>{% endif %}
+                </div>
+              </div>
+            </label>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="muted">No titles generated.</div>
+      {% endif %}
+    </div>
+
+    {% if insight.long_description %}
+      <div class="card" style="margin-top: 12px;">
+        <h3 class="card-section-title">Long description</h3>
+        <div style="font-size: 13px; line-height: 1.55;">{{ insight.long_description }}</div>
+        <textarea form="review-form" name="long_description" rows="3" style="margin-top: 10px; width: 100%;">{{ insight.long_description }}</textarea>
+      </div>
+    {% endif %}
+  {% endif %}
+</div>

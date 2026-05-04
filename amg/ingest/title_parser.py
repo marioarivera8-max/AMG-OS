@@ -52,36 +52,79 @@ def parse_title(video_path: Path) -> dict:
     """
     Parse video path/filename to extract title metadata.
 
+    Backwards-compatible wrapper. Internally now resolves a FolderContext
+    (walking up ancestors when the immediate filename is generic) and delegates
+    to ``parse_title_with_context``.
+    """
+    from amg.ingest.folder_context import resolve_folder_context
+
+    ctx = resolve_folder_context(video_path)
+    return parse_title_with_context(video_path, ctx)
+
+
+def parse_title_with_context(video_path: Path, ctx) -> dict:
+    """
+    Parse title metadata using a pre-resolved FolderContext.
+
+    The context lets us recover useful information when the scene file itself
+    has a generic recorder filename (e.g. "Screen Recording 2025-10-24..."),
+    by reading metadata from ancestor folders, JSON manifests, and walked-up
+    folder names.
+
     Returns:
         {
-            'raw_text': '<filename and folder concatenated>',
-            'description': '<extracted description portion>',
+            'raw_text': '<concatenated text scanned for genres>',
+            'description': '<best-effort scene description>',
             'detected_genres': [...],
             'is_custom': bool,
             'is_vr': bool,
+            'is_generic_filename': bool,
+            'context_source': '<absolute path of source folder>' or None,
+            'metadata_title': <title from metadata JSON, if any>,
         }
     """
-    # Combine folder name + filename for max context
-    folder_name = video_path.parent.name
-    filename = video_path.stem
-    raw_text = f"{folder_name} | {filename}"
+    from amg.ingest.folder_context import best_text_for_parsing
 
-    # Try to extract description after performer code (if present)
-    # Pattern: "27 BBGG - couple swap with jimmy and tabatha"
-    desc_match = re.match(r'^\s*\d+\s+[BG]{2,12}\s+-\s*(.+)$', folder_name)
-    if desc_match:
-        description = desc_match.group(1).strip()
-    else:
-        description = folder_name
+    # Order: deepest ancestor first → bubble up. Folder names that contain a
+    # performer code carry the description after the code.
+    description = None
+    folder_with_desc = None
+    code_re = re.compile(r'^\s*\d+\s+[BG]{1,12}\s+-\s*(.+)$')
+    for name in ctx.ancestor_names:
+        m = code_re.match(name)
+        if m:
+            description = m.group(1).strip()
+            folder_with_desc = name
+            break
 
+    # If no folder had an embedded description, prefer metadata.json description,
+    # then folder name, then filename.
+    if not description:
+        description = (
+            ctx.description
+            or ctx.title
+            or (ctx.ancestor_names[0] if ctx.ancestor_names else "")
+            or (video_path.stem if not ctx.is_generic_filename else "")
+        )
+
+    raw_text = best_text_for_parsing(ctx)
     detected = detect_genres(raw_text)
+    # Add user-supplied tags from the metadata JSON, mapped through the same
+    # genre detector so we keep the canonical tag vocabulary.
+    if ctx.tags:
+        for extra in detect_genres(" ".join(ctx.tags)):
+            if extra not in detected:
+                detected.append(extra)
 
     return {
         "raw_text": raw_text,
-        "description": description,
+        "description": description or "",
         "detected_genres": detected,
         "is_custom": "CUSTOM" in detected,
         "is_vr": "VR" in detected,
+        "is_generic_filename": ctx.is_generic_filename,
+        "context_source": str(ctx.source_folder) if ctx.source_folder else None,
+        "metadata_title": ctx.title,
     }
 
 

@@ -109,6 +109,31 @@ stone toward the quota-fill rebuild.
   practice — locks behavior on visually-uniform scenes (BG bath),
   works fine on visually-varied scenes (BGG threesome).
 
+## Planned next (not started — add when ready)
+
+- **Safe mode (memory-aware):** When Activity Monitor shows high swap /
+  yellow memory pressure, auto-reduce `OLLAMA_NUM_PARALLEL` and AMG’s
+  vision worker count to match (e.g. 4→2), optionally raise
+  `OLLAMA_KEEP_ALIVE` tradeoffs only after tuning. Goal: fewer tail
+  stalls, not higher peak GPU %.
+
+- **Scoring / framing vNext (POV + shot grammar):** Separate **camera
+  framing** (POV / traditional third-person / JOI / mixed) from **act
+  type** (oral, penetration, tease, finish). Explicit bonuses for
+  **oral close-ups** (toy/penis in frame + faces), **dual subject +
+  lens awareness** (poster-style without requiring strict “eye contact”
+  if composition reads as intentional), and **non-blurry action beats**
+  (e.g. spit / fluid moments). Revisit **hard cover cap vs soft cap**
+  when many frames cluster ≥8.0 — keep floor for minimum deliverables,
+  allow optional “overflow bucket” for operator review. Calibrate on
+  uploaded reference run `20260504_173558_2025-05-16_16.33.49` (good:
+  shot 1 ~8.5 dual pose; shot 4 ~9.5 spit beat without eye-contact
+  requirement).
+
+- **UI / jobs:** If `POST /jobs` returns 400 while a run still proceeds,
+  treat as duplicate or empty submit (HTMX); add client-side debounce or
+  clearer error surface when no files attached.
+
 ## Archive location
 
 ~/AMG_archive_20260504/ also on external drive.

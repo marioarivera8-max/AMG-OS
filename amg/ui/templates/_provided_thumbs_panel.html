@@ -1,0 +1,50 @@
+{% if provided_thumb_report %}
+  <div class="card">
+    <h3 class="card-section-title">
+      Creator-provided thumbnails
+      <span class="muted">AI graded</span>
+    </h3>
+    <div class="row" style="margin-bottom: 8px;">
+      <span class="chip">discovered {{ provided_thumb_report.discovered or 0 }}</span>
+      <span class="chip">scanned {{ provided_thumb_report.scanned or 0 }}</span>
+      <span class="chip">accepted {{ provided_thumb_report.accepted or 0 }}</span>
+      <span class="chip">imported {{ provided_thumb_report.imported or 0 }}</span>
+      <span class="chip">rejected {{ provided_thumb_report.rejected or 0 }}</span>
+    </div>
+
+    {% if provided_thumb_report.accepted_rows %}
+      <div class="muted" style="font-size: 12px; margin-bottom: 6px;">Accepted by AI</div>
+      <div class="stack" style="gap: 6px;">
+        {% for r in provided_thumb_report.accepted_rows[:8] %}
+          <div class="between" style="font-size: 12px; padding: 6px 0; border-bottom: 1px solid var(--line-soft);">
+            <span style="max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ r.filename }}">{{ r.filename }}</span>
+            <span class="pill ok">score {{ "%.1f"|format((r.score or 0)|float) }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="muted" style="font-size: 12px;">No provided thumbnails were accepted.</div>
+    {% endif %}
+
+    <details style="margin-top: 10px;">
+      <summary class="muted" style="cursor: pointer; font-size: 12px;">Advanced: rejected thumbnails</summary>
+      {% if provided_thumb_report.rejected_rows %}
+        <div class="stack" style="margin-top: 8px; gap: 6px;">
+          {% for r in provided_thumb_report.rejected_rows %}
+            <div class="card card-tight" style="font-size: 12px; margin: 0;">
+              <div class="between">
+                <span style="max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ r.filename }}">{{ r.filename }}</span>
+                {% if r.score is not none %}
+                  <span class="pill">{{ "%.1f"|format((r.score or 0)|float) }}</span>
+                {% endif %}
+              </div>
+              <div class="muted mono" style="font-size: 11px; margin-top: 4px;">reason={{ r.reason or "UNKNOWN" }}</div>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="muted" style="margin-top: 8px; font-size: 12px;">No rejected thumbnails in this run.</div>
+      {% endif %}
+    </details>
+  </div>
+{% endif %}

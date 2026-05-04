@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Callable
 import numpy as np
 
-from amg.config import AI_PARALLEL_WORKERS
+from amg.config import AI_PARALLEL_WORKERS, SCORE_TIER_3_SUCCESS_FLOOR
 from amg.scoring.ai_client import AIClient, AIResponse
 from amg.scoring.parser import parse_ai_response, ScoredFrame
 from amg.utils.logging import get_logger
@@ -132,7 +132,10 @@ def score_frames_parallel(
     return results
 
 
-def count_successes(scored_frames: List[dict], min_score: float = 5.0) -> int:
+def count_successes(
+    scored_frames: List[dict],
+    min_score: float = SCORE_TIER_3_SUCCESS_FLOOR,
+) -> int:
     """Count frames that successfully parsed AND scored above threshold."""
     return sum(
         1 for f in scored_frames

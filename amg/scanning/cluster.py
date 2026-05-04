@@ -4,17 +4,17 @@ Adaptive cluster expansion.
 When we find a high-scoring frame, mine the surrounding seconds since
 excellence clusters in time.
 
-Window scaling (from spec § XVII.A):
-    5.0 - 7.9: ±2s at 1s intervals  (4 samples)
-    8.0 - 8.9: ±5s at 1s intervals  (10 samples)
-    9.0 - 9.9: ±15s at 3s intervals (10 samples)
-    10.0:      ±30s at 5s intervals (12 samples)
+Window scaling (score on 0–100 scale, see CLUSTER_WINDOWS in config):
+    50–79: narrow window
+    80–89: medium window
+    90–99: wide window
+    100:   widest window
 """
 import time
 from pathlib import Path
 from typing import List, Optional
 
-from amg.config import get_cluster_window, CLUSTER_HUNTER_TOP_N
+from amg.config import get_cluster_window, CLUSTER_HUNTER_TOP_N, SCORE_TIER_3_SUCCESS_FLOOR
 from amg.video.reader import VideoReader
 from amg.video.frames import measure_sharpness, is_frame_too_dark
 from amg.video.dedup import deduplicate_frames
@@ -73,7 +73,7 @@ def expand_clusters(
     dropped_for_overlap = 0
     for seed in sorted_seeds:
         scored = seed.get("scored_frame")
-        if not scored or scored.score < 5.0:
+        if not scored or scored.score < SCORE_TIER_3_SUCCESS_FLOOR:
             continue
         seed_ts = seed["timestamp_sec"]
         window_sec, _ = get_cluster_window(scored.score)

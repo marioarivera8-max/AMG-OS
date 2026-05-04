@@ -13,6 +13,13 @@ class TestBuildScoringPrompt:
         assert "TIER B" in prompt
         assert "DB1" in prompt
         assert "OUTPUT FORMAT" in prompt
+        assert "PENETRATION_VISIBLE" in prompt
+        assert "PENETRATION_CONFIDENCE" in prompt
+        assert "ACTION_EVIDENCE" in prompt
+        assert "RETAIL_BASE" in prompt
+        assert "100.0" in prompt
+        assert "TIER_D_PRESENT" in prompt
+        assert "B10" in prompt
 
     def test_with_scene_type(self):
         prompt = build_scoring_prompt(primary_scene_type="GANGBANG", performer_count=5)
@@ -33,8 +40,10 @@ class TestBuildScoringPrompt:
     def test_simplified_prompt(self):
         prompt = build_simplified_prompt()
         assert "SCORE:" in prompt
+        assert "100.0" in prompt
         assert "TYPE:" in prompt
         assert "GAZE:" in prompt
+        assert "PENETRATION_VISIBLE:" in prompt
         # Should be much shorter than full prompt
         full = build_scoring_prompt()
         assert len(prompt) < len(full) / 2
@@ -47,16 +56,22 @@ class TestParseAiResponse:
         TIER_A_PASS: yes
         TIER_B_PRESENT: B1,B3,B6
         TIER_C_PRESENT: C1
-        SCORE: 8.5
+        TIER_D_PRESENT: NONE
+        SCORE: 84.5
         TYPE: SEX_ACT
         GAZE: SINGLE
         AESTHETIC: PROFESSIONAL
+        PENETRATION_VISIBLE: no
+        PENETRATION_CONFIDENCE: 0.13
+        ACTION_EVIDENCE: POSE_NO_CONTACT
         END
         """
         result = parse_ai_response(text)
         assert result.parse_succeeded
         assert result.tier_a_pass
-        assert result.score == 8.5
+        # Deterministic recompute wins: 34 + (10+16+10) + 5 = 75
+        assert result.score == 75.0
+        assert result.model_score_raw == 84.5
         assert "B1" in result.tier_b_present
         assert "B3" in result.tier_b_present
         assert "B6" in result.tier_b_present
@@ -64,6 +79,9 @@ class TestParseAiResponse:
         assert result.type_ == "SEX_ACT"
         assert result.gaze == "SINGLE"
         assert result.aesthetic == "PROFESSIONAL"
+        assert result.penetration_visible is False
+        assert result.penetration_confidence == 0.13
+        assert result.action_evidence == "POSE_NO_CONTACT"
 
     def test_tier_a_fail(self):
         text = """
@@ -79,22 +97,22 @@ class TestParseAiResponse:
 
     def test_simplified_response(self):
         text = """
-        SCORE: 6.0
+        SCORE: 62.0
         TYPE: NUDE
         GAZE: AVERTED
         END
         """
         result = parse_ai_response(text)
         assert result.parse_succeeded
-        assert result.score == 6.0
+        assert result.score == 62.0
         assert result.type_ == "NUDE"
         assert result.gaze == "AVERTED"
 
     def test_score_clamped(self):
-        # Score above 10 should be clamped
-        text = "SCORE: 15.0\nTYPE: SEX_ACT\nEND"
+        # Score above SCORE_MAX should be clamped
+        text = "SCORE: 150.0\nTYPE: SEX_ACT\nEND"
         result = parse_ai_response(text)
-        assert result.score == 10.0
+        assert result.score == 100.0
 
     def test_negative_score_clamped(self):
         text = "SCORE: -2.0\nTYPE: NUDE\nEND"
@@ -113,7 +131,7 @@ class TestParseAiResponse:
     def test_score_with_extra_text(self):
         text = """
         Looking at this image, I see:
-        SCORE: 7.5
+        SCORE: 76.5
         TYPE: PENETRATION
         GAZE: SINGLE
         END
@@ -121,16 +139,45 @@ class TestParseAiResponse:
         """
         result = parse_ai_response(text)
         assert result.parse_succeeded
-        assert result.score == 7.5
+        assert result.score == 76.5
+        assert result.model_score_raw == 76.5
+        assert result.penetration_visible is True
+        assert result.penetration_confidence >= 0.5
 
     def test_lowercase_field_names(self):
         text = """
-        score: 5.5
+        score: 55.5
         type: nude
         gaze: direct
+        penetration_visible: no
+        penetration_confidence: 0.2
+        action_evidence: occluded
         end
         """
         result = parse_ai_response(text)
         assert result.parse_succeeded
-        assert result.score == 5.5
+        assert result.score == 55.5
         assert result.type_ == "NUDE"
+        assert result.penetration_visible is False
+        assert result.penetration_confidence == 0.2
+        assert result.action_evidence == "OCCLUDED"
+
+    def test_deterministic_penalty_applied(self):
+        text = """
+        TIER_A_PASS: yes
+        TIER_B_PRESENT: B1,B9,B13
+        TIER_C_PRESENT: C1,C4
+        TIER_D_PRESENT: D1,D3
+        SCORE: 99.0
+        TYPE: SEX_ACT
+        GAZE: DUAL
+        AESTHETIC: PROFESSIONAL
+        PENETRATION_VISIBLE: no
+        PENETRATION_CONFIDENCE: 0.30
+        ACTION_EVIDENCE: ORAL_CONTACT
+        END
+        """
+        result = parse_ai_response(text)
+        # 34 + (10+12+14) + (5+4) - (8+7) = 64
+        assert result.score == 64.0
+        assert result.model_score_raw == 99.0

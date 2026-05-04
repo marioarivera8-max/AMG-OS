@@ -1,8 +1,16 @@
 """AMG OS version."""
-__version__ = "11.1.4"
-__version_info__ = (11, 1, 4)
+__version__ = "11.1.5"
+__version_info__ = (11, 1, 5)
 __release_date__ = "2026-05-04"
 
+# v11.1.5 changelog (0–100 scoring scale + wider rubric spread):
+# - Vision cover scores use 0–100 (was 0–10): config thresholds ×10,
+#   cluster windows, position-classifier floor, provided-thumb import floor,
+#   fallback A band, decision-log score buckets, CV fallback D synthetic scores.
+# - Full scoring prompt: RETAIL_BASE + integer B/C points, explicit calibration
+#   bands to reduce "everything is 8.5" compression; simplified / fallback-C
+#   prompt uses holistic 0–100 anchors.
+#
 # v11.1.4 changelog (cluster cap — single-issue patch over v11.1.3):
 # - Cap cluster phase AI scoring at CLUSTER_HUNTER_TOP_N=30 by sharpness desc.
 #   v11.1.3's PyAV decode removed the implicit time-deadline cap that used to

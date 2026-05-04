@@ -7,29 +7,56 @@
     hx-swap="outerHTML"
   {% endif %}
 >
-  <div class="row" style="justify-content: space-between;">
-    <div>
-      <strong>{{ job.scene_id }}</strong>
-      <span class="pill">job {{ job.job_id }}</span>
+  <div class="between">
+    <div style="display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1;">
+      <strong style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ job.scene_id or "(resolving…)" }}</strong>
+      <span class="pill" title="job id">{{ job.job_id }}</span>
+      {% if job.source_mode %}<span class="pill">src: {{ job.source_mode }}</span>{% endif %}
     </div>
     <div>
       {% if job.status == "done" %}
-        <span class="ok">DONE</span>
+        <span class="pill ok">DONE</span>
       {% elif job.status == "error" %}
-        <span class="err">ERROR</span>
+        <span class="pill err">ERROR</span>
       {% elif job.status == "running" %}
-        <span class="warn">RUNNING</span>
+        <span class="pill info"><span class="dot ok"></span>RUNNING</span>
       {% else %}
-        <span class="muted">QUEUED</span>
+        <span class="pill">QUEUED</span>
       {% endif %}
     </div>
   </div>
-  <div class="muted" style="margin-top: 6px;">{{ job.video_path }}</div>
-  <div style="margin-top: 8px;">{{ job.message }}</div>
-  {% if job.status == "done" and job.scene_id %}
-    <div style="margin-top: 8px;">
-      <a href="/scene/{{ job.scene_id }}">Open review for {{ job.scene_id }}</a>
+
+  <div class="muted mono" style="margin-top: 6px; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ job.video_path }}</div>
+
+  {% if job.progress_pct is defined and job.status in ["running", "done"] %}
+    <div class="progress" style="margin-top: 12px;">
+      <div class="bar" style="width: {{ job.progress_pct }}%;"></div>
     </div>
   {% endif %}
-</div>
 
+  {% if job.phases %}
+    <div class="phase-row" style="margin-top: 10px;">
+      {% for ph in job.phases %}
+        <span class="phase {{ ph.cls }}">{{ ph.label }}{% if ph.cls == 'done' %} ✓{% endif %}</span>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <div style="margin-top: 10px; font-size: 13px;">{{ job.message }}</div>
+
+  {% if job.log_tail %}
+    <pre class="log" style="margin-top: 10px;">{% for ln in job.log_tail %}{{ ln }}
+{% endfor %}</pre>
+  {% endif %}
+
+  <div class="between" style="margin-top: 10px; font-size: 11px; color: var(--muted-2);">
+    <div>
+      {% if job.elapsed_str %}elapsed {{ job.elapsed_str }}{% endif %}
+      {% if job.eta_str %} · ETA {{ job.eta_str }}{% endif %}
+      {% if job.realtime_pct is defined and job.realtime_pct is not none %} · {{ job.realtime_pct }}% of real-time{% endif %}
+    </div>
+    {% if job.status == "done" and job.scene_id %}
+      <a href="/scene/{{ job.scene_id }}">Review covers →</a>
+    {% endif %}
+  </div>
+</div>

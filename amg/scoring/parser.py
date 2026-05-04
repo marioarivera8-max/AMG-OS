@@ -12,21 +12,22 @@ Tier A pass:
     TIER_A_PASS: yes
     TIER_B_PRESENT: B1,B3,B6
     TIER_C_PRESENT: C1
-    SCORE: 7.5
+    TIER_D_PRESENT: D2
+    SCORE: 75.0
     TYPE: SEX_ACT
     GAZE: DIRECT
     AESTHETIC: PROFESSIONAL
     END
 
 Simplified (Fallback C):
-    SCORE: 6.0
+    SCORE: 62.0
     TYPE: NUDE
     GAZE: DIRECT
     END
 """
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from amg.config import SCORE_MAX
 
@@ -40,12 +41,17 @@ class ScoredFrame:
 
     tier_b_present: List[str] = field(default_factory=list)
     tier_c_present: List[str] = field(default_factory=list)
+    tier_d_present: List[str] = field(default_factory=list)
 
     type_: str = "UNKNOWN"          # NUDE/SEX_ACT/PENETRATION/BUILDUP/FINISH/COMPOSITION
     gaze: str = "UNKNOWN"           # SINGLE/DUAL/TRIPLE/AVERTED/CLOSED/REAR (v11.1)
     aesthetic: str = "STANDARD"     # PROFESSIONAL/STANDARD/AMATEUR
+    penetration_visible: bool = False
+    penetration_confidence: float = 0.0
+    action_evidence: str = "NONE"
 
     parse_succeeded: bool = False
+    model_score_raw: Optional[float] = None
     raw_response: str = ""
 
 
@@ -55,10 +61,45 @@ _RE_TIER_A_FAIL = re.compile(r'TIER_A_FAIL:\s*(DB\d)', re.IGNORECASE)
 _RE_TIER_A_PASS = re.compile(r'TIER_A_PASS:\s*(yes|no|true|false)', re.IGNORECASE)
 _RE_TIER_B = re.compile(r'TIER_B_PRESENT:\s*([B0-9,\s]*)', re.IGNORECASE)
 _RE_TIER_C = re.compile(r'TIER_C_PRESENT:\s*([C0-9,\s]*)', re.IGNORECASE)
+_RE_TIER_D = re.compile(r'TIER_D_PRESENT:\s*([D0-9,\s]*)', re.IGNORECASE)
 _RE_SCORE = re.compile(r'SCORE:\s*(-?\d+\.?\d*)', re.IGNORECASE)
 _RE_TYPE = re.compile(r'TYPE:\s*([A-Z_]+)', re.IGNORECASE)
 _RE_GAZE = re.compile(r'GAZE:\s*([A-Z]+)', re.IGNORECASE)
 _RE_AESTHETIC = re.compile(r'AESTHETIC:\s*([A-Z]+)', re.IGNORECASE)
+_RE_PEN_VISIBLE = re.compile(r'PENETRATION_VISIBLE:\s*(yes|no|true|false)', re.IGNORECASE)
+_RE_PEN_CONF = re.compile(r'PENETRATION_CONFIDENCE:\s*(-?\d+\.?\d*)', re.IGNORECASE)
+_RE_ACTION_EVIDENCE = re.compile(r'ACTION_EVIDENCE:\s*([A-Z0-9_,\- ]+)', re.IGNORECASE)
+
+_RETAIL_BASE = 34.0
+_TIER_B_WEIGHTS: Dict[str, float] = {
+    "B1": 10.0,
+    "B2": 6.0,
+    "B3": 16.0,
+    "B4": 10.0,
+    "B5": 6.0,
+    "B6": 10.0,
+    "B7": 16.0,
+    "B8": 7.0,
+    "B9": 12.0,   # Oral close-up (mouth contact + face clarity)
+    "B10": 10.0,  # Dual lens-aware composition
+    "B11": 8.0,   # Aggressive / intense action beat
+    "B12": 12.0,  # Climax anticipation/release cue
+    "B13": 14.0,  # Bodily fluid prominently visible
+}
+_TIER_C_WEIGHTS: Dict[str, float] = {
+    "C1": 5.0,
+    "C2": 5.0,
+    "C3": 3.0,
+    "C4": 4.0,   # Strong close-up framing quality
+    "C5": 4.0,   # Retail readability at thumbnail size
+}
+_TIER_D_PENALTIES: Dict[str, float] = {
+    "D1": 8.0,   # Mild blur / motion softness
+    "D2": 6.0,   # Awkward crop / cut-off subject
+    "D3": 7.0,   # Face occlusion harms cover value
+    "D4": 5.0,   # Distracting clutter / background noise
+    "D5": 6.0,   # Ambiguous action read despite nudity
+}
 
 
 def parse_ai_response(raw_text: str) -> ScoredFrame:
@@ -88,12 +129,13 @@ def parse_ai_response(raw_text: str) -> ScoredFrame:
         val = pass_match.group(1).lower()
         result.tier_a_pass = val in ("yes", "true")
 
-    # Score (most important — required for parse_succeeded)
+    # Model-declared score (kept for diagnostics; may be overridden by deterministic recompute)
     score_match = _RE_SCORE.search(raw_text)
     if score_match:
         try:
             score = float(score_match.group(1))
-            result.score = max(0.0, min(SCORE_MAX, score))
+            result.model_score_raw = max(0.0, min(SCORE_MAX, score))
+            result.score = result.model_score_raw
             result.parse_succeeded = True
         except ValueError:
             pass
@@ -112,6 +154,12 @@ def parse_ai_response(raw_text: str) -> ScoredFrame:
         if codes:
             result.tier_c_present = _split_codes(codes)
 
+    d_match = _RE_TIER_D.search(raw_text)
+    if d_match:
+        codes = d_match.group(1).strip()
+        if codes:
+            result.tier_d_present = _split_codes(codes)
+
     # Type
     type_match = _RE_TYPE.search(raw_text)
     if type_match:
@@ -127,6 +175,40 @@ def parse_ai_response(raw_text: str) -> ScoredFrame:
     if aesthetic_match:
         result.aesthetic = aesthetic_match.group(1).upper()
 
+    # Penetration visibility
+    pen_visible_match = _RE_PEN_VISIBLE.search(raw_text)
+    if pen_visible_match:
+        v = pen_visible_match.group(1).lower()
+        result.penetration_visible = v in ("yes", "true")
+
+    pen_conf_match = _RE_PEN_CONF.search(raw_text)
+    if pen_conf_match:
+        try:
+            conf = float(pen_conf_match.group(1))
+            result.penetration_confidence = max(0.0, min(1.0, conf))
+        except ValueError:
+            pass
+
+    evidence_match = _RE_ACTION_EVIDENCE.search(raw_text)
+    if evidence_match:
+        result.action_evidence = evidence_match.group(1).strip().upper()
+
+    # Backward compatibility: older prompts may emit TYPE=PENETRATION without
+    # the explicit penetration fields. In that case, infer visible=true with
+    # low confidence so downstream gates still have a signal.
+    if result.type_ == "PENETRATION" and pen_visible_match is None:
+        result.penetration_visible = True
+        if result.penetration_confidence == 0.0:
+            result.penetration_confidence = 0.51
+        if result.action_evidence == "NONE":
+            result.action_evidence = "EXPLICIT_PENETRATION"
+
+    # Deterministic recompute from explicit criteria (preferred path).
+    deterministic = _compute_deterministic_score(result)
+    if deterministic is not None:
+        result.score = deterministic
+        result.parse_succeeded = True
+
     # Final inference: if we got score but no tier_a_pass marker,
     # assume pass (score > 0 implies passed Tier A)
     if result.parse_succeeded and result.score > 0 and not result.tier_a_fail_code:
@@ -139,3 +221,26 @@ def _split_codes(s: str) -> List[str]:
     """Parse 'B1,B3,B6' style strings into list."""
     parts = re.split(r'[,\s]+', s.strip())
     return [p.upper() for p in parts if p.strip()]
+
+
+def _compute_deterministic_score(result: ScoredFrame) -> Optional[float]:
+    """
+    Compute final score from criteria codes.
+
+    This avoids score compression by making ranking numeric from explicit
+    evidence codes rather than trusting a single free-form SCORE value.
+    """
+    if result.tier_a_fail_code:
+        return 0.0
+    if not result.tier_a_pass:
+        return None
+
+    has_criteria = bool(result.tier_b_present or result.tier_c_present or result.tier_d_present)
+    if not has_criteria:
+        return None
+
+    b_total = sum(_TIER_B_WEIGHTS.get(code, 0.0) for code in set(result.tier_b_present))
+    c_total = sum(_TIER_C_WEIGHTS.get(code, 0.0) for code in set(result.tier_c_present))
+    d_total = sum(_TIER_D_PENALTIES.get(code, 0.0) for code in set(result.tier_d_present))
+    score = _RETAIL_BASE + b_total + c_total - d_total
+    return max(0.0, min(SCORE_MAX, score))

@@ -1,14 +1,14 @@
 """
 Floor enforcement cascade.
 
-Per user directive: NEVER fewer than 10 covers per scene.
+Per user directive: never fewer than COVER_FLOOR covers per scene.
 
-When the main pipeline plus cluster expansion delivers < 10 candidates,
+When the main pipeline plus cluster expansion delivers too few candidates,
 this module runs progressive fallbacks until the floor is met or all
 options are exhausted.
 
 Cascade (from spec § VII):
-    Fallback A: Lower threshold to 3.0, take next-best from existing
+    Fallback A: rescue band SCORE_FALLBACK_A_LOW..HIGH from already-scored pile
     Fallback B: Wider cluster expansion (already-seen timestamps re-evaluated)
     Fallback C: 30 random-distributed frames, simplified prompt
     Fallback D: Pure CV heuristics (top N by sharpness + skin dominance + face count)
@@ -22,6 +22,9 @@ from amg.config import (
     COVER_FLOOR,
     FALLBACK_C_SAMPLE_COUNT,
     FALLBACK_D_TOP_N,
+    SCORE_FALLBACK_A_LOW,
+    SCORE_FALLBACK_A_HIGH,
+    SCORE_MAX,
 )
 from amg.video.reader import VideoReader
 from amg.video.frames import measure_sharpness, is_frame_too_dark
@@ -76,7 +79,7 @@ def run_floor_enforcement_cascade(
 
     # === FALLBACK A: lower the bar on existing scored frames ===
     log.info("Floor not met, running Fallback A", current=len(candidates), target=target_count)
-    a_added = _fallback_a(all_scored, exclude=candidates, threshold=3.0)
+    a_added = _fallback_a(all_scored, exclude=candidates)
     candidates.extend(a_added)
     if a_added:
         fallbacks_used.append("A")
@@ -151,8 +154,8 @@ def run_floor_enforcement_cascade(
     }
 
 
-def _fallback_a(all_scored: List[dict], exclude: List[dict], threshold: float) -> List[dict]:
-    """Take frames that scored 3.0-5.0 from already-scored pile."""
+def _fallback_a(all_scored: List[dict], exclude: List[dict]) -> List[dict]:
+    """Take frames in the low rescue band from the already-scored pile."""
     excluded_ts = {c["timestamp_sec"] for c in exclude}
     rescued = []
     for f in all_scored:
@@ -162,7 +165,7 @@ def _fallback_a(all_scored: List[dict], exclude: List[dict], threshold: float) -
         scored = f.get("scored_frame")
         if not scored or not scored.parse_succeeded:
             continue
-        if threshold <= scored.score < 5.0:
+        if SCORE_FALLBACK_A_LOW <= scored.score < SCORE_FALLBACK_A_HIGH:
             rescued.append(f)
     rescued.sort(key=lambda x: x["scored_frame"].score, reverse=True)
     return rescued
@@ -252,11 +255,12 @@ def _fallback_d(
             faces = detect_faces_in_frame(frame)
             face_count = len(faces)
 
-            # Composite CV score (0-10 scale):
-            # Sharpness contributes 0-4 (normalized at 800)
-            # Skin dominance contributes 0-4 (skin is signal of nudity)
-            # Face presence contributes 0-2
-            cv_score = min(4, sharp / 200) + min(4, skin * 8) + min(2, face_count * 1.5)
+            # Composite CV score (0–100 scale, heuristic only — matches AI scale loosely)
+            # Sharpness contributes 0-40 (normalized at 800)
+            # Skin dominance contributes 0-40 (skin is signal of nudity)
+            # Face presence contributes 0-20
+            raw = min(4, sharp / 200) + min(4, skin * 8) + min(2, face_count * 1.5)
+            cv_score = min(SCORE_MAX, 10.0 * raw)
 
             # Build a synthetic ScoredFrame for downstream uniformity
             synthetic = ScoredFrame(

@@ -113,28 +113,32 @@ DEDUP_HASH_SIZE = 8           # 64-bit hash
 DEDUP_HAMMING_THRESHOLD = 5   # Industry standard for "near duplicate"
 
 # ============================================================
-# TIER A/B/C SCORING (LOCKED FROM v10.3)
+# TIER A/B/C SCORING (0–100 scale, v11.1.5+)
 # ============================================================
-# Score thresholds
-SCORE_TIER_1_SUCCESS_FLOOR = 8.0   # Tier 1 needs 3+ frames at this
-SCORE_TIER_2_SUCCESS_FLOOR = 7.0
-SCORE_TIER_3_SUCCESS_FLOOR = 5.0
+# Score thresholds (same semantics as former 8/7/5 on 0–10 scale ×10)
+SCORE_TIER_1_SUCCESS_FLOOR = 80.0   # Tier 1 needs 3+ frames at this
+SCORE_TIER_2_SUCCESS_FLOOR = 70.0
+SCORE_TIER_3_SUCCESS_FLOOR = 50.0
 
 # Minimum candidates per tier to declare success
 MIN_CANDIDATES_PER_TIER = 3
 
-# Score cap
-SCORE_MAX = 10.0
+# Score cap (vision model output SCORE line, 0–100)
+SCORE_MAX = 100.0
+
+# Fallback A: rescue band from already-scored frames (was 3.0–5.0 on 0–10)
+SCORE_FALLBACK_A_LOW = 30.0
+SCORE_FALLBACK_A_HIGH = 50.0
 
 # ============================================================
 # CLUSTER EXPANSION (Score-Triggered)
 # ============================================================
 # Format: (min_score, max_score, window_seconds, interval_seconds)
 CLUSTER_WINDOWS = [
-    (5.0, 7.99, 3, 1),       # ±3s at 1s intervals = 6 samples
-    (8.0, 8.99, 7, 1),       # ±7s at 1s intervals = 14 samples
-    (9.0, 9.99, 20, 3),      # ±20s at 3s intervals = 14 samples
-    (10.0, 10.0, 40, 5),     # ±40s at 5s intervals = 16 samples
+    (50.0, 79.99, 3, 1),       # ±3s at 1s intervals = 6 samples
+    (80.0, 89.99, 7, 1),       # ±7s at 1s intervals = 14 samples
+    (90.0, 99.99, 20, 3),      # ±20s at 3s intervals = 14 samples
+    (100.0, 100.0, 40, 5),     # ±40s at 5s intervals = 16 samples
 ]
 
 # v11.1.4: cap on AI scoring count for cluster phase. Mirrors the
@@ -167,7 +171,10 @@ QUOTA_MIN_GAP_SEC = 20.0
 
 # Position classifier: classify only top candidates to avoid extra AI load.
 POSITION_CLASSIFIER_MAX_CANDIDATES = 40
-POSITION_CLASSIFIER_MIN_SCORE = 6.0
+POSITION_CLASSIFIER_MIN_SCORE = 60.0
+POSITION_CLASSIFIER_MIN_PEN_CONF = 0.60
+POSITION_CLASSIFIER_MIN_LABEL_CONF = 0.60
+POSITION_CLASSIFIER_CONTEXT_WINDOW_SEC = 45.0
 POSITION_LABELS = [
     "MISSIONARY",
     "COWGIRL",
@@ -270,6 +277,13 @@ CONTACT_SHEET_HEADER_HEIGHT = 110
 CONTACT_SHEET_BG_COLOR = (15, 15, 15)
 CONTACT_SHEET_QUALITY = 92
 
+# Provided thumbnail grading/import
+# Some creators/agencies include cover candidates in the submission folder.
+# We score these with the same local vision model and import only the good ones.
+PROVIDED_THUMB_MAX_SCAN = 40
+PROVIDED_THUMB_MAX_ACCEPT = 4
+PROVIDED_THUMB_MIN_SCORE = 80.0
+
 # Filename schema
 FILENAME_SCHEMA_PATTERN = "{rank:02d}_{performer}_{code}_{type}_{gaze}_{score:.1f}_{mins}m{secs:02d}s"
 
@@ -368,7 +382,7 @@ def get_cluster_window(score):
     for min_s, max_s, window, interval in CLUSTER_WINDOWS:
         if min_s <= score <= max_s:
             return window, interval
-    # Score below 5.0 = no cluster
+    # Score below tier-3 floor = no cluster expansion
     return 0, 0
 
 # ============================================================
@@ -424,6 +438,8 @@ PERFORMER_DOCS_DIR = DATA_DIR / "performer_documents"
 # Review and distribution tracking
 REVIEWED_DIR = DATA_DIR / "reviewed"
 DISTRIBUTION_STATUS_DIR = DATA_DIR / "distribution_status"
+OPERATOR_FEEDBACK_DIR = DATA_DIR / "operator_feedback"
+OPERATOR_FEEDBACK_PATH = OPERATOR_FEEDBACK_DIR / "feedback.jsonl"
 
 # Batch summaries
 BATCH_SUMMARIES_DIR = DATA_DIR / "batch_summaries"
@@ -440,7 +456,7 @@ DVD_QUAD_LAYOUT_SIZE = (1600, 1200)  # Case art canvas
 # differential (and capitalized "RARE / EXCEPTIONALLY VALUABLE" prompt language) gave
 # it a strong incentive to mark dual when in doubt. The GAZE label is preserved in
 # output for descriptive use; only the score reward is flattened.
-SCORE_B1_EYE_CONTACT = 2.0       # Any eye contact, any performer count
+SCORE_B1_EYE_CONTACT = 20.0      # Doc-only: matches prompt B1 weight on 0–100 scale
 # Legacy aliases — kept for backwards compatibility with anything that imported them.
 # Do not use for new code; prefer SCORE_B1_EYE_CONTACT.
 SCORE_B1A_SINGLE_GAZE = SCORE_B1_EYE_CONTACT

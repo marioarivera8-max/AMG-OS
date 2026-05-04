@@ -1,23 +1,10 @@
 """
-Prompt builder — v11.1.1.
+Prompt builder — v11.1.1 eye semantics + v11.1.5 score scale.
 
-Tier A/B/C scoring. Eye-contact handling rewritten in v11.1.1 to stop
-DUAL-gaze hallucination (v11.1 had B1b/B1c at +3.5/+4.5 with caps-locked
-"RARE and EXCEPTIONALLY VALUABLE" advocacy in the prompt; qwen2.5vl
-pattern-matched that as "look hard for DUAL" and rubber-stamped it on
-most covers).
-
-v11.1.1 changes:
-  - Eye-contact bonus is uniform at +2.0 regardless of how many
-    performers the model thinks are looking at camera. Removes the
-    score incentive to over-report DUAL/TRIPLE.
-  - GAZE label (SINGLE/DUAL/TRIPLE/AVERTED/CLOSED/REAR) is kept in
-    the output schema so filenames still carry the model's judgment.
-  - Prompt text adds an explicit conservatism instruction: prefer
-    SINGLE or AVERTED unless multiple sets of eyes are clearly visible.
-  - All "RARE / EXCEPTIONALLY VALUABLE" capitalized advocacy stripped.
-
-Also v11.1 adds lesbian and reverse-gangbang scene type awareness.
+Tier A/B/C scoring on a 0–100 scale (v11.1.5): base + additive signals,
+capped at 100, with calibration text to reduce score compression in the
+80s. Eye-contact handling remains v11.1.1 (uniform B1 weight; conservative
+DUAL/TRIPLE; GAZE label for filenames only).
 """
 from typing import List, Optional
 
@@ -46,19 +33,24 @@ def build_scoring_prompt(
     # Genre-specific guidance
     genre_guidance = []
     if "DP" in genres:
-        genre_guidance.append("DP scene: both penises simultaneously visible = +3.0 (replaces B4)")
+        genre_guidance.append(
+            "DP scene: both penises simultaneously visible — award B4 points "
+            "(do not stack a generic multi-penis B4 twice; one B4 application only)."
+        )
     if "GANGBANG" in genres or primary_scene_type == "GANGBANG":
-        genre_guidance.append("GANGBANG: penis count multiplier (+0.5 per penis above 2)")
+        genre_guidance.append("GANGBANG: add +5 to SCORE per penis clearly visible above 2 (cap total SCORE at 100)")
     if primary_scene_type == "REVERSE_GANGBANG":
         genre_guidance.append("REVERSE GANGBANG: multiple females + 1 male — multi-female composition is bonus")
     if "SQUIRT" in genres:
-        genre_guidance.append("SQUIRT: active fluid + female face visible = +4.0")
+        genre_guidance.append(
+            "SQUIRT: active fluid + female face visible — award B7 when clearly present"
+        )
     if "ANAL" in genres:
         genre_guidance.append("ANAL: visible penetration in correct orifice = primary B3 signal")
     if "POV" in genres:
         genre_guidance.append("POV: female facing camera with eye contact = strong B1 signal")
     if "FACIAL" in genres or "CREAMPIE" in genres:
-        genre_guidance.append("MONEY SHOT: visible facial/creampie = +3.0 (B7)")
+        genre_guidance.append("MONEY SHOT genre: visible facial/creampie must earn B7 when applicable")
     if primary_scene_type in ("LESBIAN", "LESBIAN_THREESOME", "LESBIAN_GROUP"):
         genre_guidance.append(
             "LESBIAN: multiple females, no male performers expected. "
@@ -105,34 +97,75 @@ SCORE: 0
 END
 
 ═══════════════════════════════════════════════════════════════
-TIER B — STRONG SIGNALS (additive, none required, can stack)
+TIER B — STRONG SIGNALS (integer points, only if unambiguous)
 ═══════════════════════════════════════════════════════════════
 
-B1:  Performer eye contact with camera (any count):     +2.0
-B2:  Eye whites visible (open, any direction):          +1.5
-B3:  Visible penetration matching scene type/genre:     +3.0
-B4:  Multiple penises visible (group scenes only):      +2.0
-B5:  Female centered or dominant in composition:        +1.5
-B6:  Genuine pleasure expression on female face:        +2.0
-B7:  Money shot (visible facial/creampie/squirt):       +3.0
-B8:  Body fully nude and dominant in frame:             +1.5
+B1:  Performer eye contact with camera (any count):     +10
+B2:  Eye whites visible (open, any direction):          +6
+B3:  Visible penetration matching scene type/genre:     +16
+B4:  Multiple penises visible (group scenes only):      +10
+B5:  Female centered or dominant in composition:         +6
+B6:  Genuine pleasure expression on female face:        +10
+B7:  Money shot (visible facial/creampie/squirt):        +16
+B8:  Body fully nude and dominant in frame:              +7
+B9:  Oral close-up (mouth contact + readable face):     +12
+B10: Dual gaze at lens (exactly 2 performers):          +10
+B11: Aggressive/intense action beat is clearly visible: +8
+B12: Climax cue (release, anticipation, creampie setup):+12
+B13: Bodily fluid prominently visible (spit/cum/etc):   +14
 
 B1 applies once per frame regardless of how many performers are looking
 at the camera. The GAZE field below records the count for descriptive
-purposes only — do not stack the bonus.
+purposes only — do not stack the B1 points more than once.
 
 ═══════════════════════════════════════════════════════════════
 TIER C — AESTHETIC SIGNALS (separate the cinematic from the competent)
 ═══════════════════════════════════════════════════════════════
 
-C1: Lighting/aesthetic looks professional (not flat/flash): +1.0
-C2: Strong contrast/colors (pops as thumbnail):             +1.0
-C3: Background not distracting (composition reads cleanly): +0.5
+C1: Lighting/aesthetic looks professional (not flat/flash): +5
+C2: Strong contrast/colors (pops as thumbnail):             +5
+C3: Background not distracting (composition reads cleanly): +3
+C4: Face-forward close-up framing reads clean at thumb size:+4
+C5: Subject/action readability survives heavy downscale:    +4
 
 Tier C is what separates a competent action frame (which most
 candidates are) from a cinematic cover (which is what we want at the
 top of the rank). Be strict — apply C1 only when lighting actively
 flatters the subject, not just because the frame is exposed correctly.
+
+═══════════════════════════════════════════════════════════════
+TIER D — PENALTIES (subtract for degradations; include only when present)
+═══════════════════════════════════════════════════════════════
+
+D1: Mild blur or motion softness hurts readability:         -8
+D2: Awkward crop (cut faces/body key points):               -6
+D3: Face occlusion weakens cover utility:                   -7
+D4: Distracting clutter/noise in frame:                     -5
+D5: Ambiguous action read despite nudity:                   -6
+
+═══════════════════════════════════════════════════════════════
+SCORE FORMULA (0–100, TIER_A_PASS only)
+═══════════════════════════════════════════════════════════════
+
+RETAIL_BASE = 34 (every Tier-A-passing frame starts here — "meets minimum
+B2B thumbnail hygiene" before bonuses).
+
+SCORE = min(100, RETAIL_BASE + sum(Tier B + Tier C) - sum(Tier D penalties)).
+The backend recomputes score from your listed codes, so code lists must match
+what is truly visible. If nothing beyond base is clearly earned, SCORE should
+sit near 34–45. Do not inflate.
+
+Calibration (use the full span — avoid parking unrelated frames in the same band):
+  34–48: weak / cluttered / flat — usable only as filler
+  49–62: competent but ordinary
+  63–76: clearly good retail thumbnail
+  77–88: strong — would compete for hero placement
+  89–96: exceptional — immediate hero artwork
+  97–100: flawless — reserve for rare perfect composition + moment + light
+
+If two frames differ only slightly in quality, their SCORE values must differ
+by a few points, not sit on the same tenth. Penalize muddy focus, awkward crop,
+and busy backgrounds with lower SCORE even when nudity is present.
 
 ═══════════════════════════════════════════════════════════════
 OUTPUT FORMAT (REQUIRED)
@@ -143,10 +176,14 @@ If Tier A passes, respond EXACTLY in this format:
 TIER_A_PASS: yes
 TIER_B_PRESENT: <comma-separated B-codes that apply, e.g. B1,B3,B6>
 TIER_C_PRESENT: <comma-separated C-codes>
-SCORE: <number 0.0-10.0>
+TIER_D_PRESENT: <comma-separated D-codes, or NONE>
+SCORE: <number 0.0-100.0, one decimal allowed>
 TYPE: <NUDE/SEX_ACT/PENETRATION/BUILDUP/FINISH/COMPOSITION>
 GAZE: <SINGLE/DUAL/TRIPLE/AVERTED/CLOSED/REAR>
 AESTHETIC: <PROFESSIONAL/STANDARD/AMATEUR>
+PENETRATION_VISIBLE: <yes/no>
+PENETRATION_CONFIDENCE: <0.00-1.00>
+ACTION_EVIDENCE: <EXPLICIT_PENETRATION|ORAL_CONTACT|POSE_NO_CONTACT|OCCLUDED|WATER_OCCLUSION|NONE>
 END
 
 GAZE field semantics (v11.1.1 — be conservative):
@@ -162,38 +199,147 @@ frame, default to SINGLE (if one is clearly looking) or AVERTED (if none
 clearly are). Do not mark DUAL or TRIPLE as a guess. The B1 bonus is the
 same regardless, so over-reporting helps no one.
 
-Score is the SUM of Tier B + Tier C values (capped at 10.0).
-Be strict. Most frames score 4-7. A frame at 8.0+ should clearly stand out
-on technical merit AND aesthetic. A frame at 9.0+ should be IMMEDIATELY
-usable as platform hero artwork. A 10.0 is rare — perfect composition,
-perfect moment, perfect technical quality, perfect lighting.
+Dual-gaze scoring policy:
+  - B10 requires exactly two performers both looking at lens.
+  - Do not award B10 for SINGLE or TRIPLE gaze.
+  - POV with camera-as-male still qualifies if two performers are lens-aware.
 
-Do not pile signals onto every frame to reach 8.0. If lighting is flat,
-do not award C1. If composition is cluttered, do not award C3. The score
-should differentiate frames, not normalize them.
+Penetration truth rules (critical):
+  - PENETRATION_VISIBLE=yes ONLY when explicit insertion/contact is clearly
+    visible in-frame (not implied by pose).
+  - If limbs/water/angle occlude the key area, use PENETRATION_VISIBLE=no,
+    confidence <= 0.49, and ACTION_EVIDENCE=OCCLUDED or WATER_OCCLUSION.
+  - TYPE must be PENETRATION only when PENETRATION_VISIBLE=yes.
+  - In uncertain cases, prefer conservative outputs:
+      TYPE=SEX_ACT or NUDE, PENETRATION_VISIBLE=no.
+
+If lighting is flat, do not award C1. If composition is cluttered, do not award C3.
+The score must differentiate frames, not normalize them toward the mid 80s.
 """
     return prompt
 
 
 def build_simplified_prompt() -> str:
     """Simpler prompt for Fallback C (when full pipeline isn't yielding floor)."""
-    return """Score this adult VOD frame as a thumbnail candidate, 0-10.
+    return """Score this adult VOD frame as a thumbnail candidate on a 0–100 scale.
 
-Simple rubric:
-- Female performer clearly visible: required
-- Nudity/sex act visible: required for score above 4
-- Frame is sharp (not blurry): required for score above 3
-- Eye contact with camera: small bonus (same whether one or many)
-- Professional lighting: small bonus
+Holistic rubric (one SCORE number — use the full range, do not cluster in the 80s):
+- 0: unusable (no clear female lead, severe blur, or fails basic retail hygiene)
+- 35–52: weak filler
+- 53–68: acceptable
+- 69–82: good cover material
+- 83–92: strong
+- 93–100: exceptional (rare)
+
+Female performer clearly visible; nudity or clear sex-act read for non-zero scores;
+frame sharp enough for a storefront thumbnail; eye contact and lighting lift the score.
 
 For the GAZE field, be conservative. Mark DUAL or TRIPLE only if multiple
 performers clearly have their eyes pointed at the camera lens; otherwise
 prefer SINGLE or AVERTED.
 
 Output EXACTLY in this format:
-SCORE: <0.0-10.0>
+SCORE: <0.0-100.0>
 TYPE: <NUDE/SEX_ACT/PENETRATION/COMPOSITION>
 GAZE: <SINGLE/DUAL/TRIPLE/AVERTED/CLOSED/REAR>
+PENETRATION_VISIBLE: <yes/no>
+PENETRATION_CONFIDENCE: <0.00-1.00>
+ACTION_EVIDENCE: <EXPLICIT_PENETRATION|ORAL_CONTACT|POSE_NO_CONTACT|OCCLUDED|WATER_OCCLUSION|NONE>
+END
+"""
+
+
+def build_scene_insight_prompt() -> str:
+    """Vision prompt — describe a single contact-sheet image factually.
+
+    Asked once per scene against the contact sheet (or top cover) so we get
+    coarse setting/mood/feature data without re-scoring every frame.
+    """
+    return """You are looking at a contact sheet of representative thumbnails from a single adult VOD scene.
+
+Describe the scene factually. Avoid editorial language. Avoid words like "wild", "naughty", "crazy".
+
+OUTPUT FORMAT (REQUIRED, exact keys, no preamble):
+
+SETTING: <short phrase, e.g. "bathtub", "hotel suite bedroom", "kitchen counter", "outdoor patio">
+LOCATION_HINT: <one phrase if a distinctive location is visible (e.g. "rooftop pool", "white-tile bathroom", "neon-lit dressing room"), else "none">
+NOTABLE_FEATURES: <comma-separated factual tags: lingerie color, distinctive props, lighting, framing, etc. (e.g. "wet hair, bath bubbles, candlelight"). Avoid evaluating attractiveness.>
+ACTION_SUMMARY: <2 sentences, factual: what's happening across the frames. Use neutral terms.>
+MOOD: <one or two words: "playful", "intimate", "intense", "teasing", "casual">
+
+END
+"""
+
+
+def build_enriched_title_prompt(
+    studio: str,
+    performers: List[str],
+    scene_type: str,
+    genres: List[str],
+    description: str,
+    insight: dict,
+    position_summary: dict,
+    language: str = "en",
+    n_suggestions: int = 5,
+) -> str:
+    """Title-generation prompt enriched with vision insight + position rollup.
+
+    Produces both N retail title suggestions AND a long-form scene description
+    suitable for a VOD store listing. Text-only call (no image).
+    """
+    performer_str = ", ".join(performers) if performers else "(unknown)"
+    genres_str = ", ".join(genres) if genres else "(none)"
+    pos_str = ", ".join(f"{k}={v}" for k, v in (position_summary or {}).items()) or "(none)"
+    setting = (insight or {}).get("setting") or "(unknown)"
+    location_hint = (insight or {}).get("location_hint") or "(none)"
+    features = (insight or {}).get("notable_features") or []
+    features_str = ", ".join(features) if features else "(none)"
+    action = (insight or {}).get("action_summary") or "(none)"
+    mood = (insight or {}).get("mood") or "(none)"
+
+    return f"""Generate retail-optimized titles AND a marketing-ready long description for an adult VOD scene.
+
+SCENE CONTEXT:
+  Studio: {studio}
+  Performers: {performer_str}
+  Scene type: {scene_type}
+  Genres: {genres_str}
+  Operator description: {description or "(none provided)"}
+  Setting: {setting}
+  Location hint: {location_hint}
+  Notable features: {features_str}
+  Action summary: {action}
+  Mood: {mood}
+  Position rollup across selected covers: {pos_str}
+  Language: {language}
+
+REQUIREMENTS:
+  - Each title 30-80 characters, in the requested language.
+  - Vary the patterns across the {n_suggestions} suggestions.
+  - Prefer concrete details (setting, performer name, position, mood) over generic adjectives.
+  - Avoid clichéd words: "wild", "crazy", "naughty".
+  - Long description: 2-4 sentences, factual, suitable for a store listing. Mention performers,
+    setting, and one or two notable details. Do NOT use the words listed above.
+
+OUTPUT FORMAT (REQUIRED, no preamble):
+
+TITLE_1: <text>
+STYLE_1: <performer_led | narrative_hook | scene_descriptive | studio_branded | numbered_series>
+
+TITLE_2: <text>
+STYLE_2: <pattern>
+
+TITLE_3: <text>
+STYLE_3: <pattern>
+
+TITLE_4: <text>
+STYLE_4: <pattern>
+
+TITLE_5: <text>
+STYLE_5: <pattern>
+
+LONG_DESCRIPTION: <2-4 sentence factual description>
+
 END
 """
 

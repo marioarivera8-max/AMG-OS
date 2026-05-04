@@ -34,37 +34,37 @@ class TestCoverCap:
 
 
 class TestClusterWindow:
-    # v11.1 widened windows from ±2/5/15/30s to ±3/7/20/40s (per CHANGELOG_v11_1.md)
+    # Windows keyed to 0–100 scores (CLUSTER_WINDOWS in config)
 
-    def test_score_below_5_no_expansion(self):
-        window, interval = get_cluster_window(4.0)
+    def test_score_below_50_no_expansion(self):
+        window, interval = get_cluster_window(40.0)
         assert window == 0
         assert interval == 0
 
-    def test_score_5_to_8(self):
-        window, interval = get_cluster_window(7.0)
+    def test_score_50_to_79(self):
+        window, interval = get_cluster_window(70.0)
         assert window == 3
         assert interval == 1
 
-    def test_score_8_to_9(self):
-        window, interval = get_cluster_window(8.5)
+    def test_score_80_to_89(self):
+        window, interval = get_cluster_window(85.0)
         assert window == 7
         assert interval == 1
 
-    def test_score_9_to_10(self):
-        window, interval = get_cluster_window(9.5)
+    def test_score_90_to_99(self):
+        window, interval = get_cluster_window(95.0)
         assert window == 20
         assert interval == 3
 
     def test_perfect_score(self):
-        window, interval = get_cluster_window(10.0)
+        window, interval = get_cluster_window(100.0)
         assert window == 40
         assert interval == 5
 
-    def test_boundary_5(self):
-        window, interval = get_cluster_window(5.0)
+    def test_boundary_50(self):
+        window, interval = get_cluster_window(50.0)
         assert window == 3
 
-    def test_boundary_8(self):
-        window, interval = get_cluster_window(8.0)
+    def test_boundary_80(self):
+        window, interval = get_cluster_window(80.0)
         assert window == 7

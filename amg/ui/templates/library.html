@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="page-head between">
+  <div>
+    <h1>Library</h1>
+    <div class="sub">{{ stats.total }} processed scenes · {{ stats.review }} awaiting review · {{ stats.ready }} ready</div>
+  </div>
+  <div class="row">
+    <a href="/" class="btn btn-primary">+ New Scene</a>
+  </div>
+</div>
+
+<div class="with-sidebar">
+  <aside class="sidenav">
+    <div class="sidenav-section">Pinned</div>
+    <a href="/library?status=review" class="{% if filter.status == 'review' %}active{% endif %}">
+      <span class="dot warn"></span> Awaiting review ({{ stats.review }})
+    </a>
+    <a href="/library?status=ready" class="{% if filter.status == 'ready' %}active{% endif %}">
+      <span class="dot ok"></span> Ready to publish ({{ stats.ready }})
+    </a>
+    <a href="/library?status=draft" class="{% if filter.status == 'draft' %}active{% endif %}">
+      <span class="dot"></span> Drafts ({{ stats.draft }})
+    </a>
+
+    <div class="sidenav-section">Studios</div>
+    {% for s in studios %}
+      <a href="/library?studio={{ s.name }}" class="{% if filter.studio == s.name %}active{% endif %}">
+        {{ s.name }} <span class="muted" style="margin-left:auto;">{{ s.count }}</span>
+      </a>
+    {% else %}
+      <div class="muted" style="font-size: 12px;">No studios yet</div>
+    {% endfor %}
+
+    <div class="sidenav-section">Smart filters</div>
+    <a href="/library?min_score=90">Top-scored (≥90)</a>
+    <a href="/library?status=draft">No covers / failed</a>
+  </aside>
+
+  <div>
+    <form method="get" action="/library" class="card card-tight" style="margin-bottom: 16px;">
+      <div class="row">
+        <input type="search" name="q" value="{{ filter.q or '' }}" placeholder="Search scenes, performers, titles…" style="flex: 1; min-width: 240px;" />
+        <select name="studio">
+          <option value="">Studio: All</option>
+          {% for s in studios %}
+            <option value="{{ s.name }}" {% if filter.studio == s.name %}selected{% endif %}>{{ s.name }}</option>
+          {% endfor %}
+        </select>
+        <select name="status">
+          <option value="">Status: All</option>
+          <option value="ready" {% if filter.status == 'ready' %}selected{% endif %}>Ready</option>
+          <option value="review" {% if filter.status == 'review' %}selected{% endif %}>Review</option>
+          <option value="draft" {% if filter.status == 'draft' %}selected{% endif %}>Draft</option>
+          <option value="uploaded" {% if filter.status == 'uploaded' %}selected{% endif %}>Uploaded</option>
+        </select>
+        <input type="number" name="min_score" step="0.5" min="0" max="100" value="{{ filter.min_score or '' }}" placeholder="Min score" style="width: 110px;" />
+        <button type="submit" class="btn">Filter</button>
+        {% if filter.q or filter.studio or filter.status or filter.min_score %}
+          <a href="/library" class="btn btn-ghost">Clear</a>
+        {% endif %}
+      </div>
+    </form>
+
+    <div class="muted" style="font-size: 12px; margin-bottom: 10px;">
+      Showing {{ scenes | length }} of {{ stats.total }}
+    </div>
+
+    {% if scenes %}
+      <div class="cover-grid">
+        {% for s in scenes %}
+          <a class="cover-card" href="/scene/{{ s.scene_id }}" style="text-decoration: none; color: inherit;">
+            <div class="cover-thumb grad-{{ s.grad_idx }}">
+              {% if s.preview_path %}
+                <img src="/artifact?path={{ s.preview_path }}" alt="{{ s.scene_id }} preview" loading="lazy" />
+              {% endif %}
+              <div class="overlay-tl">
+                {% if s.top_score %}
+                  <span class="score-badge">{{ s.top_score }}</span>
+                {% else %}
+                  <span class="rank-badge">—</span>
+                {% endif %}
+              </div>
+              <div class="overlay-tr">
+                <span class="pill {{ s.status_cls }}">{{ s.status }}</span>
+              </div>
+            </div>
+            <div class="cover-body">
+              <div class="cover-title" title="{{ s.scene_id }}">{{ s.scene_id }}</div>
+              <div class="cover-meta">
+                {% if s.studio %}{{ s.studio }} · {% endif %}{{ s.covers }} covers{% if s.duration_str %} · {{ s.duration_str }}{% endif %}
+              </div>
+              {% if s.tags %}
+                <div style="margin-top: 4px;">
+                  {% for t in s.tags[:3] %}<span class="chip">{{ t }}</span>{% endfor %}
+                </div>
+              {% endif %}
+              <div class="cover-actions">
+                <span class="muted" style="font-size: 11px;">{{ s.processed_ago }}</span>
+                <span class="muted">›</span>
+              </div>
+            </div>
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty">No scenes match these filters.</div>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}

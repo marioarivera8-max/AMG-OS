@@ -1,28 +1,297 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="card">
-  <h2 style="margin-top: 0;">Process a Scene</h2>
-  <p class="muted">Paste a scene folder path or a video file path. This runs the existing `amg process` pipeline.</p>
-  <form
-    hx-post="/jobs"
-    hx-target="#jobs"
-    hx-swap="afterbegin"
-    class="row"
-  >
-    <input type="text" name="path" placeholder="/Users/.../incoming/.../Scene Folder" style="min-width: 520px; flex: 1;" required />
-    <button type="submit">Run</button>
-  </form>
-</div>
 
-<div class="card">
-  <h2 style="margin-top: 0;">Jobs</h2>
-  <div id="jobs">
-    {% for job in jobs %}
-      {% include "_job_card.html" %}
-    {% else %}
-      <p class="muted">No jobs yet.</p>
-    {% endfor %}
+<div class="page-head between">
+  <div>
+    <h1>Process a Scene</h1>
+    <div class="sub">Drop a video, pick a folder, or paste a path. Runs the local pipeline end-to-end.</div>
   </div>
 </div>
-{% endblock %}
 
+<form
+  id="run-form"
+  hx-post="/jobs"
+  hx-target="#jobs"
+  hx-swap="afterbegin"
+  hx-encoding="multipart/form-data"
+>
+  <div id="dropzone" class="dropzone">
+    <div class="glyph">↑</div>
+    <h2>Drop a video file or scene folder</h2>
+    <p>Or click to browse · MP4, MOV, MKV up to 50 GB · Local-only · No upload to the cloud</p>
+
+    <div class="or">OR</div>
+    <div class="path-row">
+      <input id="path-input" type="text" name="path" placeholder="Paste a path: /Users/.../incoming/.../Scene Folder" />
+      <button type="submit" class="btn-primary">Run</button>
+    </div>
+    <div class="row" style="justify-content: center; margin-top: 10px;">
+      <label for="file-input" class="btn btn-ghost" style="cursor: pointer;">Choose video(s)</label>
+      <label for="folder-input" class="btn btn-ghost" style="cursor: pointer;">Choose folder</label>
+    </div>
+    <input
+      id="file-input"
+      type="file"
+      name="video_files"
+      accept=".mp4,.mov,.mkv,.avi,.m4v,.webm,.wmv,.flv"
+      multiple
+      style="position:absolute; left:-9999px; width:1px; height:1px; opacity:0;"
+    />
+    <input
+      id="folder-input"
+      type="file"
+      name="video_files"
+      webkitdirectory
+      directory
+      multiple
+      style="position:absolute; left:-9999px; width:1px; height:1px; opacity:0;"
+    />
+    <div id="dropzone-filename" class="muted" style="margin-top: 12px; font-size: 12px;"></div>
+  </div>
+</form>
+
+<div class="grid grid-2" style="margin-top: 24px;">
+  <div>
+    <div class="between" style="margin-bottom: 10px;">
+      <h3 class="card-section-title" style="margin: 0;">
+        Active Jobs <span class="muted">{% if jobs %}· {{ jobs | length }}{% endif %}</span>
+      </h3>
+      <span class="muted" style="font-size: 12px;">Auto-refreshing every 2s while running</span>
+    </div>
+    <div id="jobs" class="stack">
+      {% for job in jobs %}
+        {% include "_job_card.html" %}
+      {% else %}
+        <div class="empty">No jobs yet — drop a video above to start.</div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div>
+    <div class="between" style="margin-bottom: 10px;">
+      <h3 class="card-section-title" style="margin: 0;">Recent Scenes</h3>
+      <a href="/library" style="font-size: 12px;">All scenes →</a>
+    </div>
+    <div class="stack">
+      {% for s in recent_scenes[:8] %}
+        <a href="/scene/{{ s.scene_id }}" class="card card-tight" style="display: flex; gap: 10px; align-items: center; text-decoration: none; color: inherit;">
+          <div class="cover-thumb grad-{{ s.grad_idx }}" style="width: 64px; height: 36px; border-radius: 6px; flex: 0 0 64px;">
+            {% if s.preview_path %}
+              <img src="/artifact?path={{ s.preview_path }}" alt="" />
+            {% endif %}
+          </div>
+          <div style="flex: 1; min-width: 0;">
+            <div class="cover-title" title="{{ s.scene_id }}">{{ s.scene_id }}</div>
+            <div class="cover-meta">{{ s.covers }} covers · top {{ s.top_score }}{% if s.studio %} · {{ s.studio }}{% endif %}</div>
+          </div>
+          <span class="pill {{ s.status_cls }}">{{ s.status }}</span>
+        </a>
+      {% else %}
+        <div class="empty">No processed scenes yet.</div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<script>
+  // Robust drag/drop + file/folder picker wiring.
+  (function() {
+    var dz = document.getElementById('dropzone');
+    var fi = document.getElementById('file-input');
+    var folderInput = document.getElementById('folder-input');
+    var pi = document.getElementById('path-input');
+    var fnLabel = document.getElementById('dropzone-filename');
+    var form = document.getElementById('run-form');
+    if (!dz || !fi || !form) return;
+
+    function humanMB(bytes) {
+      return (bytes / (1024 * 1024)).toFixed(1);
+    }
+
+    function assignFilesToInput(files) {
+      if (!files || !files.length) return false;
+      try {
+        var dt = new DataTransfer();
+        files.forEach(function(file) { dt.items.add(file); });
+        fi.files = dt.files;
+        return true;
+      } catch (err) {
+        try {
+          fi.files = files;
+          return true;
+        } catch (err2) {
+          return false;
+        }
+      }
+    }
+
+    function showSelectionInfo(files, sourceLabel) {
+      if (!files || !files.length) return;
+      var totalBytes = 0;
+      files.forEach(function(file) { totalBytes += file.size || 0; });
+      var fileCount = files.length;
+      var videoCount = files.filter(function(f) {
+        return /\.(mp4|mov|mkv|avi|m4v|webm|wmv|flv)$/i.test(f.name || '');
+      }).length;
+      var sample = files[0] ? files[0].name : '';
+      fnLabel.textContent =
+        '📁 ' + sourceLabel + ': ' + fileCount + ' files (' + humanMB(totalBytes) + ' MB), ' +
+        videoCount + ' video(s). Run picks the longest video automatically. Example: ' + sample;
+    }
+
+    function readAllEntries(reader) {
+      return new Promise(function(resolve, reject) {
+        var out = [];
+        function loop() {
+          reader.readEntries(function(entries) {
+            if (!entries || !entries.length) {
+              resolve(out);
+              return;
+            }
+            out = out.concat(Array.from(entries));
+            loop();
+          }, reject);
+        }
+        loop();
+      });
+    }
+
+    function withRelativeName(file, relPath) {
+      try {
+        // Keep relative paths when possible so backend folder structure survives.
+        return new File([file], relPath, { type: file.type, lastModified: file.lastModified });
+      } catch (err) {
+        return file;
+      }
+    }
+
+    async function entryToFiles(entry, basePath) {
+      if (!entry) return [];
+      if (entry.isFile) {
+        return new Promise(function(resolve) {
+          entry.file(function(file) {
+            var rel = basePath ? (basePath + '/' + file.name) : file.name;
+            resolve([withRelativeName(file, rel)]);
+          }, function() {
+            resolve([]);
+          });
+        });
+      }
+      if (entry.isDirectory) {
+        var dirPath = basePath ? (basePath + '/' + entry.name) : entry.name;
+        var reader = entry.createReader();
+        var entries = await readAllEntries(reader);
+        var out = [];
+        for (var i = 0; i < entries.length; i++) {
+          var childFiles = await entryToFiles(entries[i], dirPath);
+          out = out.concat(childFiles);
+        }
+        return out;
+      }
+      return [];
+    }
+
+    async function droppedItemsToFiles(dataTransfer) {
+      if (!dataTransfer) return [];
+      var items = dataTransfer.items ? Array.from(dataTransfer.items) : [];
+      if (!items.length) {
+        return dataTransfer.files ? Array.from(dataTransfer.files) : [];
+      }
+
+      var all = [];
+      var usedEntries = false;
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        var entry = (item.webkitGetAsEntry && item.webkitGetAsEntry()) || null;
+        if (entry) {
+          usedEntries = true;
+          var files = await entryToFiles(entry, '');
+          all = all.concat(files);
+          continue;
+        }
+        var f = item.getAsFile ? item.getAsFile() : null;
+        if (f) all.push(f);
+      }
+      if (usedEntries) return all.filter(function(f) { return !!f; });
+      return dataTransfer.files ? Array.from(dataTransfer.files) : [];
+    }
+
+    // Prevent browser from opening dropped files/folders in a new tab.
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(function(ev) {
+      window.addEventListener(ev, function(e) { e.preventDefault(); }, false);
+      document.addEventListener(ev, function(e) { e.preventDefault(); }, false);
+    });
+
+    // Click dropzone body to open file picker.
+    dz.addEventListener('click', function(e) {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON' || e.target.tagName === 'LABEL' || e.target.tagName === 'A') return;
+      if (typeof fi.showPicker === 'function') {
+        fi.showPicker();
+      } else {
+        fi.click();
+      }
+    });
+
+    fi.addEventListener('change', function() {
+      if (fi.files && fi.files.length) {
+        showSelectionInfo(Array.from(fi.files), 'selected files');
+      }
+    });
+
+    if (folderInput) {
+      folderInput.addEventListener('change', function() {
+        if (folderInput.files && folderInput.files.length) {
+          var arr = Array.from(folderInput.files);
+          // Keep only folder selection active; avoid duplicate uploads.
+          fi.value = '';
+          showSelectionInfo(arr, 'selected folder');
+        }
+      });
+    }
+
+    ['dragenter', 'dragover'].forEach(function(ev) {
+      dz.addEventListener(ev, function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dz.classList.add('is-drag');
+      });
+    });
+    ['dragleave', 'drop'].forEach(function(ev) {
+      dz.addEventListener(ev, function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dz.classList.remove('is-drag');
+      });
+    });
+    dz.addEventListener('drop', async function(e) {
+      var files = await droppedItemsToFiles(e.dataTransfer);
+      if (!files.length) {
+        fnLabel.textContent = 'Drop had no readable files. Use "Choose folder" for directory uploads.';
+        return;
+      }
+      if (!assignFilesToInput(files)) {
+        fnLabel.textContent = 'Browser blocked dropped file assignment. Use "Choose folder" or "Choose video(s)".';
+        return;
+      }
+      showSelectionInfo(files, 'dropped items');
+    });
+
+    // Reset file selection when path is typed.
+    pi.addEventListener('input', function() {
+      if (pi.value) {
+        fi.value = '';
+        if (folderInput) folderInput.value = '';
+        fnLabel.textContent = '';
+      }
+    });
+
+    form.addEventListener('htmx:afterRequest', function() {
+      pi.value = '';
+      fi.value = '';
+      if (folderInput) folderInput.value = '';
+      fnLabel.textContent = '';
+    });
+  })();
+</script>
+
+{% endblock %}

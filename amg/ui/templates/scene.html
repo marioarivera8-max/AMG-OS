@@ -1,59 +1,238 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="card">
-  <div class="row" style="justify-content: space-between;">
-    <h2 style="margin: 0;">Scene: {{ scene_id }}</h2>
-    <a href="/">Back</a>
+
+<div class="page-head">
+  <div class="breadcrumb">
+    <a href="/">Process</a> /
+    <a href="/library">Library</a> /
+    <span class="crumb-now">{{ scene_id }}</span>
+    {% if saved %}<span class="pill ok" style="margin-left: 8px;">REVIEW SAVED</span>{% endif %}
   </div>
-  {% if saved %}
-    <p class="ok">Review saved.</p>
-  {% endif %}
-  {% if decision_log %}
-    <p class="muted">
-      Duration: {{ decision_log.input.duration_sec }}s |
-      Covers delivered: {{ decision_log.outcomes.covers_delivered }} |
-      Top score: {{ decision_log.outcomes.top_pick_score }}
-    </p>
-  {% endif %}
-  {% if work_dir %}
-    <p class="muted">Work dir: {{ work_dir }}</p>
-  {% endif %}
+  <div class="between">
+    <div>
+      <h1 style="margin-bottom: 4px;">{{ scene_id }}</h1>
+      <div class="sub">
+        {% if decision_log %}
+          {{ decision_log.input.studio or "(unknown studio)" }} ·
+          {{ decision_log.input.resolution or "?" }} ·
+          {{ decision_log.input.duration_sec | round(0) | int }}s video ·
+          {{ decision_log.execution.total_duration_sec | round(0) | int }}s pipeline ·
+          {{ decision_log.outcomes.covers_delivered }} covers
+        {% else %}
+          (no decision log)
+        {% endif %}
+      </div>
+    </div>
+    <div class="row">
+      <button form="review-form" type="submit" class="btn-primary">Save Review</button>
+      {% if work_dir %}<a class="btn btn-ghost" href="/artifact?path={{ work_dir }}/covers">Open folder</a>{% endif %}
+      <a class="btn btn-ghost" href="/">Re-run</a>
+    </div>
+  </div>
 </div>
 
-{% if contact_sheet %}
-<div class="card">
-  <h3 style="margin-top: 0;">Contact Sheet</h3>
-  <img class="thumb" src="/artifact?path={{ contact_sheet }}" alt="contact sheet" />
-</div>
-{% endif %}
+<div class="grid grid-2">
+  <div class="col">
+    {% if contact_sheet %}
+      <div class="card">
+        <h3 class="card-section-title">Contact Sheet</h3>
+        <img src="/artifact?path={{ contact_sheet }}" alt="contact sheet" style="width: 100%; border-radius: 8px; border: 1px solid var(--line-soft);" />
+        <div class="muted" style="font-size: 11px; margin-top: 6px;">{{ contact_sheet.name }}</div>
+      </div>
+    {% endif %}
 
-<div class="card">
-  <h3 style="margin-top: 0;">Cover Review</h3>
-  <p class="muted">Pick your preferred covers, add optional title/notes, then save.</p>
-  <form method="post" action="/scene/{{ scene_id }}/review">
-    <div class="row" style="margin-bottom: 10px;">
-      <input type="text" name="title" placeholder="Optional title override" style="min-width: 360px; flex: 1;" />
+    <form id="review-form" method="post" action="/scene/{{ scene_id }}/review">
+      <div class="card">
+        <h3 class="card-section-title">Selected Thumbnails <span class="muted">{{ covers | length }}</span></h3>
+        {% if covers %}
+        <div class="cover-grid">
+          {% for c in covers %}
+            <div class="cover-card">
+              <div class="review-thumb-window">
+                <img
+                  src="/artifact?path={{ c.path }}"
+                  alt="{{ c.filename }}"
+                  loading="lazy"
+                  class="review-thumb-image js-thumb-preview"
+                  data-preview-src="/artifact?path={{ c.path }}"
+                  data-preview-caption="{{ c.filename }}"
+                />
+                <div class="overlay-tl"><span class="rank-badge">{{ "%02d" | format(loop.index) }}</span></div>
+                <div class="overlay-tr">
+                  {% if c.score %}<span class="score-badge">{{ c.score }}</span>{% endif %}
+                </div>
+                <div class="overlay-bl">
+                  {% if c.model_pen_visible %}
+                    <span class="pill warn">model: pen {{ c.model_pen_conf }}</span>
+                  {% endif %}
+                </div>
+              </div>
+              <div class="cover-body">
+                <div class="cover-meta mono" style="font-size: 11px;">
+                  t={{ c.timestamp_sec | round(0) | int }}s · {{ c.model_type }} · pos={{ c.model_position }}
+                </div>
+
+                <label class="field">
+                  <span>penetration?</span>
+                  <select name="pen_{{ c.filename }}">
+                    <option value="">(no change)</option>
+                    <option value="yes">yes — visible</option>
+                    <option value="no">no — not visible</option>
+                  </select>
+                </label>
+
+                <label class="field">
+                  <span>position</span>
+                  <select name="pos_{{ c.filename }}">
+                    <option value="">(no change)</option>
+                    <option>MISSIONARY</option>
+                    <option>COWGIRL</option>
+                    <option>REVERSE_COWGIRL</option>
+                    <option>DOGGY</option>
+                    <option>ORAL_BJ</option>
+                    <option>ORAL_CUNN</option>
+                    <option>SIDE</option>
+                    <option>HANDJOB</option>
+                    <option>TOY</option>
+                    <option>GROUP</option>
+                    <option>OTHER</option>
+                  </select>
+                </label>
+
+                <label class="field">
+                  <span>decision</span>
+                  <select name="decision_{{ c.filename }}">
+                    <option value="">(no change)</option>
+                    <option value="keep">keep</option>
+                    <option value="maybe">maybe</option>
+                    <option value="reject">reject</option>
+                  </select>
+                </label>
+
+                <label class="field">
+                  <span>note</span>
+                  <input type="text" name="reason_{{ c.filename }}" placeholder="optional reason" />
+                </label>
+
+                <div class="cover-actions">
+                  <label style="display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted);">
+                    <input type="checkbox" name="cover" value="{{ c.filename }}" /> include in final
+                  </label>
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+        {% else %}
+          <div class="empty">No covers found in {{ work_dir }}</div>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+
+  <div class="col">
+    <div class="card">
+      <h3 class="card-section-title">Title</h3>
+      <textarea form="review-form" name="title" rows="2" placeholder="Optional title override (or pick one below)"></textarea>
     </div>
-    <div class="row" style="margin-bottom: 10px;">
-      <textarea name="notes" rows="3" placeholder="Operator notes" style="min-width: 360px; flex: 1;"></textarea>
+
+    {% include "_insight_panel.html" %}
+    {% include "_provided_thumbs_panel.html" %}
+
+    {% if decision_log %}
+      <div class="card">
+        <h3 class="card-section-title">Studio · Performers · 2257</h3>
+        <div class="stack">
+          <div><span class="muted">Studio:</span> {{ decision_log.input.studio or "—" }}</div>
+          <div><span class="muted">Performer code:</span> {{ decision_log.input.performer_code or "—" }} ({{ decision_log.input.performer_count or 0 }})</div>
+          <div><span class="muted">Scene type:</span> {{ decision_log.input.scene_type or "—" }}</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-section-title">Tags</h3>
+        <div>
+          {% for g in decision_log.input.genres or [] %}<span class="chip">{{ g }}</span>{% endfor %}
+          {% if not decision_log.input.genres %}<span class="muted">No tags</span>{% endif %}
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-section-title">Notes</h3>
+        <textarea form="review-form" name="notes" rows="4" placeholder="What was good, what was wrong with the AI picks…"></textarea>
+      </div>
+
+      <div class="card">
+        <h3 class="card-section-title">Distribution Readiness</h3>
+        <div class="stack">
+          <div><span class="pill {{ 'ok' if decision_log.outcomes.covers_delivered >= 12 else 'warn' }}">
+            {{ '✓' if decision_log.outcomes.covers_delivered >= 12 else '⚠' }}
+          </span> {{ decision_log.outcomes.covers_delivered }} covers (target 12)</div>
+          <div><span class="pill warn">☐</span> Title set</div>
+          <div><span class="pill ok">✓</span> 2257 on file</div>
+          <div><span class="pill {{ 'ok' if decision_log.input.genres else 'warn' }}">
+            {{ '✓' if decision_log.input.genres else '⚠' }}
+          </span> Tags ({{ (decision_log.input.genres or []) | length }})</div>
+          <div><span class="pill">☐</span> Manual approval to publish</div>
+        </div>
+        <button class="btn" disabled style="width: 100%; margin-top: 12px;">Mark Ready (coming soon)</button>
+      </div>
+    {% endif %}
+
+    <div class="card" style="font-size: 12px;">
+      <span class="muted">Operator corrections are saved locally and feed the model improvement loop. See <a href="/feedback">Feedback</a>.</span>
     </div>
-    <div class="grid">
-      {% for c in covers %}
-        <label class="card" style="margin: 0;">
-          <img class="thumb" src="/artifact?path={{ c }}" alt="{{ c.name }}" />
-          <div class="row" style="justify-content: space-between; margin-top: 8px;">
-            <span style="font-size: 12px;">{{ c.name }}</span>
-            <input type="checkbox" name="cover" value="{{ c.name }}" />
-          </div>
-        </label>
-      {% else %}
-        <p class="muted">No covers found yet.</p>
-      {% endfor %}
-    </div>
-    <div style="margin-top: 12px;">
-      <button type="submit">Save Review</button>
-    </div>
-  </form>
+  </div>
 </div>
+
+<div id="thumb-preview-modal" class="preview-modal" hidden>
+  <div class="preview-backdrop" data-preview-close="1"></div>
+  <div class="preview-dialog">
+    <button type="button" class="btn preview-close" data-preview-close="1">Close</button>
+    <img id="thumb-preview-img" src="" alt="preview" />
+    <div id="thumb-preview-caption" class="preview-caption"></div>
+  </div>
+</div>
+
+<script>
+  (function() {
+    var modal = document.getElementById('thumb-preview-modal');
+    var img = document.getElementById('thumb-preview-img');
+    var cap = document.getElementById('thumb-preview-caption');
+    if (!modal || !img || !cap) return;
+
+    function openPreview(src, caption) {
+      img.src = src || '';
+      cap.textContent = caption || '';
+      modal.hidden = false;
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closePreview() {
+      modal.hidden = true;
+      img.src = '';
+      cap.textContent = '';
+      document.body.style.overflow = '';
+    }
+
+    document.querySelectorAll('.js-thumb-preview').forEach(function(el) {
+      el.addEventListener('click', function() {
+        openPreview(el.getAttribute('data-preview-src'), el.getAttribute('data-preview-caption'));
+      });
+    });
+
+    modal.addEventListener('click', function(e) {
+      if (e.target && e.target.getAttribute('data-preview-close') === '1') {
+        closePreview();
+      }
+    });
+
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && !modal.hidden) {
+        closePreview();
+      }
+    });
+  })();
+</script>
+
 {% endblock %}
-
