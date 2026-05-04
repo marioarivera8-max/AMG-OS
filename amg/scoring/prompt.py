@@ -122,12 +122,17 @@ at the camera. The GAZE field below records the count for descriptive
 purposes only — do not stack the bonus.
 
 ═══════════════════════════════════════════════════════════════
-TIER C — TIE BREAKERS (small adjustments)
+TIER C — AESTHETIC SIGNALS (separate the cinematic from the competent)
 ═══════════════════════════════════════════════════════════════
 
-C1: Lighting/aesthetic looks professional:              +0.5
-C2: Strong contrast/colors (pops as thumbnail):         +0.5
-C3: Background not distracting:                         +0.3
+C1: Lighting/aesthetic looks professional (not flat/flash): +1.0
+C2: Strong contrast/colors (pops as thumbnail):             +1.0
+C3: Background not distracting (composition reads cleanly): +0.5
+
+Tier C is what separates a competent action frame (which most
+candidates are) from a cinematic cover (which is what we want at the
+top of the rank). Be strict — apply C1 only when lighting actively
+flatters the subject, not just because the frame is exposed correctly.
 
 ═══════════════════════════════════════════════════════════════
 OUTPUT FORMAT (REQUIRED)
@@ -158,9 +163,14 @@ clearly are). Do not mark DUAL or TRIPLE as a guess. The B1 bonus is the
 same regardless, so over-reporting helps no one.
 
 Score is the SUM of Tier B + Tier C values (capped at 10.0).
-Be strict. Most frames score 3-7. Only exceptional frames score 8+.
-A 9.0+ frame should be IMMEDIATELY usable as platform hero artwork.
-A 10.0 is rare — perfect composition, perfect moment, perfect technical quality.
+Be strict. Most frames score 4-7. A frame at 8.0+ should clearly stand out
+on technical merit AND aesthetic. A frame at 9.0+ should be IMMEDIATELY
+usable as platform hero artwork. A 10.0 is rare — perfect composition,
+perfect moment, perfect technical quality, perfect lighting.
+
+Do not pile signals onto every frame to reach 8.0. If lighting is flat,
+do not award C1. If composition is cluttered, do not award C3. The score
+should differentiate frames, not normalize them.
 """
     return prompt
 
