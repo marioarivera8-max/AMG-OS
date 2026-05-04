@@ -1,8 +1,15 @@
 """AMG OS version."""
-__version__ = "11.1.3"
-__version_info__ = (11, 1, 3)
+__version__ = "11.1.4"
+__version_info__ = (11, 1, 4)
 __release_date__ = "2026-05-04"
 
+# v11.1.4 changelog (cluster cap — single-issue patch over v11.1.3):
+# - Cap cluster phase AI scoring at CLUSTER_HUNTER_TOP_N=30 by sharpness desc.
+#   v11.1.3's PyAV decode removed the implicit time-deadline cap that used to
+#   bound the cluster phase; scene 10 produced 145 post-gate candidates that
+#   would have been ~15 min of additional AI scoring. Mirrors the existing
+#   BUILDUP_HUNTER_TOP_N=10 pattern. No other changes.
+#
 # v11.1.3 changelog (PyAV decode cherry-pick from v11.2 — isolated, no scope creep):
 # - amg/video/reader.py rewritten with PyAV (av==13.1.0) as primary backend,
 #   OpenCV preserved as automatic fallback. Linear stream decode replaces
