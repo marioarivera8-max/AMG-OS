@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <div class="row" style="justify-content: space-between;">
+    <h2 style="margin: 0;">Scene: {{ scene_id }}</h2>
+    <a href="/">Back</a>
+  </div>
+  {% if saved %}
+    <p class="ok">Review saved.</p>
+  {% endif %}
+  {% if decision_log %}
+    <p class="muted">
+      Duration: {{ decision_log.input.duration_sec }}s |
+      Covers delivered: {{ decision_log.outcomes.covers_delivered }} |
+      Top score: {{ decision_log.outcomes.top_pick_score }}
+    </p>
+  {% endif %}
+  {% if work_dir %}
+    <p class="muted">Work dir: {{ work_dir }}</p>
+  {% endif %}
+</div>
+
+{% if contact_sheet %}
+<div class="card">
+  <h3 style="margin-top: 0;">Contact Sheet</h3>
+  <img class="thumb" src="/artifact?path={{ contact_sheet }}" alt="contact sheet" />
+</div>
+{% endif %}
+
+<div class="card">
+  <h3 style="margin-top: 0;">Cover Review</h3>
+  <p class="muted">Pick your preferred covers, add optional title/notes, then save.</p>
+  <form method="post" action="/scene/{{ scene_id }}/review">
+    <div class="row" style="margin-bottom: 10px;">
+      <input type="text" name="title" placeholder="Optional title override" style="min-width: 360px; flex: 1;" />
+    </div>
+    <div class="row" style="margin-bottom: 10px;">
+      <textarea name="notes" rows="3" placeholder="Operator notes" style="min-width: 360px; flex: 1;"></textarea>
+    </div>
+    <div class="grid">
+      {% for c in covers %}
+        <label class="card" style="margin: 0;">
+          <img class="thumb" src="/artifact?path={{ c }}" alt="{{ c.name }}" />
+          <div class="row" style="justify-content: space-between; margin-top: 8px;">
+            <span style="font-size: 12px;">{{ c.name }}</span>
+            <input type="checkbox" name="cover" value="{{ c.name }}" />
+          </div>
+        </label>
+      {% else %}
+        <p class="muted">No covers found yet.</p>
+      {% endfor %}
+    </div>
+    <div style="margin-top: 12px;">
+      <button type="submit">Save Review</button>
+    </div>
+  </form>
+</div>
+{% endblock %}
+

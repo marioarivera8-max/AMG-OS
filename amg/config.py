@@ -157,6 +157,31 @@ COVER_CAPS = [
     (2700, float("inf"), 30),  # > 45 min → cap at 30
 ]
 
+# Quota-fill defaults (v11.1.5+). Positions are part of the final cover set.
+QUOTA_POSTERPOSE_TARGET = 3
+QUOTA_BUILDUP_TARGET = 3
+QUOTA_FINISH_TARGET = 3
+QUOTA_POSITION_PER_LABEL_TARGET = 3
+QUOTA_POSITION_MAX_LABELS = 4
+QUOTA_MIN_GAP_SEC = 20.0
+
+# Position classifier: classify only top candidates to avoid extra AI load.
+POSITION_CLASSIFIER_MAX_CANDIDATES = 40
+POSITION_CLASSIFIER_MIN_SCORE = 6.0
+POSITION_LABELS = [
+    "MISSIONARY",
+    "COWGIRL",
+    "REVERSE_COWGIRL",
+    "DOGGY",
+    "ORAL_BJ",
+    "ORAL_CUNN",
+    "SIDE",
+    "HANDJOB",
+    "TOY",
+    "GROUP",
+    "OTHER",
+]
+
 # Fallback thresholds
 ZERO_RATE_FALLBACK_C_TRIGGER = 0.6
 ZERO_RATE_FALLBACK_D_TRIGGER = 0.8

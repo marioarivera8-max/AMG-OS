@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2 style="margin-top: 0;">Process a Scene</h2>
+  <p class="muted">Paste a scene folder path or a video file path. This runs the existing `amg process` pipeline.</p>
+  <form
+    hx-post="/jobs"
+    hx-target="#jobs"
+    hx-swap="afterbegin"
+    class="row"
+  >
+    <input type="text" name="path" placeholder="/Users/.../incoming/.../Scene Folder" style="min-width: 520px; flex: 1;" required />
+    <button type="submit">Run</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2 style="margin-top: 0;">Jobs</h2>
+  <div id="jobs">
+    {% for job in jobs %}
+      {% include "_job_card.html" %}
+    {% else %}
+      <p class="muted">No jobs yet.</p>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
+

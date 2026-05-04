@@ -18,6 +18,7 @@ Commands:
     amg performers              List performer registry
     amg calibrate <studio>      Recalibrate studio thresholds
     amg clean [--older-than]    Clean old work directories
+    amg ui                      Start local web UI (run + review)
 """
 import argparse
 import os
@@ -122,6 +123,12 @@ def main():
     p_clean.add_argument("--dry-run", action="store_true")
     p_clean.add_argument("--auto", action="store_true")
 
+    # ui
+    p_ui = subparsers.add_parser("ui", help="Start local web UI (run + review)")
+    p_ui.add_argument("--host", type=str, default="127.0.0.1")
+    p_ui.add_argument("--port", type=int, default=8080)
+    p_ui.add_argument("--no-open", action="store_true", help="Do not open browser automatically")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -154,6 +161,7 @@ def _dispatch(args):
     if cmd == "performers": return cmd_performers(args)
     if cmd == "calibrate": return cmd_calibrate(args)
     if cmd == "clean":     return cmd_clean(args)
+    if cmd == "ui":        return cmd_ui(args)
     return 1
 
 
@@ -605,6 +613,39 @@ def cmd_clean(args):
 
     print(f"Looking for work directories older than {days} days...")
     print("Cleanup feature coming in v11.1.1")
+    return 0
+
+
+def cmd_ui(args):
+    """Start local FastAPI UI (run + review)."""
+    init_logging()
+    try:
+        import uvicorn
+    except ImportError:
+        print("Missing UI dependency: uvicorn")
+        print("Install dependencies: pip install fastapi uvicorn jinja2 python-multipart")
+        return 1
+
+    try:
+        from amg.ui.app import create_app
+    except ImportError as e:
+        print(f"Could not load UI app: {e}")
+        print("Install dependencies: pip install fastapi uvicorn jinja2 python-multipart")
+        return 1
+
+    url = f"http://{args.host}:{args.port}"
+    print(f"Starting AMG UI at {url}")
+    print("Press Ctrl+C to stop.")
+
+    if not args.no_open:
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    app = create_app()
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 
 

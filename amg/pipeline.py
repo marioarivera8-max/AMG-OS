@@ -25,6 +25,7 @@ from amg.config import (
     TIME_BUDGET_ABSOLUTE_MAX,
     PHASE_HARD_TIMEOUT_SEC,
     COVER_FLOOR,
+    get_cover_cap,
     BATCH_LOCK_FILE,
     MIN_FREE_SPACE_GB,
     REQUIRE_2257_DOC,
@@ -41,6 +42,7 @@ from amg.video.metadata import get_metadata
 from amg.video.frames import calibrate_thresholds
 from amg.scoring.ai_client import AIClient
 from amg.scoring.prompt import build_scoring_prompt, SYSTEM_PROMPT
+from amg.scoring.position_classifier import classify_candidate_positions
 from amg.scanning.tiered import run_tiered_scan
 from amg.scanning.finish_hunter import run_finish_hunter
 from amg.scanning.buildup_hunter import run_buildup_hunter
@@ -51,6 +53,7 @@ from amg.compliance.audit_log import audit_event
 from amg.output.covers import save_covers
 from amg.output.contact_sheet import build_contact_sheet
 from amg.output.decision_log import write_decision_log
+from amg.output.quota_fill import select_quota_fill, quota_satisfied, quota_progress
 from amg.learning.recorder import record_scene_outcome
 from amg.utils.timing import phase_timer, format_duration
 from amg.utils.logging import get_logger, init_logging
@@ -243,7 +246,7 @@ def process_scene(
     candidates = list(tier_result["candidates"])
 
     # --- PHASE 6: FINISH HUNTER ---
-    if time.time() < deadline:
+    if time.time() < deadline and not quota_satisfied(candidates):
         with phase_timer("finish_hunter") as t:
             finish_result = run_finish_hunter(
                 video_path, duration_sec, calibration, prompt,
@@ -256,9 +259,16 @@ def process_scene(
         }
         all_scored.extend(finish_result.get("all_scored", []))
         candidates.extend(finish_result["candidates"])
+    elif time.time() < deadline:
+        phase_results["finish_hunter"] = {
+            "duration_sec": 0.0,
+            "skipped": True,
+            "reason": "quota_satisfied",
+            "quota_progress": quota_progress(candidates),
+        }
 
     # --- PHASE 7: BUILDUP HUNTER ---
-    if time.time() < deadline:
+    if time.time() < deadline and not quota_satisfied(candidates):
         with phase_timer("buildup_hunter") as t:
             buildup_result = run_buildup_hunter(
                 video_path, duration_sec, calibration, prompt,
@@ -271,9 +281,16 @@ def process_scene(
         }
         all_scored.extend(buildup_result.get("all_scored", []))
         candidates.extend(buildup_result["candidates"])
+    elif time.time() < deadline:
+        phase_results["buildup_hunter"] = {
+            "duration_sec": 0.0,
+            "skipped": True,
+            "reason": "quota_satisfied",
+            "quota_progress": quota_progress(candidates),
+        }
 
     # --- PHASE 8: CLUSTER EXPANSION ---
-    if time.time() < deadline and candidates:
+    if time.time() < deadline and candidates and not quota_satisfied(candidates):
         seen_ts = {round(c["timestamp_sec"], 1) for c in candidates}
         with phase_timer("cluster") as t:
             cluster_result = expand_clusters(
@@ -294,6 +311,13 @@ def process_scene(
             if scored and scored.parse_succeeded and scored.score >= 5.0:
                 candidates.append(c)
             all_scored.append(c)
+    elif time.time() < deadline and candidates:
+        phase_results["cluster"] = {
+            "duration_sec": 0.0,
+            "skipped": True,
+            "reason": "quota_satisfied",
+            "quota_progress": quota_progress(candidates),
+        }
 
     # --- PHASE 9: FLOOR ENFORCEMENT ---
     fallbacks_used = []
@@ -316,6 +340,32 @@ def process_scene(
             error_codes.append("E_FLOOR_FALLBACK_D")
         if not cascade_result["floor_met"]:
             error_codes.append("E_FLOOR_NOT_MET")
+
+    # Apply adaptive cover cap (review-burden control).
+    cover_cap = get_cover_cap(duration_sec)
+    if cover_cap < COVER_FLOOR:
+        cover_cap = COVER_FLOOR
+
+    # Position classifier pass (bounded): attach `position_label` to top
+    # position-like candidates so quota-fill can target 3-per-position.
+    if candidates and time.time() < deadline:
+        with phase_timer("position_classifier") as t:
+            pos_stats = classify_candidate_positions(candidates, ai_client=ai_client)
+        phase_results["position_classifier"] = {"duration_sec": t.elapsed, **pos_stats}
+
+    # v11.1.5+: quota-fill selection. This is a v0 version that uses existing
+    # scoring metadata (tier + TYPE) and keeps a minimum time gap between picks.
+    # It is intentionally conservative: if we can't fill the target buckets,
+    # we top off by score to at least meet COVER_FLOOR.
+    before_select = len(candidates)
+    candidates, quota_stats = select_quota_fill(
+        candidates,
+        max_total=cover_cap,
+        min_total=COVER_FLOOR,
+    )
+    phase_results["quota_fill"] = {"before": before_select, **quota_stats}
+    if before_select != len(candidates):
+        log.info("Quota-fill selected covers", before=before_select, after=len(candidates), cap=cover_cap)
 
     # --- PHASE 10: OUTPUT ---
     work_dir = make_work_dir(video_path, version="v11")

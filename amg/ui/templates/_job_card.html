@@ -1,0 +1,35 @@
+<div
+  id="job-{{ job.job_id }}"
+  class="card"
+  {% if job.status in ["queued", "running"] %}
+    hx-get="/jobs/{{ job.job_id }}"
+    hx-trigger="every 2s"
+    hx-swap="outerHTML"
+  {% endif %}
+>
+  <div class="row" style="justify-content: space-between;">
+    <div>
+      <strong>{{ job.scene_id }}</strong>
+      <span class="pill">job {{ job.job_id }}</span>
+    </div>
+    <div>
+      {% if job.status == "done" %}
+        <span class="ok">DONE</span>
+      {% elif job.status == "error" %}
+        <span class="err">ERROR</span>
+      {% elif job.status == "running" %}
+        <span class="warn">RUNNING</span>
+      {% else %}
+        <span class="muted">QUEUED</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="muted" style="margin-top: 6px;">{{ job.video_path }}</div>
+  <div style="margin-top: 8px;">{{ job.message }}</div>
+  {% if job.status == "done" and job.scene_id %}
+    <div style="margin-top: 8px;">
+      <a href="/scene/{{ job.scene_id }}">Open review for {{ job.scene_id }}</a>
+    </div>
+  {% endif %}
+</div>
+
