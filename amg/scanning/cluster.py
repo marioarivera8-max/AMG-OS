@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from amg.config import get_cluster_window
+from amg.config import get_cluster_window, CLUSTER_HUNTER_TOP_N
 from amg.video.reader import VideoReader
 from amg.video.frames import measure_sharpness, is_frame_too_dark
 from amg.video.dedup import deduplicate_frames
@@ -158,8 +158,19 @@ def expand_clusters(
     # Dedup (cluster samples around the same seed will look similar)
     deduped = deduplicate_frames(candidates)
 
+    # v11.1.4: cap AI scoring count. Mirrors BUILDUP_HUNTER_TOP_N pattern.
+    # Without this, fast decode lets cluster balloon — scene 10 with v11.1.3
+    # PyAV produced 145 post-gate candidates, which would have been ~15 min
+    # of AI scoring. Sort by sharpness desc, take top N.
+    deduped.sort(key=lambda x: x["sharpness"], reverse=True)
+    capped = deduped[:CLUSTER_HUNTER_TOP_N]
+    if len(deduped) > CLUSTER_HUNTER_TOP_N:
+        log.info("Cluster expansion: post-cap candidates",
+                 kept=len(capped), dropped=len(deduped) - len(capped),
+                 cap=CLUSTER_HUNTER_TOP_N)
+
     # Score in parallel
-    scored = score_frames_parallel(deduped, prompt, system_prompt=system_prompt)
+    scored = score_frames_parallel(capped, prompt, system_prompt=system_prompt)
     log.info("Cluster expansion: scored", count=len(scored))
 
     # Return all scored (caller will filter)

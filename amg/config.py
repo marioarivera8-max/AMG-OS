@@ -137,6 +137,13 @@ CLUSTER_WINDOWS = [
     (10.0, 10.0, 40, 5),     # ±40s at 5s intervals = 16 samples
 ]
 
+# v11.1.4: cap on AI scoring count for cluster phase. Mirrors the
+# BUILDUP_HUNTER_TOP_N pattern. Without this, fast decode (v11.1.3 PyAV)
+# lets cluster balloon — scene 10 produced 145 post-gate candidates that
+# would have taken ~15 min to AI-score. Default 30 keeps cluster
+# contribution roughly in line with finish (8) + buildup (10) + tier_2 (17).
+CLUSTER_HUNTER_TOP_N = 30
+
 # ============================================================
 # FLOOR ENFORCEMENT (Cover Count)
 # ============================================================
