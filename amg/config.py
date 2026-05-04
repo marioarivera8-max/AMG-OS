@@ -204,7 +204,16 @@ FINISH_HUNTER_TOP_N = 8              # Score top 8 candidates
 # ============================================================
 BUILDUP_HUNTER_ZONE_START_PCT = 0.25
 BUILDUP_HUNTER_ZONE_END_PCT = 0.50
-BUILDUP_HUNTER_TOP_N = 6
+# v11.1.2: bumped from 6 → 10. The cap was never the bottleneck — dedup was —
+# but once dedup is loosened (below) we want enough headroom to score the variety
+# we now get out. Adds ~30-40s to scene wall time at the parallelism we're seeing.
+BUILDUP_HUNTER_TOP_N = 10
+# v11.1.2: stricter dedup just for buildup. Default DEDUP_HAMMING_THRESHOLD=5 is
+# too liberal for slow zones (kissing, undressing, oral) where many frames share
+# composition but differ in small details — it was collapsing 55 candidates to 2
+# on scene 8 today. Threshold=2 means hashes must differ by ≤2 bits (out of 64)
+# to be considered duplicates; small but real visual changes now pass through.
+BUILDUP_DEDUP_HAMMING_THRESHOLD = 2
 
 # ============================================================
 # OUTPUT

@@ -16,6 +16,7 @@ from amg.config import (
     BUILDUP_HUNTER_ZONE_START_PCT,
     BUILDUP_HUNTER_ZONE_END_PCT,
     BUILDUP_HUNTER_TOP_N,
+    BUILDUP_DEDUP_HAMMING_THRESHOLD,
     SCORE_TIER_2_SUCCESS_FLOOR,
 )
 from amg.video.reader import VideoReader
@@ -83,8 +84,11 @@ def run_buildup_hunter(
     if not candidates:
         return {"candidates": [], "aborted": False}
 
-    # Deduplicate
-    deduped = deduplicate_frames(candidates)
+    # v11.1.2: pass stricter dedup threshold (2 vs global 5). The buildup zone
+    # is typically slow (kissing, undressing, oral) and the global threshold
+    # collapses too many subtly-different frames to one.
+    deduped = deduplicate_frames(candidates, threshold=BUILDUP_DEDUP_HAMMING_THRESHOLD)
+    log.info("Buildup hunter: post-dedup candidates", count=len(deduped))
 
     # Take top N by sharpness
     deduped.sort(key=lambda x: x["sharpness"], reverse=True)
