@@ -31,6 +31,11 @@ env/
 *~
 .DS_Store
 
+# Cursor — local user settings only; .cursor/rules/ is project-tracked
+.cursor/settings*.json
+.cursor/cache/
+.cursor/state/
+
 # AMG OS data — NEVER sync these
 data/decision_logs/
 data/studio_profiles/
