@@ -69,6 +69,12 @@ AI_PARALLEL_WORKERS = 4
 # Service-level failure threshold
 AI_SERVICE_FAIL_THRESHOLD = 3  # Consecutive failures before pausing batch
 
+# v11.1.2: deterministic scoring. temperature=0 + fixed seed in score_frame() means
+# two runs of the same scene with the same prompt produce identical scores. Required
+# for A/B testing prompt or scoring changes — without this, Ollama's RNG is a confound.
+# Any integer works; 42 is the conventional debugging seed.
+AI_SCORING_SEED = 42
+
 # ============================================================
 # VIDEO PROCESSING
 # ============================================================

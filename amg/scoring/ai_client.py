@@ -26,6 +26,7 @@ from amg.config import (
     AI_CALL_TIMEOUT_SEC,
     AI_CALL_RETRY_COUNT,
     AI_CALL_RETRY_DELAYS,
+    AI_SCORING_SEED,
 )
 
 
@@ -96,7 +97,13 @@ class AIClient:
             "messages": messages,
             "stream": False,
             "options": {
-                "temperature": 0.1,  # Low temp = more deterministic scoring
+                # v11.1.2: temperature=0 + fixed seed = deterministic scoring.
+                # Same frame + same prompt → same score on every run, so prompt
+                # changes can be A/B tested without Ollama randomness as a confound.
+                # Title generation (generate_text) deliberately keeps higher temp
+                # because the operator picks from multiple title suggestions.
+                "temperature": 0.0,
+                "seed": AI_SCORING_SEED,
                 "num_predict": 200,  # Cap response length
             },
         }
