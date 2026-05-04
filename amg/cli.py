@@ -498,11 +498,19 @@ def cmd_verify(args):
         except ImportError:
             checks.append((f"Python: {pkg}", False))
 
+    # v11.1.3: PyAV is the primary decode backend (replaces decord/OpenCV
+    # seek-and-decode pattern with linear stream decode). Required, not optional.
     try:
-        import decord
-        checks.append(("Python: decord (optional)", True))
+        import av as _av
+        checks.append((f"Python: av (PyAV {_av.__version__})", True))
+        # Try opening a hwaccel option to detect whether VideoToolbox is at
+        # least accepted by ffmpeg (true HW engagement isn't reliably probeable
+        # in PyAV 13.1 — speedup may come from linear decode pattern alone).
+        import platform
+        if platform.system() == "Darwin" and platform.machine() == "arm64":
+            checks.append(("VideoToolbox: option supported (HW engagement not probeable in PyAV 13.1)", None))
     except ImportError:
-        checks.append(("Python: decord (optional, fallback to OpenCV)", None))
+        checks.append(("Python: av (PyAV) MISSING — install with: pip install av==13.1.0", False))
 
     try:
         import shutil

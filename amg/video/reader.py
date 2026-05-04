@@ -1,98 +1,223 @@
 """
-Video reader.
+Video reader — v11.1.3.
 
-Wraps OpenCV (sequential reads) and decord (random access) for efficiency.
-Decord is 2x faster for random-access frame extraction (cluster sampling,
-finish hunter, buildup hunter). OpenCV is comparable for sequential reads.
+Backend selection (in priority order):
+  1. PyAV with videotoolbox option set  (Apple Silicon — see HWACCEL CAVEAT)
+  2. PyAV with plain software decode    (cross-platform, fast)
+  3. OpenCV                             (fallback, always available)
 
-Usage:
-    with VideoReader(path) as vr:
-        frame = vr.get_frame_at(timestamp_sec=123.4)
-        frames = vr.get_frames_at([t1, t2, t3])
+PyAV is a Python wrapper around ffmpeg's libav* libraries. For the hot
+path — sequential iteration during Tier 1/2/3 scans on long 4K HEVC
+videos — PyAV is meaningfully faster than OpenCV (~1.86x measured on
+scene 8 at 1080p) because it can decode the bitstream linearly and emit
+frames at intervals, instead of seeking-then-decoding for every frame
+as OpenCV does.
+
+HWACCEL CAVEAT — what we know vs what we don't:
+PyAV 13.1.0 silently accepts options={"hwaccel": "videotoolbox"} when
+opening a container, but provides no API to confirm whether VideoToolbox
+actually engages. Empirically the decoded frames come back as yuv420p
+(a software pixel format), suggesting the option may be a no-op in
+PyAV 13.1. The measured PyAV-vs-OpenCV speedup is real but is likely
+attributable to the linear decode pattern rather than HW acceleration.
+Treat any "videotoolbox" log line / backend_name as "we set the option,
+ffmpeg accepted it, status of actual HW engagement: unknown."
+
+This module is cherry-picked from v11.2 in isolation per Mario's
+direction. The v11.2 bundle was rolled back due to OTHER changes
+(wider tier_2 sweep flooding the AI with bad candidates, too-aggressive
+save-time dedup); the decode work itself ✅ worked. The handoff
+explicitly endorses re-using it, and that's exactly what this is. The
+frames_extracted counter hooks from v11.2 are NOT included here —
+those belong to a separate "counter aggregation" change Mario hasn't
+asked for.
+
+Public API is unchanged from v11.1 — drop-in replacement.
+
+Backend can be forced via env var AMG_VIDEO_BACKEND={pyav,opencv,auto}.
 """
-import cv2
+from __future__ import annotations
+
+import os
+import platform
 from pathlib import Path
-from typing import Optional, List, Iterator
+from typing import Iterator, List, Optional, Tuple
+
+import cv2
 import numpy as np
 
-# decord is optional — fall back to OpenCV if not installed
+from amg.utils.logging import get_logger
+
+log = get_logger("video.reader")
+
+
+# Try PyAV — log loudly if unavailable so install issues are obvious.
 try:
-    import decord
-    DECORD_AVAILABLE = True
-except ImportError:
-    DECORD_AVAILABLE = False
+    import av  # type: ignore
+    PYAV_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    av = None
+    PYAV_AVAILABLE = False
+    log.warn("PyAV not installed — falling back to OpenCV. Install with: pip install av")
 
 
-class VideoReader:
+# Backend selection knob. Default 'auto' tries PyAV first.
+# Override with AMG_VIDEO_BACKEND env var: 'pyav', 'opencv', or 'auto'.
+_BACKEND_OVERRIDE = os.environ.get("AMG_VIDEO_BACKEND", "auto").lower()
+
+
+def _is_apple_silicon() -> bool:
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
+def _supports_videotoolbox() -> bool:
+    """Cheap check: are we on Apple Silicon with PyAV present?"""
+    return PYAV_AVAILABLE and _is_apple_silicon()
+
+
+# --- Backend implementations ------------------------------------------------
+
+
+class _PyAVBackend:
     """
-    Unified video reader supporting both sequential and random-access reads.
+    PyAV backend. Tries VideoToolbox hwaccel first on Apple Silicon, falls
+    back to software decode if hwaccel init fails.
 
-    For random access (single timestamp or list of timestamps), uses decord
-    when available (2x faster). Falls back to OpenCV.
-
-    For sequential iteration (Tier 1/2/3 scans), uses OpenCV directly.
+    Holds two containers when needed:
+      - a streaming container for sequential iteration (forward-only)
+      - a separately-opened container per random-access call (avoids seek
+        contention with the streaming container)
     """
 
     def __init__(self, video_path: Path):
         self.video_path = Path(video_path)
-        self._cv_capture = None
-        self._decord_reader = None
-        self._fps = None
-        self._frame_count = None
-        self._duration = None
+        self._stream_container = None
+        self._stream_video = None
+        self._fps: Optional[float] = None
+        self._frame_count: Optional[int] = None
+        self._duration: Optional[float] = None
+        self._hwaccel_used = False
+        self._codec_name: Optional[str] = None
 
-    def __enter__(self):
-        self.open()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-    def open(self):
-        """Open underlying readers."""
-        # Always open OpenCV for sequential operations
-        self._cv_capture = cv2.VideoCapture(str(self.video_path))
-        if not self._cv_capture.isOpened():
-            raise IOError(f"Cannot open video: {self.video_path}")
-
-        self._fps = self._cv_capture.get(cv2.CAP_PROP_FPS)
-        self._frame_count = int(self._cv_capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        if self._fps > 0:
-            self._duration = self._frame_count / self._fps
+    def _try_open(self, hwaccel: Optional[str] = None):
+        """
+        Open a container. If hwaccel is set, try to attach hardware decoder.
+        Returns the container or raises.
+        """
+        # PyAV's hwaccel API: pass options on container open or use hwaccel
+        # parameter when iterating. The least-fragile approach across PyAV
+        # versions is to open normally, then mark the video stream's
+        # codec_context.options to use the hwaccel when present.
+        if hwaccel:
+            container = av.open(str(self.video_path), options={"hwaccel": hwaccel})
         else:
-            self._duration = 0
+            container = av.open(str(self.video_path))
+        return container
 
-        # Lazy-open decord (only if random access requested)
-        # See _ensure_decord()
+    def open(self) -> None:
+        """Open the streaming container with the best available backend."""
+        if self._stream_container is not None:
+            return
 
-    def close(self):
-        """Release readers."""
-        if self._cv_capture is not None:
-            self._cv_capture.release()
-            self._cv_capture = None
-        self._decord_reader = None
-
-    def _ensure_decord(self):
-        """Open decord reader on first random-access request."""
-        if not DECORD_AVAILABLE:
-            return False
-        if self._decord_reader is None:
+        last_err = None
+        # 1) Try passing the VideoToolbox hwaccel option (Apple Silicon).
+        #
+        # IMPORTANT — what _hwaccel_used actually means here:
+        # PyAV 13.1.0 silently accepts options={"hwaccel": "videotoolbox"}
+        # without raising AND without engaging hardware decode — decoded
+        # frames come back as yuv420p (a software pixel format), and PyAV 13
+        # exposes no API to confirm whether HW decode actually engaged.
+        # So this flag really means "the option string was accepted by
+        # ffmpeg without error" — NOT "HW decode is active." Real-world
+        # PyAV-vs-OpenCV speedup (~1.86x measured on scene 8) appears to
+        # come from PyAV's linear stream decode beating OpenCV's
+        # seek-and-decode-per-frame pattern, with HW status uncertain.
+        if _supports_videotoolbox():
             try:
-                self._decord_reader = decord.VideoReader(
-                    str(self.video_path),
-                    ctx=decord.cpu(0),
-                    num_threads=4,
+                container = self._try_open(hwaccel="videotoolbox")
+                self._init_from_container(container, hwaccel="videotoolbox")
+                self._hwaccel_used = True
+                log.info(
+                    "PyAV opened (videotoolbox option set; HW engagement not "
+                    "verifiable in PyAV 13.1 — speedup may be from linear "
+                    "decode pattern alone, not actual hwaccel)",
+                    codec=self._codec_name,
+                    duration_sec=self._duration,
                 )
+                return
+            except Exception as e:
+                last_err = e
+                log.warn(
+                    "PyAV rejected videotoolbox option, falling back to plain software decode",
+                    error=str(e),
+                )
+
+        # 2) Try PyAV software decode
+        try:
+            container = self._try_open(hwaccel=None)
+            self._init_from_container(container, hwaccel=None)
+            log.info(
+                "PyAV opened with software decode",
+                codec=self._codec_name,
+                duration_sec=self._duration,
+            )
+            return
+        except Exception as e:
+            last_err = e
+
+        raise IOError(
+            f"PyAV cannot open {self.video_path}: {last_err}"
+        )
+
+    def _init_from_container(self, container, hwaccel: Optional[str]) -> None:
+        """Cache stream metadata from an opened container."""
+        if not container.streams.video:
+            container.close()
+            raise IOError("No video stream found")
+        video_stream = container.streams.video[0]
+        # PyAV exposes average rate as a Fraction
+        if video_stream.average_rate is not None:
+            self._fps = float(video_stream.average_rate)
+        elif video_stream.base_rate is not None:
+            self._fps = float(video_stream.base_rate)
+        else:
+            self._fps = 0.0
+
+        self._codec_name = (video_stream.codec_context.name or "unknown") if video_stream.codec_context else "unknown"
+
+        # Duration and frame count
+        if container.duration is not None:
+            # AV_TIME_BASE = 1_000_000
+            self._duration = container.duration / 1_000_000.0
+        elif video_stream.duration is not None and video_stream.time_base is not None:
+            self._duration = float(video_stream.duration * video_stream.time_base)
+        else:
+            self._duration = 0.0
+
+        if video_stream.frames and video_stream.frames > 0:
+            self._frame_count = int(video_stream.frames)
+        elif self._fps and self._duration:
+            self._frame_count = int(self._fps * self._duration)
+        else:
+            self._frame_count = 0
+
+        self._stream_container = container
+        self._stream_video = video_stream
+
+    def close(self) -> None:
+        if self._stream_container is not None:
+            try:
+                self._stream_container.close()
             except Exception:
-                self._decord_reader = None
-                return False
-        return True
+                pass
+            self._stream_container = None
+            self._stream_video = None
 
     @property
     def fps(self) -> float:
         if self._fps is None:
             self.open()
-        return self._fps or 0
+        return self._fps or 0.0
 
     @property
     def frame_count(self) -> int:
@@ -104,64 +229,218 @@ class VideoReader:
     def duration_sec(self) -> float:
         if self._duration is None:
             self.open()
-        return self._duration or 0
+        return self._duration or 0.0
+
+    @property
+    def hwaccel_used(self) -> bool:
+        return self._hwaccel_used
 
     def get_frame_at(self, timestamp_sec: float) -> Optional[np.ndarray]:
         """
-        Get a single frame at the given timestamp (in seconds).
-
-        Returns BGR ndarray (OpenCV convention) or None if read fails.
-        Uses decord for speed if available.
+        Random access: open a fresh container, seek, decode one frame,
+        close. Opening per call is cheap with file caches and avoids
+        polluting the streaming container's seek state.
         """
-        if timestamp_sec < 0 or timestamp_sec > self.duration_sec:
+        if timestamp_sec < 0 or (self.duration_sec and timestamp_sec > self.duration_sec):
             return None
-
-        # Try decord (2x faster for random access)
-        if self._ensure_decord():
+        try:
+            container = av.open(str(self.video_path))
             try:
-                frame_idx = int(timestamp_sec * self.fps)
-                frame_idx = max(0, min(frame_idx, self.frame_count - 1))
-                frame_rgb = self._decord_reader[frame_idx].asnumpy()
-                # Decord returns RGB, convert to BGR for OpenCV consistency
-                return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-            except Exception:
-                pass  # Fall through to OpenCV
-
-        # Fallback: OpenCV
-        if self._cv_capture is None:
-            self.open()
-        self._cv_capture.set(cv2.CAP_PROP_POS_MSEC, timestamp_sec * 1000)
-        ret, frame = self._cv_capture.read()
-        return frame if ret else None
+                video_stream = container.streams.video[0]
+                # Seek to nearest keyframe at or before our target
+                target_pts = int(timestamp_sec / video_stream.time_base) if video_stream.time_base else 0
+                container.seek(
+                    target_pts,
+                    backward=True,
+                    any_frame=False,
+                    stream=video_stream,
+                )
+                # Decode forward until we reach (or pass) our target time
+                target_t = timestamp_sec
+                last_frame = None
+                for frame in container.decode(video=0):
+                    frame_t = float(frame.pts * video_stream.time_base) if frame.pts is not None and video_stream.time_base else 0
+                    last_frame = frame
+                    if frame_t >= target_t:
+                        break
+                if last_frame is None:
+                    return None
+                # PyAV frame -> RGB ndarray -> BGR ndarray for OpenCV consistency
+                rgb = last_frame.to_ndarray(format="rgb24")
+                return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            finally:
+                container.close()
+        except Exception as e:
+            log.warn("PyAV get_frame_at failed", t=timestamp_sec, error=str(e))
+            return None
 
     def get_frames_at(self, timestamps_sec: List[float]) -> List[Optional[np.ndarray]]:
         """
-        Batch frame extraction. Uses decord's get_batch when possible.
-
-        Returns list of frames in same order as timestamps_sec.
-        Failed reads return None.
+        Batch random access. Sort timestamps, seek to first, decode forward
+        emitting frames at each requested timestamp in order.
         """
         if not timestamps_sec:
             return []
+        # Pair each requested timestamp with its original index so we can
+        # restore order at the end
+        indexed = sorted(enumerate(timestamps_sec), key=lambda x: x[1])
+        results: List[Optional[np.ndarray]] = [None] * len(timestamps_sec)
 
-        # Try decord batch (most efficient)
-        if self._ensure_decord():
+        try:
+            container = av.open(str(self.video_path))
             try:
-                indices = [
-                    max(0, min(int(t * self.fps), self.frame_count - 1))
-                    for t in timestamps_sec
-                ]
-                batch = self._decord_reader.get_batch(indices).asnumpy()
-                # batch is (N, H, W, 3) RGB
-                result = []
-                for i in range(batch.shape[0]):
-                    bgr = cv2.cvtColor(batch[i], cv2.COLOR_RGB2BGR)
-                    result.append(bgr)
-                return result
-            except Exception:
-                pass
+                video_stream = container.streams.video[0]
+                tb = video_stream.time_base
+                # Seek to first requested timestamp (backward to keyframe)
+                first_t = indexed[0][1]
+                target_pts = int(first_t / tb) if tb else 0
+                container.seek(target_pts, backward=True, any_frame=False, stream=video_stream)
 
-        # Fallback: one-by-one
+                idx_into_indexed = 0
+                next_orig_idx, next_t = indexed[idx_into_indexed]
+
+                for frame in container.decode(video=0):
+                    frame_t = float(frame.pts * tb) if frame.pts is not None and tb else 0.0
+                    while idx_into_indexed < len(indexed) and frame_t >= next_t:
+                        rgb = frame.to_ndarray(format="rgb24")
+                        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                        results[next_orig_idx] = bgr
+                        idx_into_indexed += 1
+                        if idx_into_indexed >= len(indexed):
+                            break
+                        next_orig_idx, next_t = indexed[idx_into_indexed]
+                    if idx_into_indexed >= len(indexed):
+                        break
+            finally:
+                container.close()
+        except Exception as e:
+            log.warn("PyAV get_frames_at failed", error=str(e))
+            # One-by-one fallback
+            return [self.get_frame_at(t) for t in timestamps_sec]
+
+        return results
+
+    def iter_frames_sequential(
+        self,
+        start_sec: float,
+        end_sec: float,
+        interval_sec: float,
+    ) -> Iterator[Tuple[float, np.ndarray]]:
+        """
+        THE HOT PATH. Linear stream decode, emit frames at intervals.
+
+        Replaces v10.x/v11.1 OpenCV approach that did set(POS_MSEC) +
+        read() per requested timestamp — which forces a seek-and-decode
+        cycle every time and is the 4K HEVC bottleneck.
+
+        With PyAV we open the stream once, seek to start_sec (to nearest
+        keyframe), then iterate decoded frames in order. We yield only
+        when the next requested timestamp is reached.
+        """
+        if interval_sec <= 0:
+            raise ValueError("interval_sec must be > 0")
+
+        try:
+            container = av.open(str(self.video_path))
+            try:
+                video_stream = container.streams.video[0]
+                tb = video_stream.time_base
+                # Seek to start (backward to keyframe so we don't miss frames)
+                start_pts = int(max(0.0, start_sec) / tb) if tb else 0
+                container.seek(start_pts, backward=True, any_frame=False, stream=video_stream)
+
+                next_target = start_sec
+                for frame in container.decode(video=0):
+                    if frame.pts is None or tb is None:
+                        continue
+                    frame_t = float(frame.pts * tb)
+                    if frame_t > end_sec:
+                        break
+                    if frame_t >= next_target:
+                        rgb = frame.to_ndarray(format="rgb24")
+                        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                        yield (frame_t, bgr)
+                        next_target = frame_t + interval_sec
+            finally:
+                container.close()
+        except Exception as e:
+            log.warn(
+                "PyAV iter_frames_sequential failed, no frames emitted",
+                start=start_sec, end=end_sec, error=str(e),
+            )
+            return
+
+
+class _OpenCVBackend:
+    """OpenCV fallback. Same behavior as v11.1's reader."""
+
+    def __init__(self, video_path: Path):
+        self.video_path = Path(video_path)
+        self._cap: Optional[cv2.VideoCapture] = None
+        self._fps: Optional[float] = None
+        self._frame_count: Optional[int] = None
+        self._duration: Optional[float] = None
+        self._hwaccel_used = False
+        self._codec_name = "unknown"
+
+    def open(self) -> None:
+        if self._cap is not None:
+            return
+        cap = cv2.VideoCapture(str(self.video_path))
+        if not cap.isOpened():
+            raise IOError(f"Cannot open video: {self.video_path}")
+        self._cap = cap
+        self._fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        self._frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if self._fps > 0:
+            self._duration = self._frame_count / self._fps
+        else:
+            self._duration = 0.0
+        log.info(
+            "OpenCV opened (no hardware acceleration)",
+            duration_sec=self._duration,
+            fps=self._fps,
+        )
+
+    def close(self) -> None:
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+
+    @property
+    def fps(self) -> float:
+        if self._fps is None:
+            self.open()
+        return self._fps or 0.0
+
+    @property
+    def frame_count(self) -> int:
+        if self._frame_count is None:
+            self.open()
+        return self._frame_count or 0
+
+    @property
+    def duration_sec(self) -> float:
+        if self._duration is None:
+            self.open()
+        return self._duration or 0.0
+
+    @property
+    def hwaccel_used(self) -> bool:
+        return False
+
+    def get_frame_at(self, timestamp_sec: float) -> Optional[np.ndarray]:
+        if timestamp_sec < 0 or timestamp_sec > self.duration_sec:
+            return None
+        if self._cap is None:
+            self.open()
+        self._cap.set(cv2.CAP_PROP_POS_MSEC, timestamp_sec * 1000)
+        ret, frame = self._cap.read()
+        if ret and frame is not None:
+            return frame
+        return None
+
+    def get_frames_at(self, timestamps_sec: List[float]) -> List[Optional[np.ndarray]]:
         return [self.get_frame_at(t) for t in timestamps_sec]
 
     def iter_frames_sequential(
@@ -169,23 +448,110 @@ class VideoReader:
         start_sec: float,
         end_sec: float,
         interval_sec: float,
-    ) -> Iterator[tuple]:
-        """
-        Iterate frames sequentially in a time range.
-
-        Yields (timestamp_sec, frame_bgr) tuples.
-        Uses OpenCV (faster for sequential reads).
-        """
-        if self._cv_capture is None:
+    ) -> Iterator[Tuple[float, np.ndarray]]:
+        if self._cap is None:
             self.open()
-
         timestamp = start_sec
         while timestamp <= end_sec:
-            self._cv_capture.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
-            ret, frame = self._cv_capture.read()
-            if ret:
+            self._cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+            ret, frame = self._cap.read()
+            if ret and frame is not None:
                 yield (timestamp, frame)
             timestamp += interval_sec
+
+
+# --- Public class -----------------------------------------------------------
+
+
+class VideoReader:
+    """
+    Unified video reader supporting both sequential and random-access reads.
+
+    Chooses the best backend at open time and exposes the v11.1 API:
+
+        with VideoReader(path) as vr:
+            frame = vr.get_frame_at(timestamp_sec=123.4)
+            frames = vr.get_frames_at([t1, t2, t3])
+            for ts, frame in vr.iter_frames_sequential(0, 60, 1.0):
+                ...
+    """
+
+    def __init__(self, video_path: Path):
+        self.video_path = Path(video_path)
+        self._backend = self._select_backend()
+
+    def _select_backend(self):
+        # Honor the env override if set
+        if _BACKEND_OVERRIDE == "opencv":
+            return _OpenCVBackend(self.video_path)
+        if _BACKEND_OVERRIDE == "pyav":
+            if not PYAV_AVAILABLE:
+                log.warn("AMG_VIDEO_BACKEND=pyav but PyAV not installed; using OpenCV")
+                return _OpenCVBackend(self.video_path)
+            return _PyAVBackend(self.video_path)
+        # Auto: prefer PyAV
+        if PYAV_AVAILABLE:
+            return _PyAVBackend(self.video_path)
+        return _OpenCVBackend(self.video_path)
+
+    def __enter__(self):
+        self.open()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def open(self):
+        try:
+            self._backend.open()
+        except Exception as e:
+            # If PyAV fails to open the file at all, fall back to OpenCV
+            if isinstance(self._backend, _PyAVBackend):
+                log.warn("PyAV failed to open file; falling back to OpenCV", error=str(e))
+                self._backend = _OpenCVBackend(self.video_path)
+                self._backend.open()
+            else:
+                raise
+
+    def close(self):
+        if self._backend is not None:
+            self._backend.close()
+
+    @property
+    def fps(self) -> float:
+        return self._backend.fps
+
+    @property
+    def frame_count(self) -> int:
+        return self._backend.frame_count
+
+    @property
+    def duration_sec(self) -> float:
+        return self._backend.duration_sec
+
+    @property
+    def backend_name(self) -> str:
+        if isinstance(self._backend, _PyAVBackend):
+            # See _PyAVBackend.open() for why we don't claim "videotoolbox" here:
+            # PyAV 13.1 accepts the option without engaging HW decode, and
+            # exposes no probe API to confirm. "vt-option-set" makes the
+            # uncertainty visible to anyone reading logs/dashboards.
+            return "pyav (vt-option-set)" if self._backend.hwaccel_used else "pyav-software"
+        return "opencv"
+
+    def get_frame_at(self, timestamp_sec: float) -> Optional[np.ndarray]:
+        return self._backend.get_frame_at(timestamp_sec)
+
+    def get_frames_at(self, timestamps_sec: List[float]) -> List[Optional[np.ndarray]]:
+        return self._backend.get_frames_at(timestamps_sec)
+
+    def iter_frames_sequential(
+        self,
+        start_sec: float,
+        end_sec: float,
+        interval_sec: float,
+    ) -> Iterator[Tuple[float, np.ndarray]]:
+        return self._backend.iter_frames_sequential(start_sec, end_sec, interval_sec)
 
 
 def get_frame_at_timestamp(video_path: Path, timestamp_sec: float) -> Optional[np.ndarray]:

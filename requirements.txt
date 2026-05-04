@@ -4,8 +4,12 @@
 # Update collectively, not individually.
 
 # Core video processing
-opencv-python==4.10.0.84       # Sequential video reading, image ops, face detection
-# decord==0.6.0  # Optional, no Python 3.14 wheels — falls back to OpenCV                  # Random-access frame extraction (2x faster than OpenCV)
+opencv-python==4.10.0.84       # Image ops, face detection, fallback decode
+# v11.1.3: PyAV (ffmpeg/libav wrapper) is the primary decode backend.
+# Enables VideoToolbox hardware decode on Apple Silicon — ~3-5x faster than
+# OpenCV on 4K HEVC sources, which dominates wall time on long scenes.
+# OpenCV remains as a fallback if PyAV fails to import or open a file.
+av==13.1.0                     # PyAV: ffmpeg wrapper for hardware-accelerated decode
 ffmpeg-python==0.2.0           # ffprobe metadata wrapper
 
 # AI client
