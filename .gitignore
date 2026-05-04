@@ -45,6 +45,8 @@ data/backups/
 data/audit_log.jsonl
 data/.batch.lock
 data/migrations/
+# Bake-off artifacts (generated, large)
+data/bake_off/
 # Per-batch summaries — operator data, varies per Mac. Keep .gitkeep placeholders.
 data/batch_summaries/*.json
 data/distribution_status/*.json
