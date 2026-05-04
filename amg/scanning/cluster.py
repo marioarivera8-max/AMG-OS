@@ -61,19 +61,44 @@ def expand_clusters(
         reverse=True,
     )
 
-    # Build list of candidate timestamps to sample
-    sample_points = []  # List of (timestamp, source_seed_score)
-    expansions = 0
-
+    # v11.1.2: seed consolidation. If two scoring seeds are close enough that
+    # their expansion windows would overlap, only expand the higher-scoring one.
+    # The high-scorer's cluster already mines that timeline range — expanding
+    # around the lower-scoring seed produces redundant samples and Mario ends
+    # up with 13 near-duplicate covers from the same 70-second hot zone (which
+    # is exactly what scene 8 produced in v11.1.1: 8m03/07/08/27/36/39/41/42/...).
+    # Higher-scorer wins because it's empirically the better representative.
+    kept_seeds = []
+    kept_ranges = []  # (lo_ts, hi_ts) of each kept seed's expansion window
+    dropped_for_overlap = 0
     for seed in sorted_seeds:
         scored = seed.get("scored_frame")
         if not scored or scored.score < 5.0:
             continue
-
         seed_ts = seed["timestamp_sec"]
-        window_sec, interval_sec = get_cluster_window(scored.score)
+        window_sec, _ = get_cluster_window(scored.score)
         if window_sec == 0:
             continue
+        seed_lo = seed_ts - window_sec
+        seed_hi = seed_ts + window_sec
+        if any(seed_lo < hi and seed_hi > lo for lo, hi in kept_ranges):
+            dropped_for_overlap += 1
+            continue
+        kept_seeds.append(seed)
+        kept_ranges.append((seed_lo, seed_hi))
+
+    if dropped_for_overlap:
+        log.info("Cluster expansion: seeds consolidated",
+                 kept=len(kept_seeds), dropped_overlap=dropped_for_overlap)
+
+    # Build list of candidate timestamps to sample (only from kept seeds)
+    sample_points = []  # List of (timestamp, source_seed_score)
+    expansions = 0
+
+    for seed in kept_seeds:
+        scored = seed.get("scored_frame")
+        seed_ts = seed["timestamp_sec"]
+        window_sec, interval_sec = get_cluster_window(scored.score)
 
         expansions += 1
 
@@ -95,7 +120,7 @@ def expand_clusters(
             seen.add(ts_key)
 
     log.info("Cluster expansion plan",
-             seeds=len([s for s in sorted_seeds if s.get("scored_frame") and s["scored_frame"].score >= 5.0]),
+             seeds=len(kept_seeds),
              expansions=expansions,
              sample_points=len(sample_points))
 
