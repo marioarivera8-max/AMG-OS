@@ -11,6 +11,7 @@ Handles:
 """
 import base64
 import io
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -53,11 +54,15 @@ class AIClient:
     def __init__(
         self,
         api_url: str = OLLAMA_API_URL,
-        model: str = VISION_MODEL,
+        model: Optional[str] = None,
         timeout_sec: int = AI_CALL_TIMEOUT_SEC,
     ):
         self.api_url = api_url
-        self.model = model
+        # Resolution order: explicit model= arg → AMG_VISION_MODEL_OVERRIDE env var
+        # (used by scripts/bake_off.py to swap models per run without modifying
+        # config) → VISION_MODEL constant from config. Default behavior unchanged
+        # when env var is unset.
+        self.model = model or os.environ.get("AMG_VISION_MODEL_OVERRIDE") or VISION_MODEL
         self.timeout_sec = timeout_sec
         # Use a session for connection pooling (faster across many calls)
         self._session = requests.Session()
