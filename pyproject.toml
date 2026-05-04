@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amg-os"
+version = "11.0.0"
+description = "AMG OS — Adult VOD scene processor for B2B distribution"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [
+    { name = "AMG / Mario", email = "mario@allmediagroup.tv" },
+]
+
+dependencies = [
+    "opencv-python==4.10.0.84",
+    # "decord==0.6.0",  # Optional, no Python 3.14 wheels
+    "ffmpeg-python==0.2.0",
+    "requests==2.32.3",
+    "pillow==10.4.0",
+    "imagehash==4.3.1",
+    "numpy==1.26.4",
+    "pyyaml==6.0.2",
+    "python-dateutil==2.9.0",
+    "rich==13.9.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.3",
+    "pytest-cov==5.0.0",
+]
+
+[project.scripts]
+amg = "amg.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["amg*"]
+exclude = ["tests*", "data*", "scripts*", "docs*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"

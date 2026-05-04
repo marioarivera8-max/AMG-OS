@@ -1,0 +1,26 @@
+# AMG OS v11.0 — Python Dependencies
+# ===================================
+# Pinned versions for reproducibility. Tested combination.
+# Update collectively, not individually.
+
+# Core video processing
+opencv-python==4.10.0.84       # Sequential video reading, image ops, face detection
+# decord==0.6.0  # Optional, no Python 3.14 wheels — falls back to OpenCV                  # Random-access frame extraction (2x faster than OpenCV)
+ffmpeg-python==0.2.0           # ffprobe metadata wrapper
+
+# AI client
+requests==2.32.3               # HTTP for Ollama API
+
+# Image processing
+pillow==10.4.0                 # Image manipulation, contact sheet rendering, enhancement
+imagehash==4.3.1               # Perceptual hashing (dHash) for deduplication
+numpy==1.26.4                  # Required by OpenCV, imagehash, ndarray ops
+
+# Utilities
+pyyaml==6.0.2                  # Config file parsing (config.yaml, studio profiles)
+python-dateutil==2.9.0         # Date handling
+rich==13.9.4                   # Pretty CLI output, progress bars
+
+# Testing (dev only — comment out for production-only installs)
+pytest==8.3.3
+pytest-cov==5.0.0

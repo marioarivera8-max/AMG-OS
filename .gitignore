@@ -1,0 +1,83 @@
+# =====================================================================
+# AMG OS v11 — .gitignore
+# =====================================================================
+# Sync code only across Macs. Never sync data, cache, or local state.
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environment
+venv/
+env/
+.venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# AMG OS data — NEVER sync these
+data/decision_logs/
+data/studio_profiles/
+data/performers/
+data/logs/
+data/backups/
+data/audit_log.jsonl
+data/.batch.lock
+data/migrations/
+# Per-batch summaries — operator data, varies per Mac. Keep .gitkeep placeholders.
+data/batch_summaries/*.json
+data/distribution_status/*.json
+data/operator_history/*.json
+data/performer_documents/*
+!data/performer_documents/.gitkeep
+data/reviewed/*.json
+data/title_corpus/*
+!data/title_corpus/.gitkeep
+
+# Claude Code per-machine settings (project-level allow/deny lists, hooks, etc.)
+.claude/settings.local.json
+
+# Local configuration overrides
+config.yaml
+.amg_config.json
+
+# Source content paths (always local)
+incoming/
+processing/
+ready/
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.psd
+2257*.pdf
+2257*.jpg
+2257*.png
+id.pdf
+
+# Backups created by setup.sh
+*.amg_backup_*
+
+# Stale .bak files from in-place edits (preserved on disk, not versioned)
+*.bak
+
+# OS junk
+Thumbs.db
+.AppleDouble
+.LSOverride

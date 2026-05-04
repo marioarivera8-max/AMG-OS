@@ -1,0 +1,66 @@
+# AMG OS v11 — Global Configuration Template
+# ============================================
+# Copy this to config.yaml in the project root to override defaults.
+# Studio-specific overrides go in data/studio_profiles/{studio}.json instead.
+# Scene-specific overrides go in .amg_config.json next to the video.
+
+# -------------------------------------------------------------
+# Operator identity
+# -------------------------------------------------------------
+operator_id: "mario"
+machine_id: null  # null = auto-detect from hostname
+
+# -------------------------------------------------------------
+# Quality vs speed
+# -------------------------------------------------------------
+default_floor: 10           # Minimum covers per scene (never go below)
+prefer_speed_over_quality: false
+
+# -------------------------------------------------------------
+# Ollama (Apple Silicon)
+# -------------------------------------------------------------
+ollama:
+  num_parallel: 4           # 4 = OLLAMA_NUM_PARALLEL=4
+  context_length: 2560
+  keep_alive: "24h"
+  model: "qwen2.5vl:7b"
+
+# -------------------------------------------------------------
+# Time budget
+# -------------------------------------------------------------
+time_budget:
+  soft_pct: 25              # Warning at 25% of video duration
+  hard_pct: 50              # Abort at 50% of video duration
+  absolute_max_min: 20      # Hard cap regardless
+
+# -------------------------------------------------------------
+# Output
+# -------------------------------------------------------------
+output:
+  cover_format: "JPEG"
+  cover_quality: 92
+  enhance_default: true
+  contact_sheet_branding: "AITG"
+
+# -------------------------------------------------------------
+# Compliance
+# -------------------------------------------------------------
+compliance:
+  require_2257_doc: true    # Block scene processing if 2257 missing
+  audit_log_enabled: true
+
+# -------------------------------------------------------------
+# Data retention (in days)
+# -------------------------------------------------------------
+retention:
+  work_dirs: 30             # Auto-cleanup eligible after 30 days
+  decision_logs: 365        # Never auto-delete; only explicit cleanup
+  run_logs: 90
+  structured_logs: 90
+  backups: 7
+
+# -------------------------------------------------------------
+# Disk space
+# -------------------------------------------------------------
+disk:
+  min_free_gb: 10           # Pause batch if free space drops below
