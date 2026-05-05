@@ -1,0 +1,45 @@
+# Build context exclusions.
+# Keep this lean - everything here gets sent to Docker on every `docker build`.
+
+# Python / dev artifacts
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+.mypy_cache/
+.ruff_cache/
+
+# Local data (per-machine state, never goes in an image)
+data/
+*.zip
+
+# IDE / editor / VCS
+.git/
+.gitignore
+.cursor/
+.idea/
+.vscode/
+.DS_Store
+
+# Tests, scripts, docs - not needed in the runtime image
+tests/
+scripts/
+docs/
+
+# Markdown files at repo root - context for humans, not the image
+AGENTS.md
+CLAUDE.md
+CLAUDE_CODE_HANDOFF.md
+SESSION_NOTES_*.md
+TOMORROW.md
+AGENT_CONTEXT_*.md
+README.md
+CHANGELOG*.md
+
+# Don't include the Dockerfile in itself or its sibling
+Dockerfile
+.dockerignore
