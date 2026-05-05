@@ -72,8 +72,10 @@ AI_CALL_TIMEOUT_SEC = 30
 AI_CALL_RETRY_COUNT = 3
 AI_CALL_RETRY_DELAYS = [1, 3, 5]  # Seconds between retries
 
-# Parallel scoring (matches OLLAMA_NUM_PARALLEL)
-AI_PARALLEL_WORKERS = 4
+# Parallel scoring (matches OLLAMA_NUM_PARALLEL).
+# Override via AMG_AI_PARALLEL_WORKERS env var for empirical scaling tests.
+# Must match OLLAMA_NUM_PARALLEL on the Ollama server to avoid request queuing.
+AI_PARALLEL_WORKERS = int(os.environ.get("AMG_AI_PARALLEL_WORKERS", "4"))
 
 # Service-level failure threshold
 AI_SERVICE_FAIL_THRESHOLD = 3  # Consecutive failures before pausing batch
