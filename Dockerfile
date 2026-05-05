@@ -42,7 +42,8 @@ FROM python:3.12-slim-bookworm
 # Runtime system deps:
 #   ffmpeg            -> PyAV decode + ffprobe metadata
 #   libgl1, libglib2  -> opencv-python runtime requirements
-#   curl, ca-certs    -> rclone-style fetches and TLS roots
+#   curl, ca-certs    -> rclone download + TLS roots
+#   unzip             -> rclone install (pinned binary, see below)
 #   tini              -> proper PID 1 / signal handling for amg ui (uvicorn)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
@@ -50,9 +51,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libglib2.0-0 \
         curl \
         ca-certificates \
+        unzip \
         tini \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# rclone (cloud-storage transfers for Phase 2). Pinned + sha256-verified so
+# the build is reproducible. Bumping version: update both the version arg
+# and the SHA256SUMS-derived hash. Source:
+# https://downloads.rclone.org/v<VERSION>/SHA256SUMS
+ARG RCLONE_VERSION=1.74.0
+ARG RCLONE_SHA256=61de0a78d8776fe3e080f8385ebe96d817f2ee6a6003fe36b2d9f3b49d3e36ea
+RUN curl -fsSL "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip" \
+        -o /tmp/rclone.zip \
+    && echo "${RCLONE_SHA256}  /tmp/rclone.zip" | sha256sum -c - \
+    && cd /tmp \
+    && unzip -q rclone.zip \
+    && mv rclone-v${RCLONE_VERSION}-linux-amd64/rclone /usr/local/bin/rclone \
+    && chmod +x /usr/local/bin/rclone \
+    && rm -rf /tmp/rclone* \
+    && rclone version | head -1
 
 # Run as non-root in the container. UID 1000 is conventional for primary user.
 RUN useradd --create-home --shell /bin/bash --uid 1000 amg
