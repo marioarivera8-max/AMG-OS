@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in · AMG OS</title>
+    <style>
+      :root {
+        --bg-0: #0F1115;
+        --bg-1: #11151D;
+        --bg-2: #171A21;
+        --bg-3: #1C2230;
+        --line: #2A3040;
+        --line-soft: #232938;
+        --text: #E7E7E7;
+        --muted: #9AA3B2;
+        --muted-2: #6E7689;
+        --accent: #5B8DEF;
+        --accent-soft: rgba(91, 141, 239, 0.12);
+        --err: #F29A9A;
+        --err-soft: rgba(242, 154, 154, 0.12);
+        --warn: #F6CF75;
+        --warn-soft: rgba(246, 207, 117, 0.12);
+        --radius: 10px;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; height: 100%; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Display", "Segoe UI", sans-serif;
+        background: var(--bg-0);
+        color: var(--text);
+        font-size: 14px;
+        line-height: 1.45;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100%;
+        padding: 24px;
+      }
+      .login-card {
+        width: 100%;
+        max-width: 380px;
+        background: var(--bg-2);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 28px 26px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 22px;
+        font-weight: 600;
+        font-size: 15px;
+      }
+      .brand-glyph {
+        width: 22px; height: 22px;
+        background: linear-gradient(135deg, #5B8DEF, #7E5BE3);
+        clip-path: polygon(50% 0, 100% 100%, 0 100%);
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 13px;
+        margin: 0 0 22px;
+      }
+      label.field {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 14px;
+      }
+      input[type="text"], input[type="password"] {
+        background: var(--bg-1);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 14px;
+        font-family: inherit;
+        outline: none;
+      }
+      input:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+      button.primary {
+        width: 100%;
+        background: var(--accent);
+        color: #0a1024;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        padding: 11px 14px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        font-family: inherit;
+        margin-top: 4px;
+      }
+      button.primary:hover { background: #6fa0f7; border-color: #6fa0f7; }
+      .alert {
+        font-size: 13px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        margin: 0 0 14px;
+        border: 1px solid var(--line);
+      }
+      .alert.err {
+        color: var(--err);
+        background: var(--err-soft);
+        border-color: rgba(242, 154, 154, 0.3);
+      }
+      .alert.warn {
+        color: var(--warn);
+        background: var(--warn-soft);
+        border-color: rgba(246, 207, 117, 0.3);
+      }
+      .alert.info {
+        color: var(--accent);
+        background: var(--accent-soft);
+        border-color: rgba(91, 141, 239, 0.3);
+      }
+      .alert code {
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        font-size: 12px;
+        background: rgba(0,0,0,0.3);
+        padding: 1px 6px;
+        border-radius: 4px;
+      }
+      .footer-hint {
+        margin-top: 22px;
+        font-size: 11px;
+        color: var(--muted-2);
+        text-align: center;
+        letter-spacing: 0.02em;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="login-card">
+      <div class="brand">
+        <span class="brand-glyph"></span>
+        <span>AMG OS</span>
+      </div>
+
+      {% if auth_disabled %}
+        <div class="alert info">
+          Auth is disabled (<code>AMG_AUTH_DISABLED=1</code>). The login screen is
+          shown for testing only — every request is authenticated as a local
+          operator.
+        </div>
+        <a href="{{ next or '/' }}"><button type="button" class="primary">Continue</button></a>
+      {% else %}
+        <h1>Sign in</h1>
+        <div class="sub">AMG OS is gated behind a login. Use the credentials your operator created.</div>
+
+        {% if no_users %}
+          <div class="alert warn">
+            No users have been created yet. From a shell with the AMG environment
+            active, run <code>amg user add &lt;username&gt;</code> to create the
+            first account.
+          </div>
+        {% endif %}
+
+        {% if error %}
+          <div class="alert err">{{ error }}</div>
+        {% endif %}
+
+        <form method="POST" action="/login">
+          <input type="hidden" name="next" value="{{ next or '/' }}" />
+          <label class="field">
+            Username
+            <input type="text" name="username" autocomplete="username" required autofocus />
+          </label>
+          <label class="field">
+            Password
+            <input type="password" name="password" autocomplete="current-password" required />
+          </label>
+          <button type="submit" class="primary">Sign in</button>
+        </form>
+      {% endif %}
+
+      <div class="footer-hint">Local-first · Single-tenant · v11.3</div>
+    </div>
+  </body>
+</html>

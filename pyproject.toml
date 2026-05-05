@@ -29,6 +29,11 @@ dependencies = [
     "uvicorn",
     "jinja2",
     "python-multipart",
+    # Auth: argon2id password hashing + signed-cookie session middleware
+    # (itsdangerous is what Starlette's SessionMiddleware uses; declared
+    # explicitly so a fresh `pip install` doesn't fail without it).
+    "argon2-cffi==25.1.0",
+    "itsdangerous==2.2.0",
 ]
 
 [project.optional-dependencies]
