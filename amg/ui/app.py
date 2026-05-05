@@ -32,9 +32,9 @@ from amg.config import (
 )
 from amg.ingest.inventory import VIDEO_EXTENSIONS, discover_scenes
 from amg.learning.feedback_eval import evaluate_feedback, load_feedback_rows
-from amg.pipeline import process_scene
 from amg.scoring.insight_pipeline import generate_scene_insight_payload
 from amg.utils.logging import get_logger
+from amg.cloud.job_backend import get_backend
 from amg.ui.auth import get_current_user, install_auth, is_auth_enabled
 from amg.video.metadata import get_metadata
 
@@ -901,8 +901,34 @@ def _run_job(job_id: str) -> None:
         video_path = Path(job["video_path"])
 
     try:
-        _start_live_log_tail(job_id)
-        result = process_scene(video_path)
+        backend = get_backend()
+        # Only the local backend writes a run-log file on this host. The
+        # remote backend already streams pod-side log lines through
+        # on_log, and starting the disk-tail watcher would just clobber
+        # those entries with an empty list when no local log exists.
+        if backend.name == "local":
+            _start_live_log_tail(job_id)
+
+        def _on_log(line: str) -> None:
+            with _jobs_lock:
+                j = _jobs.get(job_id)
+                if not j:
+                    return
+                tail = list(j.get("log_tail") or [])
+                tail.append(line)
+                if len(tail) > 50:
+                    tail = tail[-50:]
+                j["log_tail"] = tail
+                j["message"] = line
+
+        def _on_progress(pct: int) -> None:
+            with _jobs_lock:
+                j = _jobs.get(job_id)
+                if not j:
+                    return
+                j["progress_pct"] = max(0, min(100, int(pct)))
+
+        result = backend.run_job(video_path, on_log=_on_log, on_progress=_on_progress)
         with _jobs_lock:
             job = _jobs[job_id]
             job["result"] = result
