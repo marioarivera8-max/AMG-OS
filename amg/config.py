@@ -42,8 +42,25 @@ BATCH_LOCK_FILE = DATA_DIR / ".batch.lock"
 # ============================================================
 # OLLAMA / AI
 # ============================================================
-OLLAMA_HOST = "127.0.0.1:11434"
-OLLAMA_API_URL = f"http://{OLLAMA_HOST}/api/chat"
+# OLLAMA_HOST is env-overridable so AMG can point at a remote Ollama
+# (LAN GPU box, Tailscale node, Runpod TCP proxy, Runpod HTTPS proxy, etc.).
+# Accepted forms:
+#   "127.0.0.1:11434"                       -> http://127.0.0.1:11434  (local default)
+#   "192.168.1.50:11434"                    -> http://192.168.1.50:11434
+#   "https://podid-11434.proxy.runpod.net"  -> use HTTPS scheme as-is
+#   "http://server.local:11434"             -> use HTTP scheme as-is
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434")
+
+
+def _build_ollama_base_url(host: str) -> str:
+    """Resolve OLLAMA_HOST string to a full base URL (no trailing slash)."""
+    if host.startswith(("http://", "https://")):
+        return host.rstrip("/")
+    return f"http://{host}"
+
+
+OLLAMA_BASE_URL = _build_ollama_base_url(OLLAMA_HOST)
+OLLAMA_API_URL = f"{OLLAMA_BASE_URL}/api/chat"
 
 VISION_MODEL = "qwen2.5vl:7b"
 FALLBACK_MODEL = "qwen2.5vl:3b"  # If memory pressure

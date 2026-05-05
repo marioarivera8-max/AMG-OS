@@ -93,3 +93,36 @@ class TestAdaptiveIntervals:
 
     def test_adaptive_interval_never_below_base(self):
         assert get_adaptive_interval(2.0, 200, max_interval=1.0) == 2.0
+
+
+class TestOllamaHostParsing:
+    """Guard against future refactors of the OLLAMA_HOST env override."""
+
+    def test_bare_host_port_defaults_to_http(self):
+        from amg.config import _build_ollama_base_url
+        assert _build_ollama_base_url("127.0.0.1:11434") == "http://127.0.0.1:11434"
+
+    def test_lan_address(self):
+        from amg.config import _build_ollama_base_url
+        assert _build_ollama_base_url("192.168.1.50:11434") == "http://192.168.1.50:11434"
+
+    def test_https_url_passthrough(self):
+        from amg.config import _build_ollama_base_url
+        assert (
+            _build_ollama_base_url("https://podid-11434.proxy.runpod.net")
+            == "https://podid-11434.proxy.runpod.net"
+        )
+
+    def test_http_url_passthrough(self):
+        from amg.config import _build_ollama_base_url
+        assert (
+            _build_ollama_base_url("http://server.local:11434")
+            == "http://server.local:11434"
+        )
+
+    def test_trailing_slash_stripped(self):
+        from amg.config import _build_ollama_base_url
+        assert (
+            _build_ollama_base_url("https://example.com/")
+            == "https://example.com"
+        )

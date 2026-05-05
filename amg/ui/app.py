@@ -991,8 +991,19 @@ def _decorate_job(job: dict) -> dict:
 
 def _ollama_ok(timeout: float = 0.4) -> bool:
     try:
-        host, _, port = "127.0.0.1:11434".partition(":")
-        s = socket.create_connection((host, int(port or "11434")), timeout=timeout)
+        from amg.config import OLLAMA_HOST
+        target = OLLAMA_HOST
+        if target.startswith("https://"):
+            target = target[len("https://"):]
+            default_port = 443
+        elif target.startswith("http://"):
+            target = target[len("http://"):]
+            default_port = 80
+        else:
+            default_port = 11434
+        target = target.split("/", 1)[0]  # strip any path
+        host, _, port = target.partition(":")
+        s = socket.create_connection((host, int(port or default_port)), timeout=timeout)
         s.close()
         return True
     except Exception:
