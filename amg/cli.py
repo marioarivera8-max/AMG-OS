@@ -32,6 +32,7 @@ Commands:
     amg retrain-status          Show recent scoring retrain runs
     amg promote-score-candidate Promote a passed scoring retrain candidate
     amg user <add|passwd|list|disable|enable|delete>  Manage UI auth users
+    amg pod-worker              Run pod-side service (cloud edition; pod CMD)
 """
 import argparse
 import os
@@ -318,6 +319,14 @@ def main():
     p_user_del.add_argument("username", type=str)
     p_user_del.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
 
+    # pod-worker (cloud edition: pod-side FastAPI service)
+    p_pw = subparsers.add_parser(
+        "pod-worker",
+        help="Run the pod-side worker (cloud edition; usually the pod's CMD)",
+    )
+    p_pw.add_argument("--host", type=str, default="0.0.0.0")
+    p_pw.add_argument("--port", type=int, default=8000)
+
     args = parser.parse_args()
 
     if not args.command:
@@ -365,6 +374,7 @@ def _dispatch(args):
     if cmd == "retrain-status": return cmd_retrain_status(args)
     if cmd == "promote-score-candidate": return cmd_promote_score_candidate(args)
     if cmd == "user":      return cmd_user(args)
+    if cmd == "pod-worker": return cmd_pod_worker(args)
     return 1
 
 
@@ -1518,6 +1528,14 @@ def cmd_user(args):
 
     print(f"Unknown user subcommand: {sub}")
     return 1
+
+
+def cmd_pod_worker(args):
+    """Run the pod-side worker (cloud edition entry point inside the GPU pod)."""
+    init_logging()
+    from amg.cloud.pod_worker import cli_main
+
+    return cli_main(host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

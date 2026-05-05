@@ -2,15 +2,26 @@
 #
 # This image runs the AMG pipeline. It does NOT bundle Ollama; it talks to
 # a remote (or sidecar) Ollama via OLLAMA_HOST. That separation is intentional:
-# - On the cloud-hosted v11.5+ pod, Ollama runs in a separate process/container
+# - On the cloud-hosted Runpod pod, Ollama runs in a separate process/container
 #   alongside AMG and is reached via 127.0.0.1.
 # - On a LAN GPU box / Tailscale topology, Ollama runs on a different machine
 #   and OLLAMA_HOST points at it (e.g. 192.168.1.50:11434 or a tsnet IP).
 # - On Runpod the proxy URL form (https://podid-11434.proxy.runpod.net) is
 #   accepted directly by the OLLAMA_HOST parser added in v11.1.5.
 #
+# Default CMD: `amg pod-worker` — the FastAPI service that the controller VM
+# pushes jobs to. This is what you want on Runpod. For local CLI use, override
+# the CMD (see "Smoke test" below).
+#
 # Build:
 #   docker build -t amg-os:dev .
+#
+# Run as a Runpod pod worker (cloud edition):
+#   docker run --rm -p 8000:8000 \
+#     -v amg-data:/data \
+#     -e OLLAMA_HOST="127.0.0.1:11434" \
+#     -e AMG_POD_AUTH_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" \
+#     amg-os:dev
 #
 # Smoke test (CLI):
 #   docker run --rm \
@@ -19,7 +30,7 @@
 #     -e OLLAMA_HOST="host.docker.internal:11434" \
 #     amg-os:dev amg verify
 #
-# Run UI:
+# Run the local UI from the container (override CMD):
 #   docker run --rm -p 8080:8080 \
 #     -v "$HOME/AMG_OS/data:/data" \
 #     -v "$HOME/AMG_Processing:/incoming" \
@@ -72,10 +83,14 @@ RUN mkdir -p /data /incoming \
 
 USER amg
 
-# UI port (overridable). Run `amg ui --host 0.0.0.0` to bind it.
+# Pod-worker port (default for cloud edition).
+EXPOSE 8000
+# UI port (override CMD with `amg ui --host 0.0.0.0 --port 8080` to use this).
 EXPOSE 8080
 
 # tini gives uvicorn a clean signal-handling parent so SIGTERM stops the server
 # instead of being swallowed by Python's default PID-1 behavior.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["amg", "verify"]
+# Default: launch the pod-worker. The container refuses to start unless
+# AMG_POD_AUTH_TOKEN is provided — that's intentional, see amg/cloud/pod_worker.py.
+CMD ["amg", "pod-worker", "--host", "0.0.0.0", "--port", "8000"]
