@@ -83,7 +83,7 @@
           <a class="cover-card" href="/scene/{{ s.scene_id }}" style="text-decoration: none; color: inherit;">
             <div class="cover-thumb grad-{{ s.grad_idx }}">
               {% if s.preview_path %}
-                <img src="/artifact?path={{ s.preview_path }}" alt="{{ s.scene_id }} preview" loading="lazy" />
+                <img src="/artifact?path={{ s.preview_path | urlencode }}" alt="{{ s.scene_id }} preview" loading="lazy" />
               {% endif %}
               <div class="overlay-tl">
                 {% if s.top_score %}

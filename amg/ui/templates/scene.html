@@ -11,6 +11,9 @@
   <div class="between">
     <div>
       <h1 style="margin-bottom: 4px;">{{ scene_id }}</h1>
+      {% if scene_source_name %}
+        <div class="muted mono" style="font-size: 12px; margin-bottom: 4px;">source file: {{ scene_source_name }}</div>
+      {% endif %}
       <div class="sub">
         {% if decision_log %}
           {{ decision_log.input.studio or "(unknown studio)" }} ·
@@ -25,10 +28,23 @@
     </div>
     <div class="row">
       <button form="review-form" type="submit" class="btn-primary">Save Review</button>
-      {% if work_dir %}<a class="btn btn-ghost" href="/artifact?path={{ work_dir }}/covers">Open folder</a>{% endif %}
+      <button form="review-form" type="submit" class="btn btn-ghost" name="review_action" value="finalize">Finalize Thumbnails</button>
+      {% if kept_zip_path %}
+        <a class="btn btn-ghost" href="/artifact?path={{ kept_zip_path | urlencode }}" download>Download kept ({{ kept_count }})</a>
+      {% endif %}
+      {% if work_dir %}<a class="btn btn-ghost" href="/artifact-zip?path={{ (work_dir / 'covers') | urlencode }}">Download covers folder</a>{% endif %}
       <a class="btn btn-ghost" href="/">Re-run</a>
     </div>
   </div>
+  {% if kept_zip_path %}
+    <div class="sub" style="margin-top: 8px;">
+      Kept package ready: <span class="mono">{{ kept_zip_path.name }}</span> · folder <span class="mono">{{ kept_folder_path.name if kept_folder_path else "00_kept_for_publish" }}</span>
+    </div>
+  {% elif saved %}
+    <div class="sub" style="margin-top: 8px;">
+      Mark at least one cover as <strong>Keep</strong> to auto-build a one-click download bundle.
+    </div>
+  {% endif %}
 </div>
 
 <div class="grid grid-2">
@@ -42,25 +58,34 @@
             <span class="pill err">reject <span id="review-count-reject">0</span></span>
             <span id="review-unsaved" class="pill neutral">saved</span>
           </div>
-          <button type="submit" class="btn-primary">Save Review</button>
+          <div class="row" style="gap: 8px;">
+            <button type="submit" class="btn-primary" name="review_action" value="save">Save Review</button>
+            <button type="submit" class="btn btn-ghost" name="review_action" value="finalize">Finalize Thumbnails</button>
+          </div>
         </div>
         <div class="hint" style="margin-top: 6px;">
           Keyboard: 1 keep, 2 maybe, 3 reject, 0 clear, j/k or [/] move between covers.
         </div>
       </div>
-      <div class="card">
-        <h3 class="card-section-title">Selected Thumbnails <span class="muted">{{ covers | length }}</span></h3>
+      {% include "_insight_panel.html" %}
+
+      <details {% if not finalized_thumbnails %}open{% endif %} class="card" style="margin-top: 12px;">
+        <summary class="between" style="cursor: pointer; list-style: none;">
+          <h3 class="card-section-title" style="margin: 0;">Generated Thumbnails <span class="muted">{{ covers | length }}</span></h3>
+          <span class="muted" style="font-size: 12px;">▼</span>
+        </summary>
+        <div style="margin-top: 10px;">
         {% if covers %}
         <div class="cover-grid">
           {% for c in covers %}
             <div class="cover-card" data-cover-card data-cover-idx="{{ loop.index0 }}" tabindex="0">
               <div class="review-thumb-window">
                 <img
-                  src="/artifact?path={{ c.path }}"
+                  src="/artifact?path={{ c.path | urlencode }}"
                   alt="{{ c.filename }}"
                   loading="lazy"
                   class="review-thumb-image js-thumb-preview"
-                  data-preview-src="/artifact?path={{ c.path }}"
+                  data-preview-src="/artifact?path={{ c.path | urlencode }}"
                   data-preview-caption="{{ c.filename }}"
                 />
                 <div class="overlay-tl"><span class="rank-badge">{{ "%02d" | format(loop.index) }}</span></div>
@@ -84,33 +109,36 @@
                 <label class="field">
                   <span>penetration?</span>
                   <select name="pen_{{ c.filename }}">
-                    <option value="">(no change)</option>
-                    <option value="yes">yes — visible</option>
-                    <option value="no">no — not visible</option>
+                    {% set row = (form_state.per_cover.get(c.filename) if form_state and form_state.per_cover else {}) %}
+                    <option value="" {% if not row or not row.pen %}selected{% endif %}>(no change)</option>
+                    <option value="yes" {% if row and row.pen == "yes" %}selected{% endif %}>yes — visible</option>
+                    <option value="no" {% if row and row.pen == "no" %}selected{% endif %}>no — not visible</option>
                   </select>
                 </label>
 
                 <label class="field">
                   <span>position</span>
                   <select name="pos_{{ c.filename }}">
-                    <option value="">(no change)</option>
-                    <option>MISSIONARY</option>
-                    <option>COWGIRL</option>
-                    <option>REVERSE_COWGIRL</option>
-                    <option>DOGGY</option>
-                    <option>ORAL_BJ</option>
-                    <option>ORAL_CUNN</option>
-                    <option>SIDE</option>
-                    <option>HANDJOB</option>
-                    <option>TOY</option>
-                    <option>GROUP</option>
-                    <option>OTHER</option>
+                    {% set row = (form_state.per_cover.get(c.filename) if form_state and form_state.per_cover else {}) %}
+                    <option value="" {% if not row or not row.pos %}selected{% endif %}>(no change)</option>
+                    <option {% if row and row.pos == "MISSIONARY" %}selected{% endif %}>MISSIONARY</option>
+                    <option {% if row and row.pos == "COWGIRL" %}selected{% endif %}>COWGIRL</option>
+                    <option {% if row and row.pos == "REVERSE_COWGIRL" %}selected{% endif %}>REVERSE_COWGIRL</option>
+                    <option {% if row and row.pos == "DOGGY" %}selected{% endif %}>DOGGY</option>
+                    <option {% if row and row.pos == "ORAL_BJ" %}selected{% endif %}>ORAL_BJ</option>
+                    <option {% if row and row.pos == "ORAL_CUNN" %}selected{% endif %}>ORAL_CUNN</option>
+                    <option {% if row and row.pos == "SIDE" %}selected{% endif %}>SIDE</option>
+                    <option {% if row and row.pos == "HANDJOB" %}selected{% endif %}>HANDJOB</option>
+                    <option {% if row and row.pos == "TOY" %}selected{% endif %}>TOY</option>
+                    <option {% if row and row.pos == "GROUP" %}selected{% endif %}>GROUP</option>
+                    <option {% if row and row.pos == "OTHER" %}selected{% endif %}>OTHER</option>
                   </select>
                 </label>
 
                 <label class="field">
                   <span>decision</span>
-                  <input type="hidden" name="decision_{{ c.filename }}" id="decision_{{ loop.index }}" value="" />
+                  {% set row = (form_state.per_cover.get(c.filename) if form_state and form_state.per_cover else {}) %}
+                  <input type="hidden" name="decision_{{ c.filename }}" id="decision_{{ loop.index }}" value="{{ row.decision if row else '' }}" />
                   <div class="decision-row" data-decision-row data-target="decision_{{ loop.index }}" data-cover-idx="{{ loop.index0 }}">
                     <button type="button" class="decision-btn keep" data-value="keep" title="Keep (included)">✓ Keep</button>
                     <button type="button" class="decision-btn maybe" data-value="maybe" title="Maybe (included)">~ Maybe</button>
@@ -121,12 +149,14 @@
 
                 <label class="field">
                   <span>note</span>
-                  <input type="text" name="reason_{{ c.filename }}" placeholder="optional reason" />
+                  {% set row = (form_state.per_cover.get(c.filename) if form_state and form_state.per_cover else {}) %}
+                  <input type="text" name="reason_{{ c.filename }}" placeholder="optional reason" value="{{ row.reason if row else '' }}" />
                 </label>
 
                 <label class="field">
                   <span>your score</span>
-                  <input type="number" name="score_{{ c.filename }}" min="0" max="100" step="0.5" placeholder="0-100 (or 0-10)" />
+                  {% set row = (form_state.per_cover.get(c.filename) if form_state and form_state.per_cover else {}) %}
+                  <input type="number" name="score_{{ c.filename }}" min="0" max="100" step="0.5" placeholder="0-100 (or 0-10)" value="{{ row.score if row else '' }}" />
                 </label>
 
                 <div class="cover-actions">
@@ -140,52 +170,53 @@
           <div class="empty">No covers found in {{ work_dir }}</div>
         {% endif %}
       </div>
+
+      {% if soft_thumbnail %}
+        <div class="card" style="margin-top: 12px;">
+          <h3 class="card-section-title">Soft Thumbnail (Non-Nude)</h3>
+          <img src="/artifact?path={{ soft_thumbnail.path | urlencode }}" alt="soft thumbnail" style="width: 100%; border-radius: 8px; border: 1px solid var(--line-soft);" />
+          <div class="row" style="margin-top: 6px; gap: 8px;">
+            {% if soft_thumbnail.score is not none %}
+              {% set soft_score_disp = ((soft_thumbnail.score|float) * 10.0) if ((soft_thumbnail.score|float) > 0 and (soft_thumbnail.score|float) <= 10.0) else (soft_thumbnail.score|float) %}
+              <span class="score-badge">{{ "%.1f"|format(soft_score_disp) }}</span>
+            {% endif %}
+            {% if soft_thumbnail.timestamp_sec is not none %}
+              <span class="pill">t={{ (soft_thumbnail.timestamp_sec or 0)|round(1) }}s</span>
+            {% endif %}
+            <span class="pill ok">auto-selected</span>
+          </div>
+          <div class="grid grid-2" style="margin-top: 10px; gap: 10px;">
+            <label class="field">
+              <span>soft pick decision</span>
+              <select form="review-form" name="soft_thumb_decision">
+                <option value="" {% if not form_state or not form_state.soft_thumb_decision %}selected{% endif %}>(no change)</option>
+                <option value="keep" {% if form_state and form_state.soft_thumb_decision == "keep" %}selected{% endif %}>keep</option>
+                <option value="reject" {% if form_state and form_state.soft_thumb_decision == "reject" %}selected{% endif %}>reject</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>your soft score</span>
+              <input form="review-form" type="number" name="soft_thumb_score" min="0" max="100" step="0.5" placeholder="0-100 (or 0-10)" value="{{ form_state.soft_thumb_score if form_state else '' }}" />
+            </label>
+          </div>
+          <div class="muted" style="font-size: 12px; margin-top: 6px;">
+            This writes explicit feedback for the auto-picked non-nude thumbnail.
+          </div>
+        </div>
+      {% endif %}
+
+      {% if contact_sheet %}
+        <div class="card" style="margin-top: 12px;">
+          <h3 class="card-section-title">Contact Sheet</h3>
+          <img src="/artifact?path={{ contact_sheet | urlencode }}" alt="contact sheet" style="width: 100%; border-radius: 8px; border: 1px solid var(--line-soft);" />
+          <div class="muted" style="font-size: 11px; margin-top: 6px;">{{ contact_sheet.name }}</div>
+        </div>
+      {% endif %}
+      </details>
     </form>
-
-    {% if soft_thumbnail %}
-      <div class="card">
-        <h3 class="card-section-title">Soft Thumbnail (Non-Nude)</h3>
-        <img src="/artifact?path={{ soft_thumbnail.path }}" alt="soft thumbnail" style="width: 100%; border-radius: 8px; border: 1px solid var(--line-soft);" />
-        <div class="row" style="margin-top: 6px; gap: 8px;">
-          {% if soft_thumbnail.score is not none %}
-            <span class="score-badge">{{ "%.1f"|format((soft_thumbnail.score or 0)|float) }}</span>
-          {% endif %}
-          {% if soft_thumbnail.timestamp_sec is not none %}
-            <span class="pill">t={{ (soft_thumbnail.timestamp_sec or 0)|round(1) }}s</span>
-          {% endif %}
-          <span class="pill ok">auto-selected</span>
-        </div>
-        <div class="grid grid-2" style="margin-top: 10px; gap: 10px;">
-          <label class="field">
-            <span>soft pick decision</span>
-            <select form="review-form" name="soft_thumb_decision">
-              <option value="">(no change)</option>
-              <option value="keep">keep</option>
-              <option value="reject">reject</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>your soft score</span>
-            <input form="review-form" type="number" name="soft_thumb_score" min="0" max="100" step="0.5" placeholder="0-100 (or 0-10)" />
-          </label>
-        </div>
-        <div class="muted" style="font-size: 12px; margin-top: 6px;">
-          This writes explicit feedback for the auto-picked non-nude thumbnail.
-        </div>
-      </div>
-    {% endif %}
-
-    {% if contact_sheet %}
-      <div class="card">
-        <h3 class="card-section-title">Contact Sheet</h3>
-        <img src="/artifact?path={{ contact_sheet }}" alt="contact sheet" style="width: 100%; border-radius: 8px; border: 1px solid var(--line-soft);" />
-        <div class="muted" style="font-size: 11px; margin-top: 6px;">{{ contact_sheet.name }}</div>
-      </div>
-    {% endif %}
   </div>
 
   <div class="col">
-    {% include "_insight_panel.html" %}
     {% include "_provided_thumbs_panel.html" %}
 
     {% if decision_log %}
@@ -208,7 +239,7 @@
 
       <div class="card">
         <h3 class="card-section-title">Notes</h3>
-        <textarea form="review-form" name="notes" rows="4" placeholder="What was good, what was wrong with the AI picks…"></textarea>
+        <textarea form="review-form" name="notes" rows="4" placeholder="What was good, what was wrong with the AI picks…">{{ form_state.notes if form_state else "" }}</textarea>
       </div>
 
       <div class="card">
@@ -258,6 +289,40 @@
     var decisionRows = Array.from(document.querySelectorAll('[data-decision-row]'));
     var activeIndex = 0;
     var dirty = false;
+    var initialState = {{ (form_state or {}) | tojson }};
+
+    function setFieldValueByName(name, value) {
+      if (!name || !form || !form.elements) return;
+      var el = form.elements[name];
+      if (!el) return;
+      if (Array.isArray(el)) return;
+      if (value === null || value === undefined) value = '';
+      try {
+        el.value = String(value);
+      } catch (_e) {}
+    }
+
+    function applyInitialState() {
+      if (!initialState || typeof initialState !== 'object') return;
+      setFieldValueByName('title', initialState.title || '');
+      setFieldValueByName('long_description', initialState.long_description || '');
+      setFieldValueByName('title_tone', initialState.title_tone || '');
+      setFieldValueByName('tags_csv', initialState.tags_csv || '');
+      setFieldValueByName('categories_csv', initialState.categories_csv || '');
+      setFieldValueByName('notes', initialState.notes || '');
+      setFieldValueByName('soft_thumb_decision', initialState.soft_thumb_decision || '');
+      setFieldValueByName('soft_thumb_score', initialState.soft_thumb_score || '');
+
+      var perCover = initialState.per_cover || {};
+      Object.keys(perCover).forEach(function(filename) {
+        var row = perCover[filename] || {};
+        setFieldValueByName('decision_' + filename, row.decision || '');
+        setFieldValueByName('pen_' + filename, row.pen || '');
+        setFieldValueByName('pos_' + filename, row.pos || '');
+        setFieldValueByName('reason_' + filename, row.reason || '');
+        setFieldValueByName('score_' + filename, row.score || '');
+      });
+    }
 
     function openPreview(src, caption) {
       img.src = src || '';
@@ -356,6 +421,14 @@
         ev.preventDefault();
         applyDecision(row, hidden, btn.getAttribute('data-value') || '');
       });
+      applyDecision(row, hidden, hidden.value || '');
+    });
+
+    applyInitialState();
+    document.querySelectorAll('[data-decision-row]').forEach(function(row) {
+      var targetId = row.getAttribute('data-target');
+      var hidden = document.getElementById(targetId);
+      if (!hidden) return;
       applyDecision(row, hidden, hidden.value || '');
     });
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import socket
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +19,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFi
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.background import BackgroundTask
 
 from amg.config import (
     DATA_DIR,
@@ -72,6 +76,10 @@ log = get_logger("ui.app")
 
 def _safe_scene_id(scene_id: str) -> str:
     return "".join(c if c.isalnum() or c in "_-" else "_" for c in scene_id)[:120]
+
+
+def _utc_now_isoz() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _grad_idx(s: str) -> int:
@@ -218,6 +226,151 @@ def _load_decision_log(scene_id: str) -> Optional[dict]:
         return None
 
 
+def _load_reviewed(scene_id: str) -> Optional[dict]:
+    sid = _safe_scene_id(scene_id)
+    path = REVIEWED_DIR / f"{sid}.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _build_review_form_state(
+    *,
+    reviewed: Optional[dict],
+    insight: Optional[dict],
+    cover_items: Optional[List[dict]] = None,
+) -> dict:
+    """
+    Build prefilled UI form state from reviewed payload + insight defaults.
+    """
+    reviewed = reviewed if isinstance(reviewed, dict) else {}
+    insight = insight if isinstance(insight, dict) else {}
+    per_cover_raw = reviewed.get("per_cover")
+    per_cover = per_cover_raw if isinstance(per_cover_raw, dict) else {}
+    selected_set = set(str(x) for x in (reviewed.get("selected_covers") or []) if isinstance(x, str))
+    kept_set = set(str(x) for x in (reviewed.get("kept_covers") or []) if isinstance(x, str))
+
+    def _str_or_empty(v) -> str:
+        if v is None:
+            return ""
+        return str(v)
+
+    form_state = {
+        "title": _str_or_empty(reviewed.get("title_override") or ""),
+        "title_tone": _str_or_empty(reviewed.get("title_tone") or insight.get("title_tone") or TITLE_TONE_DEFAULT),
+        "long_description": _str_or_empty(reviewed.get("long_description") or insight.get("long_description") or ""),
+        "notes": _str_or_empty(reviewed.get("notes") or ""),
+        "tags_csv": _str_or_empty(reviewed.get("tags_csv") or ", ".join(insight.get("ai_tags") or [])),
+        "categories_csv": _str_or_empty(reviewed.get("categories_csv") or ", ".join(insight.get("ai_categories") or [])),
+        "soft_thumb_decision": _str_or_empty(((reviewed.get("soft_thumbnail_review") or {}).get("decision")) or ""),
+        "soft_thumb_score": (
+            _str_or_empty((reviewed.get("soft_thumbnail_review") or {}).get("score_100"))
+            if (reviewed.get("soft_thumbnail_review") or {}).get("score_100") is not None
+            else ""
+        ),
+        "per_cover": {},
+    }
+
+    if cover_items:
+        for item in cover_items:
+            fn = item.get("filename")
+            if not fn:
+                continue
+            row = per_cover.get(fn) if isinstance(per_cover.get(fn), dict) else {}
+            decision_default = ""
+            if fn in kept_set:
+                decision_default = "keep"
+            elif fn in selected_set:
+                decision_default = "maybe"
+            form_state["per_cover"][fn] = {
+                "decision": _str_or_empty(row.get("decision") or decision_default),
+                "pen": _str_or_empty(row.get("pen") or ""),
+                "pos": _str_or_empty(row.get("pos") or ""),
+                "reason": _str_or_empty(row.get("reason") or ""),
+                "score": _str_or_empty(row.get("score") if row.get("score") is not None else ""),
+            }
+    return form_state
+
+
+def _build_kept_covers_package(
+    *,
+    scene_id: str,
+    work_dir: Optional[Path],
+    cover_items: List[dict],
+    kept_filenames: List[str],
+) -> dict:
+    """
+    Materialize reviewed keep-picks into a top-level folder + one-click zip.
+
+    Returns:
+      {
+        "kept_count": int,
+        "kept_folder_path": Optional[Path],
+        "kept_zip_path": Optional[Path],
+      }
+    """
+    out = {"kept_count": 0, "kept_folder_path": None, "kept_zip_path": None}
+    if not work_dir or not kept_filenames:
+        return out
+
+    by_name = {
+        str(item.get("filename", "")): Path(item.get("path"))
+        for item in (cover_items or [])
+        if item.get("filename") and item.get("path")
+    }
+    unique_kept = []
+    seen = set()
+    for name in kept_filenames:
+        key = str(name or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique_kept.append(key)
+
+    kept_sources = [by_name[name] for name in unique_kept if name in by_name and by_name[name].exists()]
+    if not kept_sources:
+        return out
+
+    kept_folder = Path(work_dir) / "00_kept_for_publish"
+    if kept_folder.exists():
+        shutil.rmtree(kept_folder, ignore_errors=True)
+    kept_folder.mkdir(parents=True, exist_ok=True)
+
+    copied_paths = []
+    for idx, src in enumerate(kept_sources, start=1):
+        dst_name = f"{idx:02d}_{src.name}"
+        dst = kept_folder / dst_name
+        try:
+            shutil.copy2(src, dst)
+            copied_paths.append(dst)
+        except Exception as e:
+            log.warn("Failed to copy kept cover", scene_id=scene_id, src=str(src), error=str(e))
+
+    if not copied_paths:
+        return out
+
+    zip_path = Path(work_dir) / "00_kept_for_publish.zip"
+    try:
+        if zip_path.exists():
+            zip_path.unlink()
+        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for p in copied_paths:
+                zf.write(p, arcname=p.name)
+    except Exception as e:
+        log.warn("Failed to create kept covers zip", scene_id=scene_id, path=str(zip_path), error=str(e))
+        zip_path = None
+
+    out["kept_count"] = len(copied_paths)
+    out["kept_folder_path"] = kept_folder
+    out["kept_zip_path"] = zip_path
+    return out
+
+
 def _all_decision_logs() -> List[dict]:
     if not DECISION_LOGS_DIR.exists():
         return []
@@ -239,6 +392,11 @@ def _persist_review_to_decision_log(
     title_override: Optional[str],
     long_description: Optional[str],
     selected_covers: List[str],
+    kept_covers: Optional[List[str]] = None,
+    finalized_thumbnails: bool = False,
+    per_cover: Optional[dict] = None,
+    tags_csv: Optional[str] = None,
+    categories_csv: Optional[str] = None,
     soft_thumbnail_review: Optional[dict] = None,
 ) -> None:
     """
@@ -258,11 +416,16 @@ def _persist_review_to_decision_log(
     review = dlog.get("review") if isinstance(dlog.get("review"), dict) else {}
     review.update(
         {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": _utc_now_isoz(),
             "title_tone_selected": title_tone,
             "title_override": title_override or None,
             "long_description": long_description or None,
             "selected_covers": selected_covers,
+            "kept_covers": kept_covers or [],
+            "finalized_thumbnails": bool(finalized_thumbnails),
+            "per_cover": per_cover or {},
+            "tags_csv": tags_csv or None,
+            "categories_csv": categories_csv or None,
             "soft_thumbnail_review": soft_thumbnail_review or None,
         }
     )
@@ -357,7 +520,7 @@ def _scene_summary(d: dict) -> dict:
         "scene_id": sid,
         "studio": (d.get("input") or {}).get("studio") or "",
         "covers": out.get("covers_delivered", 0),
-        "top_score": out.get("top_pick_score", 0),
+        "top_score": _normalize_score_for_ui(out.get("top_pick_score")),
         "duration_sec": duration,
         "duration_str": _humanize_duration(duration),
         "tags": (d.get("input") or {}).get("genres") or [],
@@ -403,6 +566,36 @@ def _work_dir_from_decision_log(decision_log: Optional[dict]) -> Optional[Path]:
     except Exception:
         return None
     return video_path.parent / f"{video_path.stem}_amg_v11"
+
+
+def _artifact_allowed_roots() -> List[Path]:
+    """
+    Limit file-serving to AMG data + configured incoming roots.
+    """
+    from amg.config import INCOMING_ROOTS
+
+    roots = [DATA_DIR.resolve(), UPLOADS_DIR.resolve()]
+    for root in INCOMING_ROOTS:
+        try:
+            roots.append(Path(root).expanduser().resolve())
+        except Exception:
+            continue
+    unique = []
+    seen = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(root)
+    return unique
+
+
+def _path_within_roots(path: Path, roots: List[Path]) -> bool:
+    for root in roots:
+        if path == root or root in path.parents:
+            return True
+    return False
 
 
 def _load_insight(work_dir: Optional[Path]) -> Optional[dict]:
@@ -569,7 +762,7 @@ def _append_feedback_rows(
     OPERATOR_FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
     rows_written = 0
     item_by_name = {i["filename"]: i for i in cover_items}
-    ts = datetime.utcnow().isoformat() + "Z"
+    ts = _utc_now_isoz()
 
     with open(OPERATOR_FEEDBACK_PATH, "a") as f:
         for filename, item in item_by_name.items():
@@ -767,7 +960,7 @@ def _record_run_timing(job: dict, result: Optional[dict]) -> None:
                     phase_durations[name] = 0.0
 
         row = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": _utc_now_isoz(),
             "job_id": job.get("job_id"),
             "scene_id": job.get("scene_id"),
             "status": job.get("status"),
@@ -1346,6 +1539,31 @@ def _library_data(filt: dict) -> dict:
     }
 
 
+def _process_jobs_view() -> dict:
+    """
+    Snapshot for Process page: FIFO queue slice, separated active vs completed.
+
+    Larger window than legacy [-20:] so overnight batches remain visible without
+    having completed rows appear to "vanish" when new uploads shift the slice.
+    """
+    with _jobs_lock:
+        jobs_raw = sorted(list(_jobs.values()), key=lambda j: j.get("queue_seq", 0))[-120:]
+    jobs = [_decorate_job(j) for j in jobs_raw]
+    active_all = [j for j in jobs if j.get("status") in {"queued", "running"}]
+    running = [j for j in active_all if j.get("status") == "running"]
+    queued = [j for j in active_all if j.get("status") == "queued"]
+    running.sort(key=lambda j: j.get("queue_seq", 0))
+    queued.sort(key=lambda j: j.get("queue_seq", 0))
+    active_jobs = running + queued
+    completed_jobs = [j for j in reversed(jobs) if j.get("status") in {"done", "error", "stopped"}][:36]
+    return {
+        "active_jobs": active_jobs,
+        "completed_jobs": completed_jobs,
+        "running_count": len(running),
+        "queued_count": len(queued),
+    }
+
+
 # ---------- app ----------
 
 def create_app() -> FastAPI:
@@ -1354,11 +1572,7 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
-        with _jobs_lock:
-            jobs = sorted(list(_jobs.values()), key=lambda j: j.get("queue_seq", 0))[-20:]
-        jobs = [_decorate_job(j) for j in jobs]
-        active_jobs = [j for j in jobs if j.get("status") in {"queued", "running"}]
-        completed_jobs = [j for j in reversed(jobs) if j.get("status") in {"done", "error", "stopped"}][:12]
+        pj = _process_jobs_view()
         recent_scenes = _recent_scenes(limit=12)
         recent_runs = _load_recent_run_timings(limit=10)
         slowest_phases = _summarize_slowest_phases(recent_runs, top_n=5)
@@ -1367,15 +1581,21 @@ def create_app() -> FastAPI:
             name="index.html",
             context={
                 "request": request,
-                "jobs": jobs,
-                "active_jobs": active_jobs,
-                "completed_jobs": completed_jobs,
+                **pj,
                 "recent_scenes": recent_scenes,
                 "recent_runs": recent_runs,
                 "slowest_phases": slowest_phases,
                 "active_nav": "process",
                 "health": _health_snapshot(),
             },
+        )
+
+    @app.get("/partials/process-jobs", response_class=HTMLResponse)
+    async def process_jobs_partial(request: Request):
+        return templates.TemplateResponse(
+            request=request,
+            name="_process_queues.html",
+            context={"request": request, **_process_jobs_view()},
         )
 
     @app.post("/jobs", response_class=HTMLResponse)
@@ -1450,8 +1670,8 @@ def create_app() -> FastAPI:
 
         return templates.TemplateResponse(
             request=request,
-            name="_job_card.html",
-            context={"request": request, "job": _decorate_job(job), "health": _health_snapshot()},
+            name="_process_queues.html",
+            context={"request": request, **_process_jobs_view()},
         )
 
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
@@ -1512,12 +1732,14 @@ def create_app() -> FastAPI:
     @app.get("/scene/{scene_id}", response_class=HTMLResponse)
     async def scene_detail(request: Request, scene_id: str, saved: int = 0):
         decision_log = _load_decision_log(scene_id)
+        reviewed = _load_reviewed(scene_id)
         work_dir = _work_dir_from_decision_log(decision_log) or _find_work_dir(scene_id)
         covers = []
         contact_sheet = None
         insight = None
         provided_thumb_report = None
         soft_thumbnail = None
+        kept_bundle = {"kept_count": 0, "kept_folder_path": None, "kept_zip_path": None}
 
         if work_dir:
             covers = _cover_items(scene_id, decision_log, work_dir)
@@ -1527,6 +1749,23 @@ def create_app() -> FastAPI:
             insight = _load_insight(work_dir)
             provided_thumb_report = _load_provided_thumb_report(work_dir)
             soft_thumbnail = _load_soft_thumbnail(work_dir)
+            reviewed_kept = []
+            if isinstance(reviewed, dict):
+                reviewed_kept = reviewed.get("kept_covers") or reviewed.get("selected_covers") or []
+            if isinstance(reviewed_kept, list):
+                kept_bundle = _build_kept_covers_package(
+                    scene_id=scene_id,
+                    work_dir=work_dir,
+                    cover_items=covers,
+                    kept_filenames=[str(x) for x in reviewed_kept if isinstance(x, str)],
+                )
+        form_state = _build_review_form_state(reviewed=reviewed, insight=insight, cover_items=covers)
+        finalized_thumbnails = bool((reviewed or {}).get("finalized_thumbnails"))
+        scene_source_name = None
+        if isinstance(decision_log, dict):
+            scene_path = (decision_log.get("scene_path") or "").strip()
+            if scene_path:
+                scene_source_name = Path(scene_path).name
 
         return templates.TemplateResponse(
             request=request,
@@ -1541,6 +1780,13 @@ def create_app() -> FastAPI:
                 "insight": insight,
                 "provided_thumb_report": provided_thumb_report,
                 "soft_thumbnail": soft_thumbnail,
+                "reviewed": reviewed,
+                "form_state": form_state,
+                "finalized_thumbnails": finalized_thumbnails,
+                "scene_source_name": scene_source_name,
+                "kept_count": kept_bundle.get("kept_count", 0),
+                "kept_folder_path": kept_bundle.get("kept_folder_path"),
+                "kept_zip_path": kept_bundle.get("kept_zip_path"),
                 "saved": saved,
                 "active_nav": "library",
                 "health": _health_snapshot(),
@@ -1556,6 +1802,7 @@ def create_app() -> FastAPI:
         work_dir = _work_dir_from_decision_log(decision_log) or _find_work_dir(scene_id)
         if not work_dir:
             raise HTTPException(404, "Work directory missing")
+        reviewed = _load_reviewed(scene_id)
 
         form = await request.form()
         title_tone = (form.get("title_tone") or TITLE_TONE_DEFAULT).strip().lower()
@@ -1573,15 +1820,24 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request=request,
             name="_insight_panel.html",
-            context={"request": request, "insight": insight, "scene_id": scene_id},
+            context={
+                "request": request,
+                "insight": insight,
+                "scene_id": scene_id,
+                "form_state": _build_review_form_state(reviewed=reviewed, insight=insight),
+            },
         )
 
     @app.post("/scene/{scene_id}/review")
     async def save_review(scene_id: str, request: Request):
         form = await request.form()
+        reviewed_prev = _load_reviewed(scene_id) or {}
+        review_action = (form.get("review_action") or "save").strip().lower()
         notes = (form.get("notes") or "").strip()
         title = (form.get("title") or "").strip()
         long_description = (form.get("long_description") or "").strip()
+        tags_csv = (form.get("tags_csv") or "").strip()
+        categories_csv = (form.get("categories_csv") or "").strip()
         title_tone = (form.get("title_tone") or TITLE_TONE_DEFAULT).strip().lower()
         if title_tone not in {"retail_safe", "edgy", "creative", "premium_story"}:
             title_tone = TITLE_TONE_DEFAULT
@@ -1591,13 +1847,33 @@ def create_app() -> FastAPI:
         cover_items = _cover_items(scene_id, decision_log, work_dir)
         soft_thumbnail = _load_soft_thumbnail(work_dir)
         selected = []
+        kept_only = []
+        per_cover = {}
         for item in cover_items:
-            d = (form.get(f"decision_{item['filename']}") or "").strip().lower()
+            fn = item["filename"]
+            d = (form.get(f"decision_{fn}") or "").strip().lower()
+            pen = (form.get(f"pen_{fn}") or "").strip().lower()
+            pos = (form.get(f"pos_{fn}") or "").strip()
+            reason = (form.get(f"reason_{fn}") or "").strip()
+            score = (form.get(f"score_{fn}") or "").strip()
             if d in {"keep", "maybe"}:
-                selected.append(item["filename"])
+                selected.append(fn)
+            if d == "keep":
+                kept_only.append(fn)
+            per_cover[fn] = {
+                "decision": d or "",
+                "pen": pen if pen in {"yes", "no"} else "",
+                "pos": pos or "",
+                "reason": reason or "",
+                "score": score or "",
+            }
         if not selected:
             # Backward compatibility with older UI payloads.
             selected = form.getlist("cover")
+        if not kept_only and selected:
+            # Older payloads don't distinguish keep vs maybe.
+            kept_only = list(selected)
+        finalized_thumbnails = bool(reviewed_prev.get("finalized_thumbnails")) or (review_action == "finalize")
         feedback_rows = _append_feedback_rows(
             scene_id=scene_id,
             cover_items=cover_items,
@@ -1616,11 +1892,16 @@ def create_app() -> FastAPI:
         out = REVIEWED_DIR / f"{sid}.json"
         payload = {
             "scene_id": scene_id,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": _utc_now_isoz(),
             "selected_covers": selected,
+            "kept_covers": kept_only,
+            "finalized_thumbnails": finalized_thumbnails,
+            "per_cover": per_cover,
             "title_override": title or None,
             "title_tone": title_tone,
             "long_description": long_description or None,
+            "tags_csv": tags_csv or None,
+            "categories_csv": categories_csv or None,
             "notes": notes or None,
             "soft_thumbnail_review": {
                 "decision": soft_decision if soft_decision in {"keep", "reject"} else None,
@@ -1637,10 +1918,21 @@ def create_app() -> FastAPI:
             title_override=title or None,
             long_description=long_description or None,
             selected_covers=selected,
+            kept_covers=kept_only,
+            finalized_thumbnails=finalized_thumbnails,
+            per_cover=per_cover,
+            tags_csv=tags_csv or None,
+            categories_csv=categories_csv or None,
             soft_thumbnail_review={
                 "decision": soft_decision if soft_decision in {"keep", "reject"} else None,
                 "score_100": soft_score_100,
             },
+        )
+        _build_kept_covers_package(
+            scene_id=scene_id,
+            work_dir=work_dir,
+            cover_items=cover_items,
+            kept_filenames=kept_only,
         )
 
         return RedirectResponse(url=f"/scene/{scene_id}?saved=1", status_code=303)
@@ -1650,9 +1942,43 @@ def create_app() -> FastAPI:
         p = Path(path).expanduser().resolve()
         if not p.exists() or not p.is_file():
             raise HTTPException(status_code=404, detail="File not found")
-        if Path.home().resolve() not in p.parents and p != Path.home().resolve():
-            raise HTTPException(status_code=403, detail="Path outside home directory")
+        if not _path_within_roots(p, _artifact_allowed_roots()):
+            raise HTTPException(status_code=403, detail="Path outside allowed artifact roots")
         return FileResponse(p)
+
+    @app.get("/artifact-zip")
+    async def artifact_zip(path: str = Query(..., description="Absolute path to local folder artifact")):
+        p = Path(path).expanduser().resolve()
+        if not p.exists() or not p.is_dir():
+            raise HTTPException(status_code=404, detail="Folder not found")
+        if not _path_within_roots(p, _artifact_allowed_roots()):
+            raise HTTPException(status_code=403, detail="Path outside allowed artifact roots")
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+        tmp_path = Path(tmp.name)
+        tmp.close()
+        try:
+            with zipfile.ZipFile(tmp_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for root, _, files in os.walk(p):
+                    root_path = Path(root)
+                    for name in files:
+                        src = root_path / name
+                        rel = src.relative_to(p)
+                        zf.write(src, arcname=str(rel))
+        except Exception as e:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail=f"Failed to build zip: {e}")
+
+        return FileResponse(
+            tmp_path,
+            filename=f"{p.name}.zip",
+            media_type="application/zip",
+            background=BackgroundTask(lambda: tmp_path.unlink(missing_ok=True)),
+        )
 
     @app.get("/healthz")
     async def healthz():

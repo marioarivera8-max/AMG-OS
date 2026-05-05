@@ -4,15 +4,15 @@
 <div class="page-head between">
   <div>
     <h1>Process a Scene</h1>
-    <div class="sub">Drop a video, pick a folder, or paste a path. Runs the local pipeline end-to-end.</div>
+    <div class="sub">Drop a video, pick a folder, or paste a path. Add as many as you like — they line up and run one at a time in order (good for overnight batches).</div>
   </div>
 </div>
 
 <form
   id="run-form"
   hx-post="/jobs"
-  hx-target="#jobs"
-  hx-swap="afterbegin"
+  hx-target="#process-jobs-panel"
+  hx-swap="innerHTML"
   hx-encoding="multipart/form-data"
 >
   <div id="dropzone" class="dropzone">
@@ -52,32 +52,13 @@
 
 <div class="grid grid-2 mt-24">
   <div>
-    <div class="between" style="margin-bottom: 10px;">
-      <h3 class="card-section-title" style="margin: 0;">
-        Active Jobs <span class="muted">{% if active_jobs %}· {{ active_jobs | length }}{% endif %}</span>
-      </h3>
-      <span class="muted" style="font-size: 12px;">Auto-refreshing every 2s while running</span>
-    </div>
-    <div id="jobs" class="stack">
-      {% for job in active_jobs %}
-        {% include "_job_card.html" %}
-      {% else %}
-        <div class="empty">No jobs yet — drop a video above to start.</div>
-      {% endfor %}
-    </div>
-
-    <div class="between" style="margin: 16px 0 10px;">
-      <h3 class="card-section-title" style="margin: 0;">
-        Recent Completed <span class="muted">{% if completed_jobs %}· {{ completed_jobs | length }}{% endif %}</span>
-      </h3>
-      <span class="muted" style="font-size: 12px;">Latest finished jobs</span>
-    </div>
-    <div class="stack">
-      {% for job in completed_jobs %}
-        {% include "_job_card.html" %}
-      {% else %}
-        <div class="empty">No completed jobs yet.</div>
-      {% endfor %}
+    <div
+      id="process-jobs-panel"
+      hx-get="/partials/process-jobs"
+      hx-trigger="load delay:300ms, every 2s"
+      hx-swap="innerHTML"
+    >
+      {% include "_process_queues.html" %}
     </div>
   </div>
 
@@ -91,7 +72,7 @@
         <a href="/scene/{{ s.scene_id }}" class="card card-tight" style="display: flex; gap: 10px; align-items: center; text-decoration: none; color: inherit;">
           <div class="cover-thumb grad-{{ s.grad_idx }}" style="width: 64px; height: 36px; border-radius: 6px; flex: 0 0 64px;">
             {% if s.preview_path %}
-              <img src="/artifact?path={{ s.preview_path }}" alt="" />
+              <img src="/artifact?path={{ s.preview_path | urlencode }}" alt="" />
             {% endif %}
           </div>
           <div style="flex: 1; min-width: 0;">
