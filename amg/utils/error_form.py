@@ -118,7 +118,8 @@ def format_error_report(
     else:
         lines.append("  WHAT HAPPENED:")
         lines.append(f"    Unknown error: {primary}")
-        lines.append("    Check ~/AMG_OS/data/logs/runs/ for full log.")
+        from amg.config import LOGS_DIR
+        lines.append(f"    Check {LOGS_DIR / 'runs'}/ for full log.")
         lines.append("")
 
     # Technical details

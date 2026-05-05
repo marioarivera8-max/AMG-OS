@@ -17,7 +17,30 @@ import os
 # PATHS
 # ============================================================
 AMG_OS_ROOT = Path(__file__).parent.parent.resolve()
-DATA_DIR = AMG_OS_ROOT / "data"
+
+# AMG_DATA_DIR is env-overridable so AMG can keep its persistent state
+# (decision logs, studio profiles, training datasets, batch summaries, etc.)
+# at a custom path. Useful for server deployments, Docker volumes, and
+# multi-Mac syncing scenarios. Defaults to <repo>/data.
+DATA_DIR = Path(
+    os.environ.get("AMG_DATA_DIR", str(AMG_OS_ROOT / "data"))
+).expanduser().resolve()
+
+
+def _resolve_incoming_roots() -> list:
+    """
+    Search paths for scene work-dir lookup (CLI resume, UI scene detail,
+    review form). AMG_INCOMING_ROOTS env var is colon-separated; falls
+    back to the historical defaults when unset.
+    """
+    raw = os.environ.get("AMG_INCOMING_ROOTS")
+    if raw:
+        return [Path(p).expanduser().resolve() for p in raw.split(":") if p.strip()]
+    home = Path.home()
+    return [home / "AMG_Processing", home / "AMG_OS" / "incoming"]
+
+
+INCOMING_ROOTS = _resolve_incoming_roots()
 DECISION_LOGS_DIR = DATA_DIR / "decision_logs"
 STUDIO_PROFILES_DIR = DATA_DIR / "studio_profiles"
 PERFORMERS_DIR = DATA_DIR / "performers"

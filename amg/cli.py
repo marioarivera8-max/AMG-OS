@@ -569,9 +569,8 @@ def cmd_resume(args):
     print(f"Resuming: {args.scene_id}")
     print("(Note: v11.1 resume re-runs from scratch; full state recovery in v11.2)")
 
-    # Search common locations
-    home = Path.home()
-    search_roots = [home / "AMG_Processing", home / "AMG_OS" / "incoming"]
+    from amg.config import INCOMING_ROOTS
+    search_roots = list(INCOMING_ROOTS)
 
     scene_path = None
     for root in search_roots:

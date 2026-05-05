@@ -126,3 +126,45 @@ class TestOllamaHostParsing:
             _build_ollama_base_url("https://example.com/")
             == "https://example.com"
         )
+
+
+class TestIncomingRoots:
+    """Guard against future refactors of the AMG_INCOMING_ROOTS env override."""
+
+    def test_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("AMG_INCOMING_ROOTS", raising=False)
+        from amg.config import _resolve_incoming_roots
+        from pathlib import Path
+        roots = _resolve_incoming_roots()
+        assert len(roots) == 2
+        assert roots[0] == Path.home() / "AMG_Processing"
+        assert roots[1] == Path.home() / "AMG_OS" / "incoming"
+
+    def test_single_path_override(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("AMG_INCOMING_ROOTS", str(tmp_path))
+        from amg.config import _resolve_incoming_roots
+        roots = _resolve_incoming_roots()
+        assert roots == [tmp_path.resolve()]
+
+    def test_colon_separated_paths(self, monkeypatch, tmp_path):
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        monkeypatch.setenv("AMG_INCOMING_ROOTS", f"{a}:{b}")
+        from amg.config import _resolve_incoming_roots
+        roots = _resolve_incoming_roots()
+        assert roots == [a.resolve(), b.resolve()]
+
+    def test_empty_segments_dropped(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("AMG_INCOMING_ROOTS", f":{tmp_path}::")
+        from amg.config import _resolve_incoming_roots
+        roots = _resolve_incoming_roots()
+        assert roots == [tmp_path.resolve()]
+
+    def test_tilde_expansion(self, monkeypatch):
+        monkeypatch.setenv("AMG_INCOMING_ROOTS", "~/some/place")
+        from amg.config import _resolve_incoming_roots
+        from pathlib import Path
+        roots = _resolve_incoming_roots()
+        assert roots == [(Path.home() / "some" / "place").resolve()]

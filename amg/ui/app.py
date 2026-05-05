@@ -377,8 +377,8 @@ def _recent_scenes(limit: int = 20) -> list[dict]:
 
 
 def _find_work_dir(scene_id: str) -> Optional[Path]:
-    home = Path.home()
-    roots = [home / "AMG_Processing", home / "AMG_OS" / "incoming", UPLOADS_DIR]
+    from amg.config import INCOMING_ROOTS
+    roots = list(INCOMING_ROOTS) + [UPLOADS_DIR]
     pattern = f"{scene_id}_amg_v11"
     for root in roots:
         if not root.exists():

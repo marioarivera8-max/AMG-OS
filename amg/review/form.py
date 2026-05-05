@@ -401,12 +401,8 @@ def _load_existing_review(scene_id: str) -> Optional[dict]:
 
 def _find_work_dir(scene_id: str) -> Optional[Path]:
     """Try to locate the v11 work directory for a scene."""
-    # Check common AMG_Processing locations
-    home = Path.home()
-    search_roots = [
-        home / "AMG_Processing",
-        home / "AMG_OS" / "incoming",
-    ]
+    from amg.config import INCOMING_ROOTS
+    search_roots = list(INCOMING_ROOTS)
     target_pattern = f"{scene_id}_amg_v11"
 
     for root in search_roots:
