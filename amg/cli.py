@@ -31,6 +31,7 @@ Commands:
     amg retrain-score           Build/evaluate scoring retrain candidate
     amg retrain-status          Show recent scoring retrain runs
     amg promote-score-candidate Promote a passed scoring retrain candidate
+    amg user <add|passwd|list|disable|enable|delete>  Manage UI auth users
 """
 import argparse
 import os
@@ -275,6 +276,43 @@ def main():
     )
     p_psc.add_argument("--run-id", type=str, required=True)
 
+    # user (auth admin)
+    p_user = subparsers.add_parser(
+        "user",
+        help="Manage UI auth users (add, passwd, list, disable, enable, delete)",
+    )
+    user_sub = p_user.add_subparsers(dest="user_cmd", required=True)
+
+    p_user_add = user_sub.add_parser("add", help="Create a new UI user")
+    p_user_add.add_argument("username", type=str)
+    p_user_add.add_argument(
+        "--role",
+        type=str,
+        default="operator",
+        choices=["operator", "reviewer", "admin"],
+    )
+    p_user_add.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="Read password from stdin (for scripted setup) instead of prompting",
+    )
+
+    p_user_pw = user_sub.add_parser("passwd", help="Change a user's password")
+    p_user_pw.add_argument("username", type=str)
+    p_user_pw.add_argument("--password-stdin", action="store_true")
+
+    user_sub.add_parser("list", help="List all UI users")
+
+    p_user_dis = user_sub.add_parser("disable", help="Disable a user (login refused)")
+    p_user_dis.add_argument("username", type=str)
+
+    p_user_en = user_sub.add_parser("enable", help="Re-enable a previously disabled user")
+    p_user_en.add_argument("username", type=str)
+
+    p_user_del = user_sub.add_parser("delete", help="Permanently delete a user")
+    p_user_del.add_argument("username", type=str)
+    p_user_del.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -321,6 +359,7 @@ def _dispatch(args):
     if cmd == "retrain-score": return cmd_retrain_score(args)
     if cmd == "retrain-status": return cmd_retrain_status(args)
     if cmd == "promote-score-candidate": return cmd_promote_score_candidate(args)
+    if cmd == "user":      return cmd_user(args)
     return 1
 
 
@@ -1319,6 +1358,126 @@ def _print_batch_summary(results, duration, total):
         print(f"  amg ready \"{sample['scene_id']}\"    # Check distribution-ready")
     print(f"  amg dashboard                          # See trends")
     print("=" * 64)
+
+
+# ============================================================
+# USER ADMIN
+# ============================================================
+
+def _read_password_stdin() -> str:
+    return sys.stdin.read().rstrip("\r\n")
+
+
+def _prompt_new_password() -> str | None:
+    """Prompt twice and return the password, or None if mismatched."""
+    import getpass
+
+    pw1 = getpass.getpass("New password: ")
+    pw2 = getpass.getpass("Confirm password: ")
+    if pw1 != pw2:
+        print("Passwords do not match.")
+        return None
+    return pw1
+
+
+def _format_login_ts(ts) -> str:
+    if ts is None:
+        return "never"
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return "never"
+
+
+def cmd_user(args):
+    """Manage UI auth users (add, passwd, list, disable, enable, delete)."""
+    from amg.ui import auth
+
+    sub = args.user_cmd
+
+    if sub == "add":
+        if args.password_stdin:
+            password = _read_password_stdin()
+        else:
+            password = _prompt_new_password()
+            if password is None:
+                return 1
+        try:
+            uid = auth.add_user(args.username, password, role=args.role)
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 1
+        print(f"Created user '{args.username}' (id={uid}, role={args.role}).")
+        if auth.count_users() == 1:
+            print("This is the first user — they can sign in to the UI immediately.")
+        return 0
+
+    if sub == "passwd":
+        user = auth.get_user(args.username)
+        if user is None:
+            print(f"Error: user '{args.username}' not found.")
+            return 1
+        if args.password_stdin:
+            password = _read_password_stdin()
+        else:
+            password = _prompt_new_password()
+            if password is None:
+                return 1
+        try:
+            ok = auth.set_password(args.username, password)
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 1
+        if not ok:
+            print(f"Error: failed to update password for '{args.username}'.")
+            return 1
+        print(f"Password updated for '{args.username}'.")
+        return 0
+
+    if sub == "list":
+        users = auth.list_users()
+        if not users:
+            print("No users yet. Create one with: amg user add <username>")
+            return 0
+        print(f"{'USERNAME':<24} {'ROLE':<10} {'LAST LOGIN':<18} STATUS")
+        print("-" * 64)
+        for u in users:
+            status = "disabled" if u.get("disabled_at") else "active"
+            print(
+                f"{u['username']:<24} {u['role']:<10} "
+                f"{_format_login_ts(u.get('last_login_at')):<18} {status}"
+            )
+        return 0
+
+    if sub == "disable":
+        if not auth.disable_user(args.username):
+            print(f"Error: user '{args.username}' not found.")
+            return 1
+        print(f"Disabled '{args.username}'. Existing sessions remain valid until they expire; "
+              "rotate AMG_SESSION_SECRET to revoke them immediately.")
+        return 0
+
+    if sub == "enable":
+        if not auth.enable_user(args.username):
+            print(f"Error: user '{args.username}' not found.")
+            return 1
+        print(f"Enabled '{args.username}'.")
+        return 0
+
+    if sub == "delete":
+        if not args.yes:
+            ans = input(f"Permanently delete user '{args.username}'? [y/N]: ").strip().lower()
+            if ans not in {"y", "yes"}:
+                print("Cancelled.")
+                return 1
+        if not auth.delete_user(args.username):
+            print(f"Error: user '{args.username}' not found.")
+            return 1
+        print(f"Deleted '{args.username}'.")
+        return 0
+
+    print(f"Unknown user subcommand: {sub}")
+    return 1
 
 
 if __name__ == "__main__":
