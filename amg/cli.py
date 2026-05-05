@@ -33,6 +33,7 @@ Commands:
     amg promote-score-candidate Promote a passed scoring retrain candidate
     amg user <add|passwd|list|disable|enable|delete>  Manage UI auth users
     amg pod-worker              Run pod-side service (cloud edition; pod CMD)
+    amg cloud-remote <add|list|show|remove|test>  Manage encrypted rclone remotes
 """
 import argparse
 import os
@@ -327,6 +328,58 @@ def main():
     p_pw.add_argument("--host", type=str, default="0.0.0.0")
     p_pw.add_argument("--port", type=int, default=8000)
 
+    # cloud-remote (cloud edition: encrypted rclone credential store)
+    p_cr = subparsers.add_parser(
+        "cloud-remote",
+        help="Manage stored cloud-storage rclone remotes (add, list, remove, test, show)",
+    )
+    cr_sub = p_cr.add_subparsers(dest="cloud_remote_cmd", required=True)
+
+    p_cr_add = cr_sub.add_parser(
+        "add",
+        help="Add an rclone remote from a config-section paste (or --from-file)",
+    )
+    p_cr_add.add_argument(
+        "--from-file",
+        type=str,
+        default=None,
+        help="Read the rclone config section from this file instead of stdin/prompt",
+    )
+    p_cr_add.add_argument(
+        "--notes",
+        type=str,
+        default="",
+        help="Free-form note shown in `cloud-remote list` (e.g. who owns the OAuth token)",
+    )
+    p_cr_add.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing remote with the same name (e.g. after re-authorizing)",
+    )
+
+    cr_sub.add_parser("list", help="List all stored cloud remotes")
+
+    p_cr_show = cr_sub.add_parser(
+        "show",
+        help="Print the decrypted config of one remote (sensitive!)",
+    )
+    p_cr_show.add_argument("name", type=str)
+    p_cr_show.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the 'this prints a secret' confirmation prompt",
+    )
+
+    p_cr_rm = cr_sub.add_parser("remove", help="Delete a stored remote")
+    p_cr_rm.add_argument("name", type=str)
+    p_cr_rm.add_argument("--yes", action="store_true", help="Skip confirmation")
+
+    p_cr_test = cr_sub.add_parser(
+        "test",
+        help="Materialize a remote and run `rclone listremotes` against it",
+    )
+    p_cr_test.add_argument("name", type=str)
+
     args = parser.parse_args()
 
     if not args.command:
@@ -375,6 +428,7 @@ def _dispatch(args):
     if cmd == "promote-score-candidate": return cmd_promote_score_candidate(args)
     if cmd == "user":      return cmd_user(args)
     if cmd == "pod-worker": return cmd_pod_worker(args)
+    if cmd == "cloud-remote": return cmd_cloud_remote(args)
     return 1
 
 
@@ -1536,6 +1590,160 @@ def cmd_pod_worker(args):
     from amg.cloud.pod_worker import cli_main
 
     return cli_main(host=args.host, port=args.port)
+
+
+def cmd_cloud_remote(args):
+    """Manage the encrypted rclone credential store (add/list/show/remove/test).
+
+    All operations work against the same SQLite DB the pod-side worker reads
+    from at job-dispatch time. Encryption-touching operations (add, show,
+    test) require AMG_CREDENTIALS_KEY in the environment; list and remove
+    don't, so they remain usable for cleanup after a key rotation."""
+    import sqlite3
+    import sys as _sys
+
+    from amg.cloud.credentials import (
+        CredentialConfigInvalidError,
+        CredentialDecryptError,
+        CredentialKeyInvalidError,
+        CredentialKeyMissingError,
+        CredentialNotFoundError,
+        CredentialStore,
+    )
+
+    sub = args.cloud_remote_cmd
+
+    try:
+        store = CredentialStore()
+    except (CredentialKeyMissingError, CredentialKeyInvalidError) as exc:
+        # Construction itself doesn't touch the key, so this only fires if
+        # something else reaches into _resolve_key. Defensive only.
+        print(f"Error: {exc}")
+        return 1
+
+    if sub == "list":
+        records = store.list_remotes()
+        if not records:
+            print("No cloud remotes configured.")
+            print("Add one with:  amg cloud-remote add --from-file <path-to-rclone-section>")
+            return 0
+        print(f"{'NAME':<24}{'KIND':<12}{'CREATED':<22}{'LAST USED':<22}NOTES")
+        for r in records:
+            last = r.last_used_at or "-"
+            print(f"{r.name:<24}{r.kind:<12}{r.created_at:<22}{last:<22}{r.notes}")
+        return 0
+
+    if sub == "add":
+        if args.from_file:
+            try:
+                config_text = Path(args.from_file).expanduser().read_text(encoding="utf-8")
+            except OSError as exc:
+                print(f"Error: cannot read --from-file: {exc}")
+                return 1
+        else:
+            print("Paste the rclone config section (e.g. the [gdrive_amy] block).")
+            print("End with Ctrl-D on a blank line:")
+            try:
+                config_text = _sys.stdin.read()
+            except KeyboardInterrupt:
+                print()
+                return 130
+            if not config_text.strip():
+                print("Error: empty input.")
+                return 1
+        try:
+            record = store.add_remote(
+                config_text,
+                notes=args.notes,
+                overwrite=args.force,
+            )
+        except CredentialConfigInvalidError as exc:
+            print(f"Error: {exc}")
+            return 1
+        except sqlite3.IntegrityError:
+            print(
+                f"Error: a remote already exists with the parsed name. "
+                f"Re-run with --force to overwrite."
+            )
+            return 1
+        except (CredentialKeyMissingError, CredentialKeyInvalidError) as exc:
+            print(f"Error: {exc}")
+            return 1
+        print(f"Added remote '{record.name}' (kind={record.kind}).")
+        return 0
+
+    if sub == "show":
+        if not args.yes:
+            print(
+                f"This will print the decrypted config for remote {args.name!r}, "
+                "which contains OAuth tokens or passwords. Continue? [y/N] ",
+                end="",
+                flush=True,
+            )
+            try:
+                answer = input().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 130
+            if answer not in {"y", "yes"}:
+                print("Aborted.")
+                return 0
+        try:
+            print(store.get_remote(args.name))
+        except CredentialNotFoundError as exc:
+            print(f"Error: {exc}")
+            return 1
+        except (CredentialKeyMissingError, CredentialKeyInvalidError, CredentialDecryptError) as exc:
+            print(f"Error: {exc}")
+            return 1
+        return 0
+
+    if sub == "remove":
+        if not args.yes:
+            print(f"Permanently delete remote {args.name!r}? [y/N] ", end="", flush=True)
+            try:
+                answer = input().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 130
+            if answer not in {"y", "yes"}:
+                print("Aborted.")
+                return 0
+        if store.delete_remote(args.name):
+            print(f"Deleted remote '{args.name}'.")
+            return 0
+        print(f"No remote named '{args.name}' to delete.")
+        return 1
+
+    if sub == "test":
+        from amg.cloud.rclone import Rclone, RcloneError, RcloneNotFoundError
+
+        try:
+            with store.materialize_config(names=[args.name]) as cfg_path:
+                try:
+                    remotes = Rclone(config_path=cfg_path).list_remotes()
+                except RcloneNotFoundError as exc:
+                    print(f"Error: {exc}")
+                    return 1
+                except RcloneError as exc:
+                    print(f"Error: rclone rejected the materialized config: {exc}")
+                    return 1
+        except CredentialNotFoundError as exc:
+            print(f"Error: {exc}")
+            return 1
+        except (CredentialKeyMissingError, CredentialKeyInvalidError, CredentialDecryptError) as exc:
+            print(f"Error: {exc}")
+            return 1
+        if args.name in remotes:
+            print(f"OK — rclone parsed remote '{args.name}'.")
+            return 0
+        print(
+            f"Warning: rclone parsed the config but didn't see remote '{args.name}' "
+            f"(saw: {remotes}). The section header may not match the stored name."
+        )
+        return 1
+
+    return 1
 
 
 if __name__ == "__main__":
