@@ -141,6 +141,11 @@ def main():
     p_ui.add_argument("--host", type=str, default="127.0.0.1")
     p_ui.add_argument("--port", type=int, default=8080)
     p_ui.add_argument("--no-open", action="store_true", help="Do not open browser automatically")
+    p_ui.add_argument(
+        "--auth",
+        action="store_true",
+        help="Force auth on (login required). Auto-on when --host is non-localhost.",
+    )
 
     # feedback-eval
     p_fe = subparsers.add_parser("feedback-eval", help="Compare model labels vs operator corrections")
@@ -841,15 +846,50 @@ def cmd_ui(args):
         print("Install dependencies: pip install fastapi uvicorn jinja2 python-multipart")
         return 1
 
+    # Auth policy:
+    # - Localhost bind (127.0.0.1, localhost, ::1): default to auth OFF for the
+    #   single-user Mac workflow. Operator can opt back in with --auth.
+    # - Any other bind (0.0.0.0, LAN IP, public IP): auth REQUIRED. The UI is
+    #   reachable from another device, so refusing to start without a session
+    #   secret is the safe default. Operator can override with
+    #   AMG_AUTH_DISABLED=1 (e.g. for a one-off LAN demo).
+    is_local_bind = args.host in {"127.0.0.1", "localhost", "::1"}
+    user_set_auth_disabled = "AMG_AUTH_DISABLED" in os.environ
+    if not user_set_auth_disabled:
+        if is_local_bind and not args.auth:
+            os.environ["AMG_AUTH_DISABLED"] = "1"
+        elif not is_local_bind and not args.auth:
+            # Force auth on for non-localhost binds; operator can still disable
+            # via explicit env var if they know what they're doing.
+            os.environ.setdefault("AMG_AUTH_DISABLED", "0")
+    if args.auth:
+        os.environ["AMG_AUTH_DISABLED"] = "0"
+
+    auth_on = os.environ.get("AMG_AUTH_DISABLED", "").lower() not in {"1", "true", "yes"}
+    if auth_on and not os.environ.get("AMG_SESSION_SECRET", "").strip():
+        print("Auth is enabled but AMG_SESSION_SECRET is not set.")
+        print("Generate one and re-run:")
+        print("  export AMG_SESSION_SECRET=\"$(python -c 'import secrets; print(secrets.token_urlsafe(48))')\"")
+        if not is_local_bind:
+            print(f"(Auth was auto-enabled because --host is {args.host}; pass --host 127.0.0.1 for local-only use.)")
+        return 1
+
     try:
         from amg.ui.app import create_app
     except ImportError as e:
         print(f"Could not load UI app: {e}")
-        print("Install dependencies: pip install fastapi uvicorn jinja2 python-multipart")
+        print("Install dependencies: pip install fastapi uvicorn jinja2 python-multipart argon2-cffi itsdangerous")
         return 1
 
     url = f"http://{args.host}:{args.port}"
     print(f"Starting AMG UI at {url}")
+    if auth_on:
+        from amg.ui import auth as _auth
+        print(f"Auth: ON (users registered: {_auth.count_users()})")
+        if _auth.count_users() == 0:
+            print("  No users yet. Create one with: amg user add <username>")
+    else:
+        print("Auth: OFF (localhost-only single-user mode)")
     print("Press Ctrl+C to stop.")
 
     if not args.no_open:

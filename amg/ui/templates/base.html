@@ -569,7 +569,15 @@
         </nav>
         <div class="topbar-right">
           <span class="pill warn">Auto-pilot OFF · manual review</span>
-          <div class="avatar">M</div>
+          {% set _u = current_user(request) %}
+          {% if _u %}
+            <div class="avatar" title="{{ _u.username }}">{{ _u.username[0]|upper }}</div>
+            {% if auth_enabled() %}
+              <form method="POST" action="/logout" style="display:inline;">
+                <button type="submit" class="btn btn-ghost" style="font-size:12px; padding:6px 10px;">Sign out</button>
+              </form>
+            {% endif %}
+          {% endif %}
         </div>
       </div>
     </div>

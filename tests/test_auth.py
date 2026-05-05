@@ -262,6 +262,15 @@ class TestAuthIntegration:
         r = client.get("/", headers={"HX-Request": "true"})
         assert r.status_code == 401
 
+    def test_htmx_401_includes_hx_redirect_header(self, app_with_auth):
+        """HTMX uses HX-Redirect to navigate the whole page instead of swapping."""
+        client = TestClient(app_with_auth, follow_redirects=False)
+        r = client.get("/library", headers={"HX-Request": "true"})
+        assert r.status_code == 401
+        assert "HX-Redirect" in r.headers
+        assert r.headers["HX-Redirect"].startswith("/login")
+        assert "next=%2Flibrary" in r.headers["HX-Redirect"]
+
 
 # --- env / disabled mode ----------------------------------------------------
 

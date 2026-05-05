@@ -59,6 +59,11 @@ data/title_corpus/*
 data/operator_feedback/*.jsonl
 data/tutorial_keyframes/
 data/ui_uploads/
+# UI auth — local SQLite user store (hashed passwords; never commit).
+data/auth.sqlite
+data/auth.sqlite-journal
+data/auth.sqlite-wal
+data/auth.sqlite-shm
 # Training exports / local datasets (operator-machine specific)
 data/training/
 

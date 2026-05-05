@@ -370,13 +370,21 @@ class _AuthGateMiddleware(BaseHTTPMiddleware):
         user = request.session.get("user") if hasattr(request, "session") else None
         if user:
             return await call_next(request)
-        # No session — bounce.
-        is_htmx = request.headers.get("HX-Request") == "true"
-        if is_htmx or path.startswith("/api/") or path.startswith("/partials/"):
-            return Response(status_code=401, content="not authenticated")
         target = "/login"
         if path and path != "/":
             target += "?" + urlencode({"next": path})
+        # No session — bounce. HTMX requests get a 401 with HX-Redirect so the
+        # browser navigates to /login as a full page instead of swapping the
+        # login HTML into a partial slot.
+        is_htmx = request.headers.get("HX-Request") == "true"
+        if is_htmx:
+            return Response(
+                status_code=401,
+                content="not authenticated",
+                headers={"HX-Redirect": target},
+            )
+        if path.startswith("/api/") or path.startswith("/partials/"):
+            return Response(status_code=401, content="not authenticated")
         return RedirectResponse(target, status_code=302)
 
 

@@ -35,11 +35,17 @@ from amg.learning.feedback_eval import evaluate_feedback, load_feedback_rows
 from amg.pipeline import process_scene
 from amg.scoring.insight_pipeline import generate_scene_insight_payload
 from amg.utils.logging import get_logger
+from amg.ui.auth import get_current_user, install_auth, is_auth_enabled
 from amg.video.metadata import get_metadata
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+# Templates can call ``current_user(request)`` to render the topbar avatar
+# and the logout button without every route having to thread the user dict
+# through its TemplateResponse context.
+templates.env.globals["current_user"] = get_current_user
+templates.env.globals["auth_enabled"] = is_auth_enabled
 UPLOADS_DIR = DATA_DIR / "ui_uploads"
 RUN_LOGS_DIR = DATA_DIR / "logs" / "runs"
 RUN_TIMINGS_PATH = DATA_DIR / "logs" / "run_timings.jsonl"
@@ -1569,6 +1575,10 @@ def _process_jobs_view() -> dict:
 def create_app() -> FastAPI:
     app = FastAPI(title="AMG UI", docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    # Auth: registers /login and /logout, plus the gate middleware (when
+    # AMG_AUTH_DISABLED is not set). Local Mac use sets that env var via
+    # cmd_ui() in cli.py, so the existing single-user workflow keeps working.
+    install_auth(app)
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
