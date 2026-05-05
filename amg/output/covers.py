@@ -11,6 +11,7 @@ Examples (scores on 0–100 scale since v11.1.5):
     09_Yasmina_BBGG_FALLBACK-C_Front_58.0_22m15s.jpg
     10_Yasmina_BBGG_FALLBACK-D_Visual_-.--_18m04s.jpg
 """
+import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,8 +26,14 @@ from amg.config import (
     PROVIDED_THUMB_MAX_SCAN,
     PROVIDED_THUMB_MAX_ACCEPT,
     PROVIDED_THUMB_MIN_SCORE,
+    COVER_NEARBY_POLISH_ENABLED,
+    COVER_NEARBY_POLISH_MIN_SCORE,
+    COVER_NEARBY_POLISH_OFFSETS_SEC,
+    COVER_NEARBY_POLISH_MIN_SHARPNESS_GAIN,
+    COVER_NEARBY_POLISH_MIN_SHARPNESS_GAIN_PCT,
 )
 from amg.video.reader import VideoReader
+from amg.video.frames import measure_sharpness, is_frame_too_dark
 from amg.output.enhance import auto_enhance
 from amg.utils.timing import format_timestamp_mmss
 from amg.utils.logging import get_logger
@@ -137,12 +144,27 @@ def save_covers(
 
     saved = []
     with VideoReader(video_path) as vr:
+        base_timestamps = [float(entry.get("timestamp_sec", 0) or 0) for entry in sorted_candidates]
+        base_frames = vr.get_frames_at(base_timestamps) if base_timestamps else []
+        base_frame_by_idx = {idx: frame for idx, frame in enumerate(base_frames)}
+
+        nearby_frame_map: Dict[float, Any] = {}
+        if COVER_NEARBY_POLISH_ENABLED:
+            polish_timestamps = _collect_polish_timestamps(sorted_candidates)
+            if polish_timestamps:
+                polish_frames = vr.get_frames_at(polish_timestamps)
+                nearby_frame_map = {
+                    round(float(ts), 3): frame
+                    for ts, frame in zip(polish_timestamps, polish_frames)
+                    if frame is not None
+                }
+
         for rank, entry in enumerate(sorted_candidates, start=1):
             scored = entry.get("scored_frame")
             ts = entry.get("timestamp_sec", 0)
 
             # Re-extract at full resolution from video (not the analysis frame)
-            full_frame = vr.get_frame_at(ts)
+            full_frame = base_frame_by_idx.get(rank - 1)
             if full_frame is None:
                 # Fall back to the analysis frame we already have
                 full_frame = entry.get("frame")
@@ -151,6 +173,8 @@ def save_covers(
                 continue
 
             score = scored.score if scored else 0
+            if COVER_NEARBY_POLISH_ENABLED and score >= COVER_NEARBY_POLISH_MIN_SCORE:
+                ts, full_frame = _polish_nearby_frame(ts, full_frame, nearby_frames_by_ts=nearby_frame_map)
             type_ = scored.type_ if scored else "UNKNOWN"
             gaze = scored.gaze if scored else "UNKNOWN"
             tier = entry.get("tier", "")
@@ -196,6 +220,70 @@ def save_covers(
 
     log.info("Saved covers", count=len(saved), verified=sum(1 for s in saved if s["verified"]))
     return saved
+
+
+def _polish_nearby_frame(
+    ts: float,
+    base_frame,
+    *,
+    nearby_frames_by_ts: Optional[Dict[float, Any]] = None,
+) -> tuple[float, Any]:
+    """
+    Try a few nearby timestamps and keep the sharpest frame if meaningfully better.
+
+    This is a localized rescue for near-miss blur on otherwise strong picks.
+    """
+    if base_frame is None:
+        return ts, base_frame
+
+    base_sharp = measure_sharpness(base_frame)
+    best_ts = ts
+    best_frame = base_frame
+    best_sharp = base_sharp
+
+    for dt in COVER_NEARBY_POLISH_OFFSETS_SEC:
+        cand_ts = max(0.0, float(ts) + float(dt))
+        cand = None
+        if nearby_frames_by_ts:
+            cand = nearby_frames_by_ts.get(round(cand_ts, 3))
+        if cand is None or is_frame_too_dark(cand):
+            continue
+        sharp = measure_sharpness(cand)
+        if sharp > best_sharp:
+            best_ts = cand_ts
+            best_frame = cand
+            best_sharp = sharp
+
+    sharp_gain = best_sharp - base_sharp
+    pct_gain = (sharp_gain / base_sharp) if base_sharp > 0 else 1.0
+    if sharp_gain >= COVER_NEARBY_POLISH_MIN_SHARPNESS_GAIN and pct_gain >= COVER_NEARBY_POLISH_MIN_SHARPNESS_GAIN_PCT:
+        log.info(
+            "Nearby-frame polish selected sharper frame",
+            from_ts=round(float(ts), 3),
+            to_ts=round(float(best_ts), 3),
+            sharp_from=round(float(base_sharp), 1),
+            sharp_to=round(float(best_sharp), 1),
+        )
+        return best_ts, best_frame
+    return ts, base_frame
+
+
+def _collect_polish_timestamps(candidates: List[dict]) -> List[float]:
+    out: List[float] = []
+    seen: set[float] = set()
+    for entry in candidates:
+        scored = entry.get("scored_frame")
+        score = float(scored.score) if scored and getattr(scored, "score", None) is not None else 0.0
+        if score < COVER_NEARBY_POLISH_MIN_SCORE:
+            continue
+        base_ts = float(entry.get("timestamp_sec", 0) or 0)
+        for dt in COVER_NEARBY_POLISH_OFFSETS_SEC:
+            ts = round(max(0.0, base_ts + float(dt)), 3)
+            if ts in seen:
+                continue
+            seen.add(ts)
+            out.append(ts)
+    return out
 
 
 def score_and_save_provided_thumbnails(
@@ -351,6 +439,108 @@ def score_and_save_provided_thumbnails(
         min_score=min_score,
     )
     return saved, stats
+
+
+def select_soft_thumbnail(
+    *,
+    video_path: Path,
+    output_dir: Path,
+    ai_client,
+    performer_name: str = "Unknown",
+    performer_code: str = "",
+    duration_sec: Optional[float] = None,
+    sample_count: int = 24,
+    min_score: float = 72.0,
+    filename: str = "00_soft_thumbnail.jpg",
+    enhance: bool = ENHANCE_DEFAULT,
+) -> Optional[dict]:
+    """
+    Select and save one optional non-nude thumbnail for studio/platform use.
+    """
+    from amg.scoring.prompt import build_soft_thumbnail_prompt
+    from amg.scoring.parser import parse_ai_response
+
+    if duration_sec is None:
+        from amg.video.metadata import get_metadata
+        duration_sec = float(get_metadata(video_path).get("duration_sec", 0.0) or 0.0)
+    if duration_sec <= 0:
+        return None
+
+    sample_count = max(8, int(sample_count or 24))
+    prompt = build_soft_thumbnail_prompt()
+    best: Optional[dict] = None
+    rows: List[Dict[str, Any]] = []
+
+    start = duration_sec * 0.05
+    end = duration_sec * 0.95
+    step = (end - start) / max(1, sample_count - 1)
+    timestamps = [start + i * step for i in range(sample_count)]
+
+    with VideoReader(video_path) as vr:
+        frames = vr.get_frames_at(timestamps)
+        for ts, frame in zip(timestamps, frames):
+            if frame is None or is_frame_too_dark(frame):
+                continue
+            ai_resp = ai_client.score_frame(frame, prompt)
+            if not ai_resp.success:
+                continue
+            scored = parse_ai_response(ai_resp.raw_text)
+            if not scored.parse_succeeded:
+                continue
+            score = float(scored.score or 0.0)
+            row = {
+                "timestamp_sec": round(float(ts), 3),
+                "score": round(score, 1),
+                "type": scored.type_,
+                "gaze": scored.gaze,
+                "pen_visible": bool(scored.penetration_visible),
+            }
+            rows.append(row)
+            # Enforce soft safety.
+            if scored.penetration_visible:
+                continue
+            if scored.type_.upper() == "NUDE":
+                continue
+            if score < min_score:
+                continue
+            if best is None or score > float(best["score"]):
+                best = {
+                    "frame": frame,
+                    "timestamp_sec": float(ts),
+                    "score": score,
+                    "type": scored.type_,
+                    "gaze": scored.gaze,
+                }
+
+    report_path = output_dir / "soft_thumbnail.json"
+    try:
+        report_path.write_text(json.dumps({"rows": rows, "selected": best is not None}, indent=2))
+    except Exception:
+        pass
+
+    if not best:
+        log.info("Soft thumbnail skipped", reason="no_safe_candidate", scanned=len(rows), min_score=min_score)
+        return None
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / filename
+    if not _save_frame(best["frame"], out_path, enhance=enhance):
+        return None
+    verified, error = verify_cover(out_path)
+    result = {
+        "path": out_path,
+        "filename": out_path.name,
+        "timestamp_sec": best["timestamp_sec"],
+        "score": round(float(best["score"]), 1),
+        "type": best["type"],
+        "gaze": best["gaze"],
+        "verified": verified,
+        "verification_error": error,
+        "performer": performer_name,
+        "code": performer_code,
+    }
+    log.info("Soft thumbnail selected", score=result["score"], timestamp_sec=result["timestamp_sec"], path=str(out_path))
+    return result
 
 
 def _discover_provided_thumbnail_paths(

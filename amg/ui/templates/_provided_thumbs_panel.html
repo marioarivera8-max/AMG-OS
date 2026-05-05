@@ -16,9 +16,10 @@
       <div class="muted" style="font-size: 12px; margin-bottom: 6px;">Accepted by AI</div>
       <div class="stack" style="gap: 6px;">
         {% for r in provided_thumb_report.accepted_rows[:8] %}
+          {% set s_disp = (r.score * 10.0) if ((r.score|float) > 0 and (r.score|float) <= 10.0) else (r.score|float) %}
           <div class="between" style="font-size: 12px; padding: 6px 0; border-bottom: 1px solid var(--line-soft);">
             <span style="max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ r.filename }}">{{ r.filename }}</span>
-            <span class="pill ok">score {{ "%.1f"|format((r.score or 0)|float) }}</span>
+            <span class="pill ok">score {{ "%.1f"|format(s_disp) }}</span>
           </div>
         {% endfor %}
       </div>
@@ -35,7 +36,8 @@
               <div class="between">
                 <span style="max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ r.filename }}">{{ r.filename }}</span>
                 {% if r.score is not none %}
-                  <span class="pill">{{ "%.1f"|format((r.score or 0)|float) }}</span>
+                  {% set s_disp = (r.score * 10.0) if ((r.score|float) > 0 and (r.score|float) <= 10.0) else (r.score|float) %}
+                  <span class="pill">{{ "%.1f"|format(s_disp) }}</span>
                 {% endif %}
               </div>
               <div class="muted mono" style="font-size: 11px; margin-top: 4px;">reason={{ r.reason or "UNKNOWN" }}</div>

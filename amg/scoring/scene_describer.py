@@ -31,7 +31,13 @@ from typing import Any, Dict, List, Optional
 import cv2
 
 from amg.scoring.ai_client import AIClient
+from amg.config import TITLE_TONE_DEFAULT
 from amg.scoring.prompt import build_scene_insight_prompt, build_enriched_title_prompt
+from amg.scoring.market_profile import (
+    build_seed_taxonomy,
+    MARKET_CATEGORY_PRIORITIES,
+    MARKET_TAG_PRIORITIES,
+)
 from amg.scoring.title_generator import _fallback_titles, _check_platform_fit, _check_warnings
 from amg.utils.logging import get_logger
 
@@ -109,6 +115,7 @@ def generate_titles_with_insight(
     description: str,
     insight: Optional[SceneInsight],
     position_summary: Dict[str, int],
+    title_tone: str = TITLE_TONE_DEFAULT,
     n_suggestions: int = 5,
     language: str = "en",
     ai_client: Optional[AIClient] = None,
@@ -119,6 +126,8 @@ def generate_titles_with_insight(
         {
             "titles": [...],
             "long_description": str,
+            "categories": [...],
+            "tags": [...],
             "ai_used": bool,
         }
     """
@@ -131,7 +140,19 @@ def generate_titles_with_insight(
     if not ai_client.is_alive():
         log.warn("AI offline — using template title fallback")
         titles = _annotate(_fallback_titles(studio, performers, scene_type, genres, n_suggestions))
-        return {"titles": titles, "long_description": "", "ai_used": False}
+        seed = build_seed_taxonomy(genres, position_summary)
+        cats = _prioritize_tokens(seed.get("categories", []), MARKET_CATEGORY_PRIORITIES)
+        tags = _prioritize_tokens(seed.get("tags", []), MARKET_TAG_PRIORITIES)
+        return {
+            "titles": titles,
+            "long_description": "",
+            "categories": cats,
+            "tags": tags,
+            "title_tone": title_tone,
+            "ai_used": False,
+        }
+
+    seed_taxonomy = build_seed_taxonomy(genres, position_summary)
 
     prompt = build_enriched_title_prompt(
         studio=studio,
@@ -141,6 +162,8 @@ def generate_titles_with_insight(
         description=description,
         insight=insight_dict,
         position_summary=position_summary,
+        seed_taxonomy=seed_taxonomy,
+        title_tone=title_tone,
         language=language,
         n_suggestions=n_suggestions,
     )
@@ -148,15 +171,39 @@ def generate_titles_with_insight(
     if not response.success:
         log.warn("Enriched title call failed — using fallback", extra={"err": response.error_code})
         titles = _annotate(_fallback_titles(studio, performers, scene_type, genres, n_suggestions))
-        return {"titles": titles, "long_description": "", "ai_used": False}
+        cats = _prioritize_tokens(seed_taxonomy.get("categories", []), MARKET_CATEGORY_PRIORITIES)
+        tags = _prioritize_tokens(seed_taxonomy.get("tags", []), MARKET_TAG_PRIORITIES)
+        return {
+            "titles": titles,
+            "long_description": "",
+            "categories": cats,
+            "tags": tags,
+            "title_tone": title_tone,
+            "ai_used": False,
+        }
 
     parsed = _parse_enriched_response(response.raw_text)
-    titles = _annotate(parsed["titles"]) if parsed["titles"] else _annotate(
-        _fallback_titles(studio, performers, scene_type, genres, n_suggestions)
+    titles = parsed["titles"] if parsed["titles"] else _fallback_titles(
+        studio, performers, scene_type, genres, n_suggestions
+    )
+    lead = _lead_performer_name(performers)
+    titles = _enforce_lead_performer_in_titles(titles, lead)
+    long_desc = _enforce_lead_performer_in_description(parsed.get("long_description", ""), lead)
+    titles = _annotate(titles)
+    categories = _prioritize_tokens(
+        parsed.get("categories", []) or seed_taxonomy.get("categories", []),
+        MARKET_CATEGORY_PRIORITIES,
+    )
+    tags = _prioritize_tokens(
+        parsed.get("tags", []) or seed_taxonomy.get("tags", []),
+        MARKET_TAG_PRIORITIES,
     )
     return {
         "titles": titles[:n_suggestions],
-        "long_description": parsed.get("long_description", ""),
+        "long_description": long_desc,
+        "categories": categories,
+        "tags": tags,
+        "title_tone": title_tone,
         "ai_used": True,
     }
 
@@ -234,6 +281,14 @@ def _clean_multiline(s: Optional[str]) -> Optional[str]:
 _RE_TITLE = re.compile(r"TITLE_(\d+)\s*:\s*(.+?)(?=\n|$)", re.IGNORECASE)
 _RE_STYLE = re.compile(r"STYLE_(\d+)\s*:\s*(\w+)", re.IGNORECASE)
 _RE_LONGDESC = re.compile(r"LONG_DESCRIPTION\s*:\s*(.+?)(?=\nEND\b|\Z)", re.IGNORECASE | re.DOTALL)
+_RE_CATEGORY_SUGGESTIONS = re.compile(
+    r"CATEGORY_SUGGESTIONS\s*:\s*(.+?)(?=\n\s*[A-Z_]+\s*:|\nEND\b|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+_RE_TAG_SUGGESTIONS = re.compile(
+    r"TAG_SUGGESTIONS\s*:\s*(.+?)(?=\n\s*[A-Z_]+\s*:|\nEND\b|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _parse_enriched_response(raw: str) -> Dict[str, Any]:
@@ -249,7 +304,88 @@ def _parse_enriched_response(raw: str) -> Dict[str, Any]:
     long_desc = ""
     if desc_match:
         long_desc = re.sub(r"\s+", " ", desc_match.group(1)).strip().strip("\"'")
-    return {"titles": titles, "long_description": long_desc}
+    categories = _parse_csv_field(_RE_CATEGORY_SUGGESTIONS.search(raw))
+    tags = _parse_csv_field(_RE_TAG_SUGGESTIONS.search(raw))
+    return {
+        "titles": titles,
+        "long_description": long_desc,
+        "categories": categories,
+        "tags": tags,
+    }
+
+
+def _parse_csv_field(match: Optional[re.Match]) -> List[str]:
+    if not match:
+        return []
+    raw = re.sub(r"\s+", " ", match.group(1)).strip().strip("\"'")
+    if not raw or raw.upper() == "NONE":
+        return []
+    out = []
+    for token in raw.split(","):
+        t = token.strip()
+        if t:
+            out.append(t)
+    return list(dict.fromkeys(out))
+
+
+def _lead_performer_name(performers: List[str]) -> str:
+    """Choose a lead performer token for title/description enforcement."""
+    if not performers:
+        return ""
+    lead = (performers[0] or "").strip()
+    if not lead:
+        return ""
+    # Prefer first token for compact retail titles; keep full in long description.
+    first = lead.split()[0].strip()
+    return first or lead
+
+
+def _enforce_lead_performer_in_titles(titles: List[Dict[str, Any]], lead: str) -> List[Dict[str, Any]]:
+    if not lead:
+        return titles
+    out: List[Dict[str, Any]] = []
+    for t in titles:
+        text = (t.get("text") or "").strip()
+        if not text:
+            out.append(t)
+            continue
+        if lead.lower() not in text.lower():
+            with_suffix = f"{text} - {lead}"
+            if len(with_suffix) <= 80:
+                text = with_suffix
+            else:
+                with_prefix = f"{lead}: {text}"
+                if len(with_prefix) <= 80:
+                    text = with_prefix
+                else:
+                    keep = max(10, 80 - len(lead) - 3)
+                    text = f"{text[:keep].rstrip()} - {lead}"
+        out.append({**t, "text": text})
+    return out
+
+
+def _enforce_lead_performer_in_description(description: str, lead: str) -> str:
+    if not lead:
+        return description
+    desc = (description or "").strip()
+    if not desc:
+        return desc
+    if lead.lower() in desc.lower():
+        return desc
+    return f"{lead} leads this scene. {desc}"
+
+
+def _prioritize_tokens(values: List[str], priority: List[str]) -> List[str]:
+    """Sort tokens with known market-priority vocabulary first."""
+    if not values:
+        return []
+    prio_index = {p.lower(): i for i, p in enumerate(priority)}
+    deduped = list(dict.fromkeys(v.strip() for v in values if v and v.strip()))
+    ranked = sorted(
+        deduped,
+        key=lambda v: (prio_index.get(v.lower(), 10_000), v.lower()),
+    )
+    return ranked
 
 
 def _annotate(titles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

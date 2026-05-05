@@ -8,6 +8,10 @@ Provides:
 import time
 from contextlib import contextmanager
 
+from amg.utils.logging import get_logger
+
+log = get_logger("utils.timing")
+
 
 class PhaseTimeoutError(Exception):
     """Raised when a phase exceeds its hard timeout."""
@@ -52,9 +56,17 @@ def phase_timer(name, timeout_sec=None, on_complete=None):
 
     handle = TimerHandle()
     try:
+        log.info(f"[{name}] start")
+    except Exception:
+        pass
+    try:
         yield handle
     finally:
         handle.end = time.time()
+        try:
+            log.info(f"[{name}] done", duration_sec=round(handle.elapsed, 2))
+        except Exception:
+            pass
         if on_complete:
             try:
                 on_complete(name, handle.elapsed)

@@ -27,6 +27,12 @@ from amg.config import (
 )
 from amg.scoring.ai_client import AIClient
 from amg.scoring.prompt import build_title_generation_prompt
+from amg.scoring.market_profile import (
+    MARKET_CATEGORY_PRIORITIES,
+    MARKET_TAG_PRIORITIES,
+    MARKET_TITLE_PATTERNS,
+    build_market_profile_note,
+)
 from amg.utils.logging import get_logger
 
 log = get_logger("scoring.title_generator")
@@ -236,7 +242,14 @@ def _load_research_patterns() -> Optional[dict]:
     Returns None in v11.1 (placeholder).
     """
     if not TITLE_RESEARCH_PATTERNS_PATH.exists():
-        return None
+        # Built-in fallback profile from operator-provided top-grossing examples.
+        return {
+            "source": "builtin_market_profile",
+            "title_patterns": MARKET_TITLE_PATTERNS,
+            "category_priorities": MARKET_CATEGORY_PRIORITIES,
+            "tag_priorities": MARKET_TAG_PRIORITIES,
+            "prompt_note": build_market_profile_note(),
+        }
     try:
         with open(TITLE_RESEARCH_PATTERNS_PATH) as f:
             return json.load(f)

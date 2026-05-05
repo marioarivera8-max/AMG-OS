@@ -7,6 +7,7 @@ capped at 100, with calibration text to reduce score compression in the
 DUAL/TRIPLE; GAZE label for filenames only).
 """
 from typing import List, Optional
+from amg.scoring.market_profile import build_market_profile_note
 
 
 SYSTEM_PROMPT = """You are an expert adult VOD cover-frame scorer for B2B distribution.
@@ -249,6 +250,35 @@ END
 """
 
 
+def build_soft_thumbnail_prompt() -> str:
+    """Prompt for non-nude / soft thumbnail selection."""
+    return """Score this frame for NON-NUDE soft thumbnail suitability on a 0-100 scale.
+
+Hard requirements:
+- No explicit visible nipples, vagina, anus, or explicit penetration.
+- No visible semen/creampie/facial/spit-string focus.
+- Frame must still be commercially useful (clear subject, sharp, readable).
+
+Scoring guidance:
+- 0-30: explicit content present or unusable frame
+- 31-55: safe but weak/boring/blurry
+- 56-75: safe and usable
+- 76-90: strong soft thumbnail candidate
+- 91-100: excellent soft cover (clean, clear, compelling)
+
+Output EXACTLY in this format:
+TIER_A_PASS: yes
+SCORE: <0.0-100.0>
+TYPE: <SOFT_CLOTHED/COMPOSITION/SEX_ACT/NUDE>
+GAZE: <SINGLE/DUAL/TRIPLE/AVERTED/CLOSED/REAR>
+AESTHETIC: <PROFESSIONAL/STANDARD/AMATEUR>
+PENETRATION_VISIBLE: <yes/no>
+PENETRATION_CONFIDENCE: <0.00-1.00>
+ACTION_EVIDENCE: <EXPLICIT_PENETRATION|ORAL_CONTACT|POSE_NO_CONTACT|OCCLUDED|WATER_OCCLUSION|NONE>
+END
+"""
+
+
 def build_scene_insight_prompt() -> str:
     """Vision prompt — describe a single contact-sheet image factually.
 
@@ -279,6 +309,8 @@ def build_enriched_title_prompt(
     description: str,
     insight: dict,
     position_summary: dict,
+    seed_taxonomy: Optional[dict] = None,
+    title_tone: str = "edgy",
     language: str = "en",
     n_suggestions: int = 5,
 ) -> str:
@@ -296,6 +328,31 @@ def build_enriched_title_prompt(
     features_str = ", ".join(features) if features else "(none)"
     action = (insight or {}).get("action_summary") or "(none)"
     mood = (insight or {}).get("mood") or "(none)"
+    market_note = build_market_profile_note()
+    seed_categories = ", ".join((seed_taxonomy or {}).get("categories") or []) or "(none)"
+    seed_tags = ", ".join((seed_taxonomy or {}).get("tags") or []) or "(none)"
+    tone = (title_tone or "edgy").strip().lower()
+    if tone == "retail_safe":
+        tone_note = (
+            "TONE PROFILE: Retail Safe — punchy but conservative. Avoid taboo/incest phrasing, "
+            "avoid extreme aggression language, keep wording commercially clean."
+        )
+    elif tone == "premium_story":
+        tone_note = (
+            "TONE PROFILE: Premium Story — cinematic, sensual, upscale phrasing with clear action terms."
+        )
+    elif tone == "creative":
+        tone_note = (
+            "TONE PROFILE: Creative — vivid, fresh, imaginative phrasing with high specificity. "
+            "Use unusual but still searchable hooks grounded in real scene details. "
+            "Avoid generic title templates and avoid fabricated facts."
+        )
+    else:
+        tone = "edgy"
+        tone_note = (
+            "TONE PROFILE: Edgy — energetic, explicit, high-conversion retail voice while still factual "
+            "to what is visible in-scene."
+        )
 
     return f"""Generate retail-optimized titles AND a marketing-ready long description for an adult VOD scene.
 
@@ -311,6 +368,9 @@ SCENE CONTEXT:
   Action summary: {action}
   Mood: {mood}
   Position rollup across selected covers: {pos_str}
+  Seed categories from scene signals: {seed_categories}
+  Seed tags from scene signals: {seed_tags}
+  Requested title tone: {tone}
   Language: {language}
 
 REQUIREMENTS:
@@ -318,8 +378,23 @@ REQUIREMENTS:
   - Vary the patterns across the {n_suggestions} suggestions.
   - Prefer concrete details (setting, performer name, position, mood) over generic adjectives.
   - Avoid clichéd words: "wild", "crazy", "naughty".
+  - If a lead performer is provided, include that performer name in EVERY title.
+  - The long description must mention the lead performer by name at least once.
+  - Write with commercial energy (confident, explicit, sellable), not bland catalog prose.
+  - Use concrete action terms that match the scene (e.g. POV, blowjob, anal, creampie, squirting, toys).
+  - Make tone differences obvious:
+      * retail_safe: cleaner wording, lower intensity
+      * edgy: explicit and conversion-oriented
+      * premium_story: polished/cinematic narrative
+      * creative: novel phrasing and less repetitive structure
   - Long description: 2-4 sentences, factual, suitable for a store listing. Mention performers,
     setting, and one or two notable details. Do NOT use the words listed above.
+  - Also return category and tag suggestions tailored to this scene.
+  - Categories should be platform-style labels (Title Case).
+  - Tags should be lowercase, short, and search-friendly.
+
+{market_note}
+{tone_note}
 
 OUTPUT FORMAT (REQUIRED, no preamble):
 
@@ -339,6 +414,8 @@ TITLE_5: <text>
 STYLE_5: <pattern>
 
 LONG_DESCRIPTION: <2-4 sentence factual description>
+CATEGORY_SUGGESTIONS: <comma-separated categories, 8-15 items>
+TAG_SUGGESTIONS: <comma-separated tags, 15-30 items>
 
 END
 """

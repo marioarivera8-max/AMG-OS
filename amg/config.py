@@ -23,6 +23,15 @@ STUDIO_PROFILES_DIR = DATA_DIR / "studio_profiles"
 PERFORMERS_DIR = DATA_DIR / "performers"
 LOGS_DIR = DATA_DIR / "logs"
 BACKUPS_DIR = DATA_DIR / "backups"
+TRAINING_DIR = DATA_DIR / "training"
+TRAINING_EXAMPLES_DIR = TRAINING_DIR / "examples"
+TRAINING_DATASETS_DIR = TRAINING_DIR / "datasets"
+TRAINING_TEXT_DIR = TRAINING_DIR / "text"
+TRAINING_SCORING_DIR = TRAINING_DIR / "scoring"
+TRAINING_REGISTRY_PATH = TRAINING_DIR / "registry.jsonl"
+TRAINING_FLAGS_PATH = TRAINING_DIR / "flags.jsonl"
+TRAINING_RETRAIN_RUNS_DIR = TRAINING_DIR / "retrain_runs"
+TRAINING_ACTIVE_SCORER_PATH = TRAINING_DIR / "active_scorer.json"
 
 # Optional global config
 GLOBAL_CONFIG_PATH = AMG_OS_ROOT / "config.yaml"
@@ -101,6 +110,17 @@ MOTION_CAP_TIER_3 = 4.5
 TIER_1_INTERVAL = 1.0   # 1 fps
 TIER_2_INTERVAL = 0.5   # 1 every 2 sec
 TIER_3_INTERVAL = 0.25  # 1 every 4 sec
+TIER_1_INTERVAL_MAX = 3.0
+TIER_2_INTERVAL_MAX = 1.5
+TIER_3_INTERVAL_MAX = 1.0
+
+# Duration-adaptive sampling scale (efficiency for long-form scenes).
+# Tuple format: (min_duration_sec, max_duration_sec, interval_scale)
+INTERVAL_SCALE_BY_DURATION = [
+    (0, 1800, 1.0),               # <30m
+    (1800, 3900, 1.8),            # 30m-65m
+    (3900, float("inf"), 3.0),    # 65m+
+]
 
 # Segment counts and durations
 TIER_1_SEGMENTS = 3
@@ -237,6 +257,8 @@ PHASE_HARD_TIMEOUT_SEC = {
 # ============================================================
 FINISH_HUNTER_ZONE_START_PCT = 0.80  # Last 20%
 FINISH_HUNTER_TOP_N = 8              # Score top 8 candidates
+FINISH_HUNTER_INTERVAL_BASE = 1.0
+FINISH_HUNTER_INTERVAL_MAX = 3.0
 
 # ============================================================
 # BUILDUP HUNTER (25-50% of Video)
@@ -247,6 +269,8 @@ BUILDUP_HUNTER_ZONE_END_PCT = 0.50
 # but once dedup is loosened (below) we want enough headroom to score the variety
 # we now get out. Adds ~30-40s to scene wall time at the parallelism we're seeing.
 BUILDUP_HUNTER_TOP_N = 10
+BUILDUP_HUNTER_INTERVAL_BASE = 2.0
+BUILDUP_HUNTER_INTERVAL_MAX = 6.0
 # v11.1.2: stricter dedup just for buildup. Default DEDUP_HAMMING_THRESHOLD=5 is
 # too liberal for slow zones (kissing, undressing, oral) where many frames share
 # composition but differ in small details — it was collapsing 55 candidates to 2
@@ -260,6 +284,15 @@ BUILDUP_DEDUP_HAMMING_THRESHOLD = 2
 COVER_FORMAT = "JPEG"
 COVER_QUALITY = 92  # JPEG quality
 ENHANCE_DEFAULT = True
+
+# If a selected frame is slightly blurry but otherwise high-value, sample a few
+# nearby timestamps and keep the sharpest close match. This improves "almost
+# perfect" picks without re-scoring the whole scene.
+COVER_NEARBY_POLISH_ENABLED = True
+COVER_NEARBY_POLISH_MIN_SCORE = 75.0
+COVER_NEARBY_POLISH_OFFSETS_SEC = (-0.30, -0.15, 0.15, 0.30)
+COVER_NEARBY_POLISH_MIN_SHARPNESS_GAIN = 35.0
+COVER_NEARBY_POLISH_MIN_SHARPNESS_GAIN_PCT = 0.12
 
 # Enhancement values (subtle)
 ENHANCE_SATURATION = 1.10  # +10%
@@ -385,6 +418,39 @@ def get_cluster_window(score):
     # Score below tier-3 floor = no cluster expansion
     return 0, 0
 
+
+def get_interval_scale(duration_sec):
+    """Return interval scaling factor based on video duration."""
+    try:
+        d = float(duration_sec or 0)
+    except (TypeError, ValueError):
+        d = 0.0
+    for low, high, scale in INTERVAL_SCALE_BY_DURATION:
+        if low <= d < high:
+            return float(scale)
+    return 1.0
+
+
+def get_adaptive_interval(base_interval, duration_sec, max_interval=None):
+    """
+    Scale a sampling interval by duration, then clamp to an optional max.
+
+    Base interval is treated as the minimum to avoid oversampling.
+    """
+    try:
+        base = float(base_interval)
+    except (TypeError, ValueError):
+        base = 1.0
+    scaled = base * get_interval_scale(duration_sec)
+    if max_interval is not None:
+        try:
+            cap = float(max_interval)
+            if cap > 0:
+                scaled = min(scaled, cap)
+        except (TypeError, ValueError):
+            pass
+    return round(max(scaled, base), 3)
+
 # ============================================================
 # v11.1 ADDITIONS
 # ============================================================
@@ -418,6 +484,7 @@ PLATFORM_REQUIREMENTS = {
 # Title generation
 TITLE_SUGGESTIONS_PER_SCENE = 5  # AI generates this many candidates
 TITLE_AI_TIMEOUT_SEC = 15
+TITLE_TONE_DEFAULT = "edgy"  # retail_safe | edgy | premium_story | creative
 
 # Title style patterns (v11.1 quick patterns; v11.2 will replace with research-driven)
 TITLE_STYLE_PATTERNS = [
@@ -446,6 +513,13 @@ BATCH_SUMMARIES_DIR = DATA_DIR / "batch_summaries"
 
 # Title corpus (v11.2 hook)
 TITLE_CORPUS_DIR = DATA_DIR / "title_corpus"
+
+# Optional "soft" (non-nude) thumbnail extraction for studios/platforms that
+# require safe cover art.
+SOFT_THUMB_ENABLED = True
+SOFT_THUMB_SAMPLE_COUNT = 24
+SOFT_THUMB_MIN_SCORE = 72.0
+SOFT_THUMB_FILENAME = "00_soft_thumbnail.jpg"
 
 # DVD compilation
 DVD_OUTPUT_DIR_NAME = "DVD_Output"

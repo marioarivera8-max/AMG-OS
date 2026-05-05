@@ -55,6 +55,8 @@ TITLE_2: Slow Tub Tease in the Master Bath
 STYLE_2: scene_descriptive
 
 LONG_DESCRIPTION: Yasmina and Brady share an intimate bath. Candlelight, slow teasing, and a playful mood across the scene.
+CATEGORY_SUGGESTIONS: Amateur, Verified Models, HD Porn, POV
+TAG_SUGGESTIONS: pov, eye contact, bathtub, teasing, blowjob
 
 END
 """
@@ -63,11 +65,15 @@ END
         assert result["titles"][0]["text"] == "Bath Tease — Yasmina & Brady"
         assert result["titles"][0]["style"] == "performer_led"
         assert "candlelight" in result["long_description"].lower()
+        assert "Amateur" in result["categories"]
+        assert "pov" in result["tags"]
 
     def test_no_titles(self):
         result = _parse_enriched_response("garbage response")
         assert result["titles"] == []
         assert result["long_description"] == ""
+        assert result["categories"] == []
+        assert result["tags"] == []
 
 
 # ---- position summary ----
@@ -126,6 +132,8 @@ class TestGenerateTitlesWithInsight:
                 "TITLE_2: Couple's Slow Bath Scene\n"
                 "STYLE_2: scene_descriptive\n\n"
                 "LONG_DESCRIPTION: Yasmina shares an intimate bath scene featuring slow teasing and candlelight.\n"
+                "CATEGORY_SUGGESTIONS: Amateur, Verified Models, HD Porn, POV\n"
+                "TAG_SUGGESTIONS: pov, eye contact, bathtub, teasing\n"
                 "END\n"
             ),
         )
@@ -144,4 +152,7 @@ class TestGenerateTitlesWithInsight:
         assert result["ai_used"] is True
         assert len(result["titles"]) == 2
         assert result["titles"][0]["text"] == "Bath Tease with Yasmina"
+        assert "yasmina" in result["titles"][1]["text"].lower()
         assert "intimate bath" in result["long_description"].lower()
+        assert "POV" in result["categories"]
+        assert "pov" in result["tags"]

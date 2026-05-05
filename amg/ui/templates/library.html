@@ -4,7 +4,7 @@
 <div class="page-head between">
   <div>
     <h1>Library</h1>
-    <div class="sub">{{ stats.total }} processed scenes · {{ stats.review }} awaiting review · {{ stats.ready }} ready</div>
+    <div class="sub">{{ stats.total }} processed scenes · {{ stats.review }} awaiting review · {{ stats.failed }} failed · {{ stats.ready }} ready</div>
   </div>
   <div class="row">
     <a href="/" class="btn btn-primary">+ New Scene</a>
@@ -16,6 +16,9 @@
     <div class="sidenav-section">Pinned</div>
     <a href="/library?status=review" class="{% if filter.status == 'review' %}active{% endif %}">
       <span class="dot warn"></span> Awaiting review ({{ stats.review }})
+    </a>
+    <a href="/library?status=failed" class="{% if filter.status == 'failed' %}active{% endif %}">
+      <span class="dot err"></span> Failed ({{ stats.failed }})
     </a>
     <a href="/library?status=ready" class="{% if filter.status == 'ready' %}active{% endif %}">
       <span class="dot ok"></span> Ready to publish ({{ stats.ready }})
@@ -34,14 +37,14 @@
     {% endfor %}
 
     <div class="sidenav-section">Smart filters</div>
-    <a href="/library?min_score=90">Top-scored (≥90)</a>
-    <a href="/library?status=draft">No covers / failed</a>
+    <a href="/library?min_score=90&sort=highest_score">Top-scored (≥90)</a>
+    <a href="/library?status=failed">No covers / failed</a>
   </aside>
 
   <div>
     <form method="get" action="/library" class="card card-tight" style="margin-bottom: 16px;">
       <div class="row">
-        <input type="search" name="q" value="{{ filter.q or '' }}" placeholder="Search scenes, performers, titles…" style="flex: 1; min-width: 240px;" />
+        <input type="search" name="q" value="{{ filter.q or '' }}" placeholder="Search scene, studio, performers, title, tags…" style="flex: 1; min-width: 240px;" />
         <select name="studio">
           <option value="">Studio: All</option>
           {% for s in studios %}
@@ -53,18 +56,25 @@
           <option value="ready" {% if filter.status == 'ready' %}selected{% endif %}>Ready</option>
           <option value="review" {% if filter.status == 'review' %}selected{% endif %}>Review</option>
           <option value="draft" {% if filter.status == 'draft' %}selected{% endif %}>Draft</option>
-          <option value="uploaded" {% if filter.status == 'uploaded' %}selected{% endif %}>Uploaded</option>
+          <option value="failed" {% if filter.status == 'failed' %}selected{% endif %}>Failed</option>
+        </select>
+        <select name="sort">
+          <option value="action_queue" {% if filter.sort == 'action_queue' %}selected{% endif %}>Sort: Action queue</option>
+          <option value="newest" {% if filter.sort == 'newest' %}selected{% endif %}>Sort: Newest</option>
+          <option value="highest_score" {% if filter.sort == 'highest_score' %}selected{% endif %}>Sort: Highest score</option>
+          <option value="lowest_score" {% if filter.sort == 'lowest_score' %}selected{% endif %}>Sort: Lowest score</option>
         </select>
         <input type="number" name="min_score" step="0.5" min="0" max="100" value="{{ filter.min_score or '' }}" placeholder="Min score" style="width: 110px;" />
+        <input type="hidden" name="limit" value="{{ filter.limit or '24' }}" />
         <button type="submit" class="btn">Filter</button>
-        {% if filter.q or filter.studio or filter.status or filter.min_score %}
+        {% if filter.q or filter.studio or filter.status or filter.min_score or (filter.sort and filter.sort != 'action_queue') %}
           <a href="/library" class="btn btn-ghost">Clear</a>
         {% endif %}
       </div>
     </form>
 
     <div class="muted" style="font-size: 12px; margin-bottom: 10px;">
-      Showing {{ scenes | length }} of {{ stats.total }}
+      Showing {{ scenes | length }} of {{ total_filtered }} matches
     </div>
 
     {% if scenes %}
@@ -77,7 +87,8 @@
               {% endif %}
               <div class="overlay-tl">
                 {% if s.top_score %}
-                  <span class="score-badge">{{ s.top_score }}</span>
+                  {% set top_score_disp = (s.top_score * 10.0) if ((s.top_score|float) > 0 and (s.top_score|float) <= 10.0) else (s.top_score|float) %}
+                  <span class="score-badge">{{ "%.1f"|format(top_score_disp) }}</span>
                 {% else %}
                   <span class="rank-badge">—</span>
                 {% endif %}
@@ -91,6 +102,9 @@
               <div class="cover-meta">
                 {% if s.studio %}{{ s.studio }} · {% endif %}{{ s.covers }} covers{% if s.duration_str %} · {{ s.duration_str }}{% endif %}
               </div>
+              {% if s.title %}
+                <div class="muted ellipsis" style="font-size: 11px;" title="{{ s.title }}">{{ s.title }}</div>
+              {% endif %}
               {% if s.tags %}
                 <div style="margin-top: 4px;">
                   {% for t in s.tags[:3] %}<span class="chip">{{ t }}</span>{% endfor %}
@@ -104,6 +118,16 @@
           </a>
         {% endfor %}
       </div>
+      {% if has_more %}
+        <div style="margin-top: 12px;">
+          <a
+            class="btn"
+            href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&min_score={{ filter.min_score or '' }}&sort={{ filter.sort or 'action_queue' }}&limit={{ next_limit }}"
+          >
+            Load more
+          </a>
+        </div>
+      {% endif %}
     {% else %}
       <div class="empty">No scenes match these filters.</div>
     {% endif %}

@@ -20,6 +20,9 @@ from amg.config import (
     TIER_1_INTERVAL,
     TIER_2_INTERVAL,
     TIER_3_INTERVAL,
+    TIER_1_INTERVAL_MAX,
+    TIER_2_INTERVAL_MAX,
+    TIER_3_INTERVAL_MAX,
     MOTION_CAP_TIER_1,
     MOTION_CAP_TIER_2,
     MOTION_CAP_TIER_3,
@@ -27,6 +30,7 @@ from amg.config import (
     SCORE_TIER_2_SUCCESS_FLOOR,
     SCORE_TIER_3_SUCCESS_FLOOR,
     MIN_CANDIDATES_PER_TIER,
+    get_adaptive_interval,
 )
 from amg.video.reader import VideoReader
 from amg.video.frames import (
@@ -77,13 +81,16 @@ def run_tiered_scan(
 
     all_scored = []
     seen_timestamps = set()
+    tier_1_interval = get_adaptive_interval(TIER_1_INTERVAL, duration_sec, TIER_1_INTERVAL_MAX)
+    tier_2_interval = get_adaptive_interval(TIER_2_INTERVAL, duration_sec, TIER_2_INTERVAL_MAX)
+    tier_3_interval = get_adaptive_interval(TIER_3_INTERVAL, duration_sec, TIER_3_INTERVAL_MAX)
 
     # Tier 1
     tier_1 = _run_tier(
         video_path, duration_sec,
         sharpness_floor=calibration["tier_1_floor"],
         motion_cap=MOTION_CAP_TIER_1,
-        interval=TIER_1_INTERVAL,
+        interval=tier_1_interval,
         score_floor=SCORE_TIER_1_SUCCESS_FLOOR,
         prompt=prompt,
         system_prompt=system_prompt,
@@ -117,7 +124,7 @@ def run_tiered_scan(
         video_path, duration_sec,
         sharpness_floor=calibration["tier_2_floor"],
         motion_cap=MOTION_CAP_TIER_2,
-        interval=TIER_2_INTERVAL,
+        interval=tier_2_interval,
         score_floor=SCORE_TIER_2_SUCCESS_FLOOR,
         prompt=prompt,
         system_prompt=system_prompt,
@@ -152,7 +159,7 @@ def run_tiered_scan(
         video_path, duration_sec,
         sharpness_floor=calibration["tier_3_floor"],
         motion_cap=MOTION_CAP_TIER_3,
-        interval=TIER_3_INTERVAL,
+        interval=tier_3_interval,
         score_floor=SCORE_TIER_3_SUCCESS_FLOOR,
         prompt=prompt,
         system_prompt=system_prompt,

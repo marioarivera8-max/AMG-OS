@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from amg.config import (
@@ -23,16 +24,21 @@ from amg.config import (
     OPERATOR_FEEDBACK_DIR,
     OPERATOR_FEEDBACK_PATH,
     VISION_MODEL,
+    TITLE_TONE_DEFAULT,
 )
 from amg.ingest.inventory import VIDEO_EXTENSIONS, discover_scenes
-from amg.learning.feedback_eval import evaluate_feedback
+from amg.learning.feedback_eval import evaluate_feedback, load_feedback_rows
 from amg.pipeline import process_scene
+from amg.scoring.insight_pipeline import generate_scene_insight_payload
+from amg.utils.logging import get_logger
 from amg.video.metadata import get_metadata
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 UPLOADS_DIR = DATA_DIR / "ui_uploads"
 RUN_LOGS_DIR = DATA_DIR / "logs" / "runs"
+RUN_TIMINGS_PATH = DATA_DIR / "logs" / "run_timings.jsonl"
 
 # Canonical pipeline phases (used to render phase pills + progress %).
 PHASES: List[str] = [
@@ -42,6 +48,7 @@ PHASES: List[str] = [
     "finish_hunter",
     "buildup_hunter",
     "cluster",
+    "floor_enforcement",
     "position_classifier",
     "quota_fill",
     "output",
@@ -50,11 +57,15 @@ _PHASE_RE = re.compile(r"\[(" + "|".join(PHASES) + r")\]")
 
 _jobs_lock = threading.Lock()
 _jobs: Dict[str, dict] = {}
+_job_fifo: List[str] = []
+_job_seq_counter: int = 0
+_dispatcher_thread: Optional[threading.Thread] = None
 
 # Cached health snapshot (refreshed lazily; cheap probes).
 _health_lock = threading.Lock()
 _health_cache: dict = {}
 _health_ts: float = 0.0
+log = get_logger("ui.app")
 
 
 # ---------- helpers ----------
@@ -202,7 +213,8 @@ def _load_decision_log(scene_id: str) -> Optional[dict]:
     try:
         with open(path) as f:
             return json.load(f)
-    except Exception:
+    except Exception as e:
+        log.warn("Failed to read decision log", scene_id=scene_id, path=str(path), error=str(e))
         return None
 
 
@@ -214,9 +226,53 @@ def _all_decision_logs() -> List[dict]:
         try:
             with open(p) as f:
                 out.append(json.load(f))
-        except Exception:
+        except Exception as e:
+            log.warn("Skipping unreadable decision log", path=str(p), error=str(e))
             continue
     return out
+
+
+def _persist_review_to_decision_log(
+    *,
+    scene_id: str,
+    title_tone: str,
+    title_override: Optional[str],
+    long_description: Optional[str],
+    selected_covers: List[str],
+    soft_thumbnail_review: Optional[dict] = None,
+) -> None:
+    """
+    Persist review choices back into decision log for downstream learning.
+    """
+    sid = _safe_scene_id(scene_id)
+    path = DECISION_LOGS_DIR / f"{sid}.json"
+    if not path.exists():
+        return
+    try:
+        with open(path, "r") as f:
+            dlog = json.load(f)
+    except Exception as e:
+        log.warn("Failed to read decision log for review persistence", error=str(e), scene_id=scene_id)
+        return
+
+    review = dlog.get("review") if isinstance(dlog.get("review"), dict) else {}
+    review.update(
+        {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "title_tone_selected": title_tone,
+            "title_override": title_override or None,
+            "long_description": long_description or None,
+            "selected_covers": selected_covers,
+            "soft_thumbnail_review": soft_thumbnail_review or None,
+        }
+    )
+    dlog["review"] = review
+
+    try:
+        with open(path, "w") as f:
+            json.dump(dlog, f, indent=2)
+    except Exception:
+        return
 
 
 def _humanize_ago(iso_ts: str) -> str:
@@ -248,6 +304,22 @@ def _humanize_duration(secs: float) -> str:
     return f"{s // 3600}h {(s % 3600) // 60:02d}m"
 
 
+def _safe_float(value) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _scene_status(d: dict) -> tuple[str, str]:
     """Return (label, css_class) for a decision-log scene."""
     sid = _safe_scene_id(d.get("scene_id", ""))
@@ -270,6 +342,17 @@ def _scene_summary(d: dict) -> dict:
     sid = d.get("scene_id") or ""
     status, status_cls = _scene_status(d)
     duration = (d.get("input") or {}).get("duration_sec") or 0
+    input_blob = d.get("input") or {}
+    performers = input_blob.get("performers") or []
+    if not isinstance(performers, list):
+        performers = []
+    title = (
+        input_blob.get("title")
+        or input_blob.get("scene_title")
+        or d.get("scene_title")
+        or d.get("scene_name")
+        or ""
+    )
     return {
         "scene_id": sid,
         "studio": (d.get("input") or {}).get("studio") or "",
@@ -284,6 +367,8 @@ def _scene_summary(d: dict) -> dict:
         "grad_idx": _grad_idx(sid),
         "status": status,
         "status_cls": status_cls,
+        "title": title,
+        "performers": performers,
     }
 
 
@@ -356,81 +441,54 @@ def _load_provided_thumb_report(work_dir: Optional[Path]) -> Optional[dict]:
     return data
 
 
-def _regenerate_insight_for_scene(decision_log: dict, work_dir: Path) -> dict:
+def _load_soft_thumbnail(work_dir: Optional[Path]) -> Optional[dict]:
+    if not work_dir:
+        return None
+    p = Path(work_dir) / "00_soft_thumbnail.jpg"
+    if not p.exists():
+        return None
+    sidecar = Path(work_dir) / "soft_thumbnail.json"
+    score = None
+    timestamp_sec = None
+    if sidecar.exists():
+        try:
+            data = json.loads(sidecar.read_text())
+            rows = data.get("rows") or []
+            if isinstance(rows, list):
+                # Keep best row only for summary.
+                best = None
+                for r in rows:
+                    if not isinstance(r, dict):
+                        continue
+                    s = r.get("score")
+                    if s is None:
+                        continue
+                    if best is None or float(s) > float(best.get("score", 0)):
+                        best = r
+                if best:
+                    score = best.get("score")
+                    timestamp_sec = best.get("timestamp_sec")
+        except Exception:
+            pass
+    return {"path": p, "score": score, "timestamp_sec": timestamp_sec}
+
+
+def _regenerate_insight_for_scene(decision_log: dict, work_dir: Path, title_tone: str = TITLE_TONE_DEFAULT) -> dict:
     """Run scene insight + AI titles for an already-processed scene and write
     the result back to ``insight.json``. Returns the merged dict."""
-    from amg.ingest.folder_context import resolve_folder_context
-    from amg.ingest.title_parser import parse_title_with_context, derive_primary_scene_type
-    from amg.ingest.performer_code import (
-        parse_performer_code_with_context,
-        detect_scene_type_from_code,
-    )
-    from amg.ingest.studio_profiles import detect_studio
-    from amg.scoring.scene_describer import (
-        describe_scene_from_covers,
-        generate_titles_with_insight,
-        summarize_positions,
-    )
-
     scene_path = decision_log.get("scene_path")
     if not scene_path:
         raise RuntimeError("decision_log missing scene_path")
     video_path = Path(scene_path)
 
-    folder_ctx = resolve_folder_context(video_path)
-    studio = folder_ctx.studio or detect_studio(video_path)
-    code_info = parse_performer_code_with_context(video_path, folder_ctx)
-    title_info = parse_title_with_context(video_path, folder_ctx)
-    primary = derive_primary_scene_type(
-        title_info.get("detected_genres", []),
-        code_info.get("total") if code_info else None,
-    )
-    if code_info:
-        from_code = detect_scene_type_from_code(code_info)
-        if from_code != "STANDARD":
-            primary = from_code
-
     saved_covers = (decision_log.get("outcomes") or {}).get("saved_covers", []) or []
-    contact_sheets = sorted(work_dir.glob("00_*_contact_sheet.jpg"))
-    contact_sheet = contact_sheets[0] if contact_sheets else None
-
-    insight_obj = describe_scene_from_covers(
-        contact_sheet_path=contact_sheet,
-        cover_paths=[Path(c["path"]) for c in saved_covers if c.get("path")],
+    return generate_scene_insight_payload(
+        video_path=video_path,
+        saved_covers=saved_covers,
+        work_dir=work_dir,
+        title_tone=title_tone,
+        persist=True,
     )
-    pos_summary = summarize_positions(saved_covers)
-    payload = generate_titles_with_insight(
-        studio=studio,
-        performers=folder_ctx.performers,
-        scene_type=primary,
-        genres=title_info.get("detected_genres", []),
-        description=title_info.get("description") or folder_ctx.title or "",
-        insight=insight_obj,
-        position_summary=pos_summary,
-    )
-
-    out = {
-        "studio": studio,
-        "performers": folder_ctx.performers,
-        "scene_type": primary,
-        "genres": title_info.get("detected_genres", []),
-        "operator_description": title_info.get("description") or "",
-        "folder_context": {
-            "is_generic_filename": folder_ctx.is_generic_filename,
-            "source_folder": str(folder_ctx.source_folder) if folder_ctx.source_folder else None,
-            "metadata_documents_found": len(folder_ctx.metadata_documents),
-            "ancestor_names": folder_ctx.ancestor_names,
-        },
-        "insight": insight_obj.to_dict() if insight_obj else None,
-        "position_summary": pos_summary,
-        "ai_titles": payload["titles"],
-        "long_description": payload.get("long_description", ""),
-        "ai_used": payload.get("ai_used", False),
-    }
-    work_dir.mkdir(parents=True, exist_ok=True)
-    with open(work_dir / "insight.json", "w") as f:
-        json.dump(out, f, indent=2)
-    return out
 
 
 def _cover_items(scene_id: str, decision_log: Optional[dict], work_dir: Optional[Path]) -> list[dict]:
@@ -451,6 +509,7 @@ def _cover_items(scene_id: str, decision_log: Optional[dict], work_dir: Optional
     out = []
     for p in paths:
         meta = by_name.get(p.name, {})
+        score = _normalize_score_for_ui(meta.get("score", None))
         out.append(
             {
                 "filename": p.name,
@@ -460,19 +519,51 @@ def _cover_items(scene_id: str, decision_log: Optional[dict], work_dir: Optional
                 "model_position_conf": meta.get("position_label_confidence", 0.0),
                 "model_pen_visible": meta.get("penetration_visible", False),
                 "model_pen_conf": meta.get("penetration_confidence", 0.0),
-                "score": meta.get("score", None),
+                "score": score,
+                "score_raw": meta.get("score", None),
                 "timestamp_sec": meta.get("timestamp_sec", 0) or 0,
             }
         )
     return out
 
 
+def _normalize_score_for_ui(raw_score: Optional[float]) -> Optional[float]:
+    """
+    Normalize legacy 0-10 scores to current 0-100 display scale.
+    """
+    if raw_score is None:
+        return None
+    try:
+        s = float(raw_score)
+    except (TypeError, ValueError):
+        return None
+    if 0 < s <= 10.0:
+        return round(s * 10.0, 1)
+    return round(s, 1)
+
+
+def _parse_user_score_100(raw_score: Optional[str]) -> Optional[float]:
+    if not raw_score:
+        return None
+    try:
+        parsed = float(raw_score)
+        if 0 <= parsed <= 10:
+            parsed *= 10.0
+        if 0 <= parsed <= 100:
+            return round(parsed, 1)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
 def _append_feedback_rows(
     *,
     scene_id: str,
     cover_items: list[dict],
+    soft_thumbnail: Optional[dict],
     form,
     title_override: Optional[str],
+    title_tone: Optional[str],
     notes: Optional[str],
 ) -> int:
     OPERATOR_FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
@@ -486,8 +577,10 @@ def _append_feedback_rows(
             user_pos = (form.get(f"pos_{filename}") or "").strip().upper()
             user_decision = (form.get(f"decision_{filename}") or "").strip().lower()
             user_reason = (form.get(f"reason_{filename}") or "").strip()
+            user_score_raw = (form.get(f"score_{filename}") or "").strip()
+            user_score_100 = _parse_user_score_100(user_score_raw)
 
-            if not any([user_pen, user_pos, user_decision, user_reason]):
+            if not any([user_pen, user_pos, user_decision, user_reason, user_score_raw]):
                 continue
 
             row = {
@@ -501,29 +594,111 @@ def _append_feedback_rows(
                     "position_confidence": item.get("model_position_conf"),
                     "penetration_visible": item.get("model_pen_visible"),
                     "penetration_confidence": item.get("model_pen_conf"),
+                    "score_100": _normalize_score_for_ui(item.get("score")),
                 },
                 "operator": {
                     "penetration_visible": user_pen if user_pen in {"yes", "no"} else None,
                     "position_label": user_pos or None,
                     "decision": user_decision if user_decision in {"keep", "reject", "maybe"} else None,
+                    "score_input": user_score_raw or None,
+                    "score_100": user_score_100,
                     "reason": user_reason or None,
                     "title_override": title_override or None,
+                    "title_tone": title_tone or None,
                     "notes": notes or None,
                 },
             }
             f.write(json.dumps(row) + "\n")
+            rows_written += 1
+
+        # Optional feedback row for soft thumbnail auto-pick.
+        soft_decision = (form.get("soft_thumb_decision") or "").strip().lower()
+        soft_score_raw = (form.get("soft_thumb_score") or "").strip()
+        soft_score_100 = _parse_user_score_100(soft_score_raw)
+        if soft_decision in {"keep", "reject"} or soft_score_raw:
+            soft_row = {
+                "timestamp": ts,
+                "scene_id": scene_id,
+                "filename": (soft_thumbnail or {}).get("path").name if (soft_thumbnail or {}).get("path") else "00_soft_thumbnail.jpg",
+                "timestamp_sec": (soft_thumbnail or {}).get("timestamp_sec"),
+                "model": {
+                    "type": "SOFT_THUMBNAIL",
+                    "position_label": None,
+                    "position_confidence": None,
+                    "penetration_visible": False,
+                    "penetration_confidence": None,
+                    "score_100": _normalize_score_for_ui((soft_thumbnail or {}).get("score")),
+                },
+                "operator": {
+                    "penetration_visible": None,
+                    "position_label": None,
+                    "decision": soft_decision if soft_decision in {"keep", "reject"} else None,
+                    "score_input": soft_score_raw or None,
+                    "score_100": soft_score_100,
+                    "reason": None,
+                    "title_override": title_override or None,
+                    "title_tone": title_tone or None,
+                    "notes": notes or None,
+                    "soft_thumb_decision": soft_decision if soft_decision in {"keep", "reject"} else None,
+                    "soft_thumb_score_100": soft_score_100,
+                },
+            }
+            f.write(json.dumps(soft_row) + "\n")
             rows_written += 1
     return rows_written
 
 
 # ---------- job execution + live tracking ----------
 
+def _start_dispatcher_if_needed() -> None:
+    global _dispatcher_thread
+    with _jobs_lock:
+        if _dispatcher_thread and _dispatcher_thread.is_alive():
+            return
+        _dispatcher_thread = threading.Thread(target=_dispatcher_loop, daemon=True)
+        _dispatcher_thread.start()
+
+
+def _dispatcher_loop() -> None:
+    """
+    FIFO dispatcher: run one queued job at a time in submission order.
+    """
+    global _dispatcher_thread
+    while True:
+        next_job_id = None
+        with _jobs_lock:
+            # Prune stale ids from fifo.
+            _job_fifo[:] = [jid for jid in _job_fifo if jid in _jobs]
+            running_exists = any(j.get("status") == "running" for j in _jobs.values())
+            if not running_exists:
+                for jid in _job_fifo:
+                    j = _jobs.get(jid)
+                    if j and j.get("status") == "queued":
+                        next_job_id = jid
+                        break
+            pending_exists = any(j.get("status") in {"queued", "running"} for j in _jobs.values())
+
+        if next_job_id:
+            _run_job(next_job_id)
+            continue
+        if not pending_exists:
+            break
+        time.sleep(0.35)
+
+    with _jobs_lock:
+        _dispatcher_thread = None
+
+
 def _run_job(job_id: str) -> None:
     with _jobs_lock:
-        job = _jobs[job_id]
+        job = _jobs.get(job_id)
+        if not job:
+            return
         job["status"] = "running"
         job["started_at_ts"] = time.time()
         job["started_at"] = datetime.now().isoformat()
+        job["message"] = f"Running · priority #{job.get('queue_seq')}"
+        job["current_phase"] = "ingest"
         video_path = Path(job["video_path"])
 
     try:
@@ -544,6 +719,7 @@ def _run_job(job_id: str) -> None:
                 if result.get("success")
                 else f"Failed · {','.join(result.get('error_codes', [])) or 'unknown'}"
             )
+        _record_run_timing(job, result)
     except Exception as e:
         with _jobs_lock:
             job = _jobs[job_id]
@@ -551,6 +727,126 @@ def _run_job(job_id: str) -> None:
             job["finished_at"] = datetime.now().isoformat()
             job["finished_at_ts"] = time.time()
             job["message"] = str(e)
+        _record_run_timing(job, {"success": False, "error_codes": [str(e)]})
+
+
+def _record_run_timing(job: dict, result: Optional[dict]) -> None:
+    """
+    Append one durable run timing row (JSONL) for UI analytics.
+    """
+    try:
+        RUN_TIMINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        started = job.get("started_at_ts")
+        finished = job.get("finished_at_ts")
+        elapsed = None
+        if started and finished:
+            elapsed = round(max(0.0, float(finished) - float(started)), 2)
+
+        decision_log_path = None
+        if isinstance(result, dict):
+            p = result.get("decision_log_path")
+            if p:
+                decision_log_path = str(p)
+
+        execution = {}
+        if decision_log_path:
+            try:
+                with open(decision_log_path, "r") as f:
+                    dlog = json.load(f)
+                execution = (dlog.get("execution") or {}) if isinstance(dlog, dict) else {}
+            except Exception as e:
+                log.warn("Failed to load decision log for run timing", path=str(decision_log_path), error=str(e))
+                execution = {}
+
+        phase_durations = {}
+        for name, phase in (execution.get("phases") or {}).items():
+            if isinstance(phase, dict):
+                try:
+                    phase_durations[name] = round(float(phase.get("duration_sec", 0) or 0), 2)
+                except (TypeError, ValueError):
+                    phase_durations[name] = 0.0
+
+        row = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "job_id": job.get("job_id"),
+            "scene_id": job.get("scene_id"),
+            "status": job.get("status"),
+            "source_mode": job.get("source_mode"),
+            "video_path": job.get("video_path"),
+            "elapsed_sec": elapsed,
+            "pipeline_total_sec": execution.get("total_duration_sec")
+            if execution
+            else (result or {}).get("total_duration_sec"),
+            "phase_durations_sec": phase_durations,
+            "covers_saved": (result or {}).get("covers_saved"),
+            "error_codes": (result or {}).get("error_codes", []),
+            "decision_log_path": decision_log_path,
+        }
+        with open(RUN_TIMINGS_PATH, "a") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception:
+        return
+
+
+def _load_recent_run_timings(limit: int = 12) -> List[dict]:
+    if not RUN_TIMINGS_PATH.exists():
+        return []
+    rows: List[dict] = []
+    try:
+        with open(RUN_TIMINGS_PATH, "r") as f:
+            lines = f.readlines()
+    except Exception:
+        return []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        phase_map = row.get("phase_durations_sec") or {}
+        if not isinstance(phase_map, dict):
+            phase_map = {}
+        row["phase_durations_sec"] = phase_map
+        row["pipeline_total_sec"] = _safe_float(row.get("pipeline_total_sec"))
+        row["elapsed_sec"] = _safe_float(row.get("elapsed_sec"))
+        row["pipeline_total_h"] = _humanize_duration(row["pipeline_total_sec"])
+        row["elapsed_h"] = _humanize_duration(row["elapsed_sec"])
+        row["timestamp_ago"] = _humanize_ago(row.get("timestamp", ""))
+        rows.append(row)
+        if len(rows) >= max(1, int(limit)):
+            break
+    return rows
+
+
+def _summarize_slowest_phases(runs: List[dict], top_n: int = 5) -> List[dict]:
+    agg: Dict[str, dict] = {}
+    for run in runs:
+        phase_map = run.get("phase_durations_sec") or {}
+        for phase, raw in phase_map.items():
+            sec = _safe_float(raw)
+            if sec is None or sec <= 0:
+                continue
+            cur = agg.setdefault(phase, {"phase": phase, "count": 0, "total_sec": 0.0, "max_sec": 0.0})
+            cur["count"] += 1
+            cur["total_sec"] += sec
+            cur["max_sec"] = max(cur["max_sec"], sec)
+    out = []
+    for row in agg.values():
+        avg = row["total_sec"] / row["count"] if row["count"] else 0.0
+        out.append(
+            {
+                "phase": row["phase"],
+                "count": row["count"],
+                "avg_sec": round(avg, 2),
+                "max_sec": round(row["max_sec"], 2),
+                "avg_h": _humanize_duration(avg),
+                "max_h": _humanize_duration(row["max_sec"]),
+            }
+        )
+    out.sort(key=lambda x: x["avg_sec"], reverse=True)
+    return out[: max(1, int(top_n))]
 
 
 def _latest_run_log_for_scene(scene_id: str) -> Optional[Path]:
@@ -616,8 +912,8 @@ def _start_live_log_tail(job_id: str) -> None:
                             job["message"] = tail[-1]
                         if new_phase:
                             job["current_phase"] = new_phase
-            except Exception:
-                pass
+            except Exception as e:
+                log.warn("Live log tail watcher error", job_id=job_id, error=str(e))
 
             time.sleep(1.0)
 
@@ -631,6 +927,17 @@ def _decorate_job(job: dict) -> dict:
     status = j.get("status")
     cur = j.get("current_phase")
     cur_idx = PHASES.index(cur) if cur in PHASES else -1
+
+    with _jobs_lock:
+        active = [
+            x for x in _jobs.values()
+            if x.get("status") in {"queued", "running"}
+        ]
+    active_sorted = sorted(active, key=lambda x: x.get("queue_seq", 0))
+    for idx, item in enumerate(active_sorted, start=1):
+        if item.get("job_id") == j.get("job_id"):
+            j["queue_pos"] = idx
+            break
 
     phases = []
     if status == "done":
@@ -721,21 +1028,91 @@ def _health_snapshot() -> dict:
 
 # ---------- feedback page ----------
 
-def _feedback_page_data() -> dict:
-    metrics = evaluate_feedback()
-    rows: list[dict] = []
+def _feedback_metrics_from_rows(rows: list[dict]) -> dict:
+    total = len(rows)
+    if total == 0:
+        return {"total_rows": 0}
+
+    pen_labeled = 0
+    pen_matches = 0
+    pos_labeled = 0
+    pos_matches = 0
+    score_labeled = 0
+    score_abs_err_sum = 0.0
+    score_within_5 = 0
+    by_scene: Dict[str, int] = {}
+
+    for r in rows:
+        sid = r.get("scene_id", "unknown")
+        by_scene[sid] = by_scene.get(sid, 0) + 1
+        model = r.get("model") or {}
+        op = r.get("operator") or {}
+
+        op_pen = op.get("penetration_visible")
+        if op_pen in ("yes", "no"):
+            pen_labeled += 1
+            model_pen = bool(model.get("penetration_visible", False))
+            if (op_pen == "yes" and model_pen) or (op_pen == "no" and not model_pen):
+                pen_matches += 1
+
+        op_pos = (op.get("position_label") or "").upper()
+        if op_pos:
+            pos_labeled += 1
+            model_pos = (model.get("position_label") or "").upper()
+            if op_pos == model_pos:
+                pos_matches += 1
+
+        op_score = op.get("score_100")
+        model_score = model.get("score_100")
+        if op_score is not None and model_score is not None:
+            try:
+                op_v = float(op_score)
+                model_v = float(model_score)
+            except (TypeError, ValueError):
+                op_v = None
+                model_v = None
+            if op_v is not None and model_v is not None:
+                score_labeled += 1
+                err = abs(op_v - model_v)
+                score_abs_err_sum += err
+                if err <= 5.0:
+                    score_within_5 += 1
+
+    return {
+        "total_rows": total,
+        "scene_count": len(by_scene),
+        "penetration_labeled_rows": pen_labeled,
+        "penetration_match_rate": round((pen_matches / pen_labeled) * 100, 1) if pen_labeled else None,
+        "position_labeled_rows": pos_labeled,
+        "position_match_rate": round((pos_matches / pos_labeled) * 100, 1) if pos_labeled else None,
+        "score_labeled_rows": score_labeled,
+        "score_mae": round(score_abs_err_sum / score_labeled, 2) if score_labeled else None,
+        "score_within_5_rate": round((score_within_5 / score_labeled) * 100, 1) if score_labeled else None,
+        "rows_by_scene": by_scene,
+    }
+
+
+def _feedback_page_data(
+    *,
+    scene_id: str = "",
+    studio: str = "",
+    since_days: str = "",
+    view: str = "disagreements",
+) -> dict:
+    since_days_int = _safe_int(since_days, 0)
+    since_days_int = since_days_int if since_days_int > 0 else None
+    rows = load_feedback_rows(
+        scene_id=scene_id.strip() or None,
+        studio=studio.strip() or None,
+        since_days=since_days_int,
+    )
+    metrics = _feedback_metrics_from_rows(rows)
+    if not scene_id and not studio and since_days_int is None:
+        # Keep CLI parity when no UI filters are set.
+        metrics = evaluate_feedback()
+
     decision_counts = {"keep": 0, "reject": 0, "maybe": 0}
     position_counts: dict[str, int] = {}
-    if OPERATOR_FEEDBACK_PATH.exists():
-        with open(OPERATOR_FEEDBACK_PATH) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except Exception:
-                    continue
     for r in rows:
         op = (r.get("operator") or {})
         d = op.get("decision")
@@ -745,44 +1122,89 @@ def _feedback_page_data() -> dict:
         if pos:
             position_counts[pos] = position_counts.get(pos, 0) + 1
 
-    # Build "disagreements" recent-rows table
+    # Build recent comparisons table.
+    disagreement_only = (view or "disagreements") != "all"
     recent_rows = []
-    for r in reversed(rows[-30:]):
+    for r in reversed(rows[-120:]):
         model = r.get("model") or {}
         op = (r.get("operator") or {})
         ts = r.get("timestamp", "")[:19].replace("T", " ")
         sid = r.get("scene_id", "")
+        filename = r.get("filename") or ""
+        t_sec = r.get("timestamp_sec")
+        t_short = ""
+        if isinstance(t_sec, (float, int)):
+            t_short = f"{float(t_sec):.1f}s"
 
         op_pen = op.get("penetration_visible")
         if op_pen in ("yes", "no"):
             model_pen = bool(model.get("penetration_visible"))
             mv = "yes" if model_pen else "no"
             match = (op_pen == mv)
-            recent_rows.append(
-                {
-                    "scene_id": sid,
-                    "timestamp_short": ts,
-                    "field": "penetration",
-                    "model_value": mv,
-                    "operator_value": op_pen,
-                    "match_cls": "ok" if match else "err",
-                }
-            )
+            match_cls = "ok" if match else "err"
+            if disagreement_only and match_cls == "ok":
+                pass
+            else:
+                recent_rows.append(
+                    {
+                        "scene_id": sid,
+                        "saved_at": ts,
+                        "filename": filename,
+                        "cover_time": t_short,
+                        "field": "penetration",
+                        "model_value": mv,
+                        "operator_value": op_pen,
+                        "match_cls": match_cls,
+                    }
+                )
+
         op_pos = (op.get("position_label") or "").upper()
         if op_pos:
             model_pos = (model.get("position_label") or "").upper() or "OTHER"
             match = (op_pos == model_pos)
-            recent_rows.append(
-                {
-                    "scene_id": sid,
-                    "timestamp_short": ts,
-                    "field": "position",
-                    "model_value": model_pos,
-                    "operator_value": op_pos,
-                    "match_cls": "ok" if match else "err",
-                }
-            )
-        if len(recent_rows) >= 25:
+            match_cls = "ok" if match else "err"
+            if disagreement_only and match_cls == "ok":
+                pass
+            else:
+                recent_rows.append(
+                    {
+                        "scene_id": sid,
+                        "saved_at": ts,
+                        "filename": filename,
+                        "cover_time": t_short,
+                        "field": "position",
+                        "model_value": model_pos,
+                        "operator_value": op_pos,
+                        "match_cls": match_cls,
+                    }
+                )
+
+        op_score = op.get("score_100")
+        model_score = model.get("score_100")
+        if op_score is not None and model_score is not None:
+            try:
+                op_v = float(op_score)
+                model_v = float(model_score)
+                err = abs(op_v - model_v)
+                match_cls = "ok" if err <= 5.0 else ("warn" if err <= 10.0 else "err")
+                if disagreement_only and match_cls == "ok":
+                    pass
+                else:
+                    recent_rows.append(
+                        {
+                            "scene_id": sid,
+                            "saved_at": ts,
+                            "filename": filename,
+                            "cover_time": t_short,
+                            "field": "score",
+                            "model_value": f"{model_v:.1f}",
+                            "operator_value": f"{op_v:.1f}",
+                            "match_cls": match_cls,
+                        }
+                    )
+            except (TypeError, ValueError):
+                pass
+        if len(recent_rows) >= 40:
             break
 
     by_scene = (metrics.get("rows_by_scene") or {})
@@ -794,6 +1216,15 @@ def _feedback_page_data() -> dict:
         for k, v in sorted(position_counts.items(), key=lambda x: x[1], reverse=True)
     ]
 
+    trend_days = {}
+    for r in rows:
+        stamp = str(r.get("timestamp", "") or "")
+        day = stamp[:10]
+        if len(day) == 10:
+            trend_days[day] = trend_days.get(day, 0) + 1
+    trend_rows = [{"day": k, "count": v} for k, v in sorted(trend_days.items(), reverse=True)[:7]]
+    trend_rows.reverse()
+
     return {
         "metrics": metrics,
         "recent_rows": recent_rows,
@@ -801,6 +1232,13 @@ def _feedback_page_data() -> dict:
         "position_counts": position_list,
         "decision_counts": decision_counts,
         "feedback_path": str(OPERATOR_FEEDBACK_PATH),
+        "feedback_filter": {
+            "scene": scene_id or "",
+            "studio": studio or "",
+            "since_days": str(since_days or ""),
+            "view": "all" if (view == "all") else "disagreements",
+        },
+        "trend_rows": trend_rows,
     }
 
 
@@ -821,6 +1259,7 @@ def _library_data(filt: dict) -> dict:
         "ready": sum(1 for s in summaries if s["status"] == "REVIEWED"),
         "review": sum(1 for s in summaries if s["status"] == "REVIEW"),
         "draft": sum(1 for s in summaries if s["status"] == "DRAFT"),
+        "failed": sum(1 for s in summaries if s["status"] == "FAILED"),
     }
 
     # filter
@@ -828,10 +1267,20 @@ def _library_data(filt: dict) -> dict:
     studio = (filt.get("studio") or "").strip()
     status = (filt.get("status") or "").strip().lower()
     min_score = filt.get("min_score")
+    sort = (filt.get("sort") or "action_queue").strip().lower()
+    limit = max(12, min(_safe_int(filt.get("limit"), 24), 120))
 
     filtered = []
     for s in summaries:
-        if q and q not in s["scene_id"].lower() and q not in (s["studio"] or "").lower():
+        haystack_parts = [
+            s["scene_id"] or "",
+            s["studio"] or "",
+            s.get("title") or "",
+            " ".join(s.get("performers") or []),
+            " ".join(s.get("tags") or []),
+        ]
+        haystack = " ".join(haystack_parts).lower()
+        if q and q not in haystack:
             continue
         if studio and s["studio"] != studio:
             continue
@@ -840,23 +1289,49 @@ def _library_data(filt: dict) -> dict:
                 "ready": "REVIEWED",
                 "review": "REVIEW",
                 "draft": "DRAFT",
-                "uploaded": "UPLOADED",
+                "failed": "FAILED",
             }.get(status)
             if wanted and s["status"] != wanted:
                 continue
         if min_score is not None and min_score != "":
             try:
-                if float(s["top_score"] or 0) < float(min_score):
+                score_ui = _normalize_score_for_ui(s["top_score"]) or 0.0
+                if score_ui < float(min_score):
                     continue
             except Exception:
                 pass
         filtered.append(s)
 
+    action_rank = {"REVIEW": 0, "FAILED": 1, "DRAFT": 2, "REVIEWED": 3}
+    if sort == "newest":
+        filtered.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
+    elif sort == "highest_score":
+        filtered.sort(key=lambda x: _normalize_score_for_ui(x.get("top_score")) or 0.0, reverse=True)
+    elif sort == "lowest_score":
+        filtered.sort(key=lambda x: _normalize_score_for_ui(x.get("top_score")) or 0.0)
+    else:
+        filtered.sort(
+            key=lambda x: (
+                action_rank.get(x.get("status"), 99),
+                -(float(_normalize_score_for_ui(x.get("top_score")) or 0.0)),
+                x.get("timestamp") or "",
+            ),
+            reverse=False,
+        )
+
+    total_filtered = len(filtered)
+    visible_scenes = filtered[:limit]
+    has_more = total_filtered > len(visible_scenes)
+    next_limit = min(limit + 24, 120)
+
     return {
-        "scenes": filtered,
+        "scenes": visible_scenes,
         "studios": studios,
         "stats": stats,
-        "filter": filt,
+        "filter": {**filt, "sort": sort, "limit": str(limit)},
+        "total_filtered": total_filtered,
+        "has_more": has_more,
+        "next_limit": next_limit,
     }
 
 
@@ -864,20 +1339,29 @@ def _library_data(filt: dict) -> dict:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="AMG UI", docs_url=None, redoc_url=None)
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         with _jobs_lock:
-            jobs = list(_jobs.values())[-20:]
-        jobs = [_decorate_job(j) for j in reversed(jobs)]
+            jobs = sorted(list(_jobs.values()), key=lambda j: j.get("queue_seq", 0))[-20:]
+        jobs = [_decorate_job(j) for j in jobs]
+        active_jobs = [j for j in jobs if j.get("status") in {"queued", "running"}]
+        completed_jobs = [j for j in reversed(jobs) if j.get("status") in {"done", "error", "stopped"}][:12]
         recent_scenes = _recent_scenes(limit=12)
+        recent_runs = _load_recent_run_timings(limit=10)
+        slowest_phases = _summarize_slowest_phases(recent_runs, top_n=5)
         return templates.TemplateResponse(
             request=request,
             name="index.html",
             context={
                 "request": request,
                 "jobs": jobs,
+                "active_jobs": active_jobs,
+                "completed_jobs": completed_jobs,
                 "recent_scenes": recent_scenes,
+                "recent_runs": recent_runs,
+                "slowest_phases": slowest_phases,
                 "active_nav": "process",
                 "health": _health_snapshot(),
             },
@@ -923,31 +1407,35 @@ def create_app() -> FastAPI:
 
         job_id = uuid.uuid4().hex[:10]
         scene_id = video_path.parent.name
+        global _job_seq_counter
+        with _jobs_lock:
+            _job_seq_counter += 1
+            queue_seq = _job_seq_counter
         job = {
             "job_id": job_id,
             "status": "queued",
             "scene_id": scene_id,
             "video_path": str(video_path),
             "created_at": datetime.now().isoformat(),
-            "message": "Queued",
+            "message": f"Queued · priority #{queue_seq}",
             "result": None,
             "source_mode": source_mode,
             "log_tail": [],
             "current_phase": None,
             "progress_pct": 0,
+            "queue_seq": queue_seq,
         }
         if upload_stats:
             chosen_name = Path(upload_stats["chosen_video"]).name if upload_stats.get("chosen_video") else "(none)"
             job["message"] = (
-                f"Queued · uploaded {upload_stats['files_uploaded']} files, "
+                f"Queued · priority #{queue_seq} · uploaded {upload_stats['files_uploaded']} files, "
                 f"found {upload_stats['videos_found']} videos, selected longest: {chosen_name}"
             )
             job["upload_stats"] = upload_stats
         with _jobs_lock:
             _jobs[job_id] = job
-
-        t = threading.Thread(target=_run_job, args=(job_id,), daemon=True)
-        t.start()
+            _job_fifo.append(job_id)
+        _start_dispatcher_if_needed()
 
         return templates.TemplateResponse(
             request=request,
@@ -974,8 +1462,10 @@ def create_app() -> FastAPI:
         studio: str = Query(default=""),
         status: str = Query(default=""),
         min_score: str = Query(default=""),
+        sort: str = Query(default="action_queue"),
+        limit: str = Query(default="24"),
     ):
-        filt = {"q": q, "studio": studio, "status": status, "min_score": min_score}
+        filt = {"q": q, "studio": studio, "status": status, "min_score": min_score, "sort": sort, "limit": limit}
         data = _library_data(filt)
         return templates.TemplateResponse(
             request=request,
@@ -989,8 +1479,14 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/feedback", response_class=HTMLResponse)
-    async def feedback(request: Request):
-        data = _feedback_page_data()
+    async def feedback(
+        request: Request,
+        scene: str = Query(default=""),
+        studio: str = Query(default=""),
+        since_days: str = Query(default=""),
+        view: str = Query(default="disagreements"),
+    ):
+        data = _feedback_page_data(scene_id=scene, studio=studio, since_days=since_days, view=view)
         return templates.TemplateResponse(
             request=request,
             name="feedback.html",
@@ -1010,6 +1506,7 @@ def create_app() -> FastAPI:
         contact_sheet = None
         insight = None
         provided_thumb_report = None
+        soft_thumbnail = None
 
         if work_dir:
             covers = _cover_items(scene_id, decision_log, work_dir)
@@ -1018,6 +1515,7 @@ def create_app() -> FastAPI:
                 contact_sheet = sheets[0]
             insight = _load_insight(work_dir)
             provided_thumb_report = _load_provided_thumb_report(work_dir)
+            soft_thumbnail = _load_soft_thumbnail(work_dir)
 
         return templates.TemplateResponse(
             request=request,
@@ -1031,6 +1529,7 @@ def create_app() -> FastAPI:
                 "contact_sheet": contact_sheet,
                 "insight": insight,
                 "provided_thumb_report": provided_thumb_report,
+                "soft_thumbnail": soft_thumbnail,
                 "saved": saved,
                 "active_nav": "library",
                 "health": _health_snapshot(),
@@ -1047,8 +1546,13 @@ def create_app() -> FastAPI:
         if not work_dir:
             raise HTTPException(404, "Work directory missing")
 
+        form = await request.form()
+        title_tone = (form.get("title_tone") or TITLE_TONE_DEFAULT).strip().lower()
+        if title_tone not in {"retail_safe", "edgy", "creative", "premium_story"}:
+            title_tone = TITLE_TONE_DEFAULT
+
         try:
-            insight = _regenerate_insight_for_scene(decision_log, work_dir)
+            insight = _regenerate_insight_for_scene(decision_log, work_dir, title_tone=title_tone)
         except Exception as e:
             return HTMLResponse(
                 f'<div class="empty err">Insight generation failed: {e}</div>',
@@ -1064,21 +1568,37 @@ def create_app() -> FastAPI:
     @app.post("/scene/{scene_id}/review")
     async def save_review(scene_id: str, request: Request):
         form = await request.form()
-        selected = form.getlist("cover")
         notes = (form.get("notes") or "").strip()
         title = (form.get("title") or "").strip()
         long_description = (form.get("long_description") or "").strip()
+        title_tone = (form.get("title_tone") or TITLE_TONE_DEFAULT).strip().lower()
+        if title_tone not in {"retail_safe", "edgy", "creative", "premium_story"}:
+            title_tone = TITLE_TONE_DEFAULT
 
         decision_log = _load_decision_log(scene_id)
         work_dir = _work_dir_from_decision_log(decision_log) or _find_work_dir(scene_id)
         cover_items = _cover_items(scene_id, decision_log, work_dir)
+        soft_thumbnail = _load_soft_thumbnail(work_dir)
+        selected = []
+        for item in cover_items:
+            d = (form.get(f"decision_{item['filename']}") or "").strip().lower()
+            if d in {"keep", "maybe"}:
+                selected.append(item["filename"])
+        if not selected:
+            # Backward compatibility with older UI payloads.
+            selected = form.getlist("cover")
         feedback_rows = _append_feedback_rows(
             scene_id=scene_id,
             cover_items=cover_items,
+            soft_thumbnail=soft_thumbnail,
             form=form,
             title_override=title,
+            title_tone=title_tone,
             notes=notes,
         )
+        soft_decision = (form.get("soft_thumb_decision") or "").strip().lower()
+        soft_score_raw = (form.get("soft_thumb_score") or "").strip()
+        soft_score_100 = _parse_user_score_100(soft_score_raw)
 
         REVIEWED_DIR.mkdir(parents=True, exist_ok=True)
         sid = _safe_scene_id(scene_id)
@@ -1088,13 +1608,29 @@ def create_app() -> FastAPI:
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "selected_covers": selected,
             "title_override": title or None,
+            "title_tone": title_tone,
             "long_description": long_description or None,
             "notes": notes or None,
+            "soft_thumbnail_review": {
+                "decision": soft_decision if soft_decision in {"keep", "reject"} else None,
+                "score_100": soft_score_100,
+            },
             "source": "amg_ui_v0",
             "feedback_rows_written": feedback_rows,
         }
         with open(out, "w") as f:
             json.dump(payload, f, indent=2)
+        _persist_review_to_decision_log(
+            scene_id=scene_id,
+            title_tone=title_tone,
+            title_override=title or None,
+            long_description=long_description or None,
+            selected_covers=selected,
+            soft_thumbnail_review={
+                "decision": soft_decision if soft_decision in {"keep", "reject"} else None,
+                "score_100": soft_score_100,
+            },
+        )
 
         return RedirectResponse(url=f"/scene/{scene_id}?saved=1", status_code=303)
 

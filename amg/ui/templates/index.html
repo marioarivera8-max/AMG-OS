@@ -25,7 +25,7 @@
       <input id="path-input" type="text" name="path" placeholder="Paste a path: /Users/.../incoming/.../Scene Folder" />
       <button type="submit" class="btn-primary">Run</button>
     </div>
-    <div class="row" style="justify-content: center; margin-top: 10px;">
+    <div class="row row-center mt-10">
       <label for="file-input" class="btn btn-ghost" style="cursor: pointer;">Choose video(s)</label>
       <label for="folder-input" class="btn btn-ghost" style="cursor: pointer;">Choose folder</label>
     </div>
@@ -46,23 +46,37 @@
       multiple
       style="position:absolute; left:-9999px; width:1px; height:1px; opacity:0;"
     />
-    <div id="dropzone-filename" class="muted" style="margin-top: 12px; font-size: 12px;"></div>
+    <div id="dropzone-filename" class="muted section-subtle mt-12"></div>
   </div>
 </form>
 
-<div class="grid grid-2" style="margin-top: 24px;">
+<div class="grid grid-2 mt-24">
   <div>
     <div class="between" style="margin-bottom: 10px;">
       <h3 class="card-section-title" style="margin: 0;">
-        Active Jobs <span class="muted">{% if jobs %}· {{ jobs | length }}{% endif %}</span>
+        Active Jobs <span class="muted">{% if active_jobs %}· {{ active_jobs | length }}{% endif %}</span>
       </h3>
       <span class="muted" style="font-size: 12px;">Auto-refreshing every 2s while running</span>
     </div>
     <div id="jobs" class="stack">
-      {% for job in jobs %}
+      {% for job in active_jobs %}
         {% include "_job_card.html" %}
       {% else %}
         <div class="empty">No jobs yet — drop a video above to start.</div>
+      {% endfor %}
+    </div>
+
+    <div class="between" style="margin: 16px 0 10px;">
+      <h3 class="card-section-title" style="margin: 0;">
+        Recent Completed <span class="muted">{% if completed_jobs %}· {{ completed_jobs | length }}{% endif %}</span>
+      </h3>
+      <span class="muted" style="font-size: 12px;">Latest finished jobs</span>
+    </div>
+    <div class="stack">
+      {% for job in completed_jobs %}
+        {% include "_job_card.html" %}
+      {% else %}
+        <div class="empty">No completed jobs yet.</div>
       {% endfor %}
     </div>
   </div>
@@ -89,6 +103,43 @@
       {% else %}
         <div class="empty">No processed scenes yet.</div>
       {% endfor %}
+    </div>
+
+    <div class="card" style="margin-top: 12px;">
+      <div class="between" style="margin-bottom: 8px;">
+        <h3 class="card-section-title" style="margin: 0;">Run Timing History</h3>
+        <span class="muted" style="font-size: 12px;">last {{ recent_runs | length }} runs</span>
+      </div>
+
+      {% if slowest_phases %}
+        <div style="margin-bottom: 10px;">
+          <div class="muted" style="font-size: 12px; margin-bottom: 6px;">Slowest phases (avg)</div>
+          <div class="stack">
+            {% for p in slowest_phases %}
+              <div class="between" style="font-size: 12px;">
+                <span><span class="pill warn">{{ p.phase }}</span></span>
+                <span class="mono muted">{{ p.avg_h }} avg · {{ p.max_h }} max · n={{ p.count }}</span>
+              </div>
+            {% endfor %}
+          </div>
+        </div>
+      {% endif %}
+
+      <div class="stack">
+        {% for r in recent_runs %}
+          <div class="card card-tight" style="font-size: 12px;">
+            <div class="between">
+              <div class="mono">{{ r.scene_id or "(unknown scene)" }}</div>
+              <span class="pill {{ 'ok' if r.status == 'done' else 'err' }}">{{ r.status or "unknown" }}</span>
+            </div>
+            <div class="muted" style="margin-top: 4px;">
+              pipeline {{ r.pipeline_total_h or "—" }} · wall {{ r.elapsed_h or "—" }} · {{ r.timestamp_ago or "" }}
+            </div>
+          </div>
+        {% else %}
+          <div class="empty">No run timing history yet.</div>
+        {% endfor %}
+      </div>
     </div>
   </div>
 </div>

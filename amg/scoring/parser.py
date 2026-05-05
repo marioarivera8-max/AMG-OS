@@ -242,5 +242,38 @@ def _compute_deterministic_score(result: ScoredFrame) -> Optional[float]:
     b_total = sum(_TIER_B_WEIGHTS.get(code, 0.0) for code in set(result.tier_b_present))
     c_total = sum(_TIER_C_WEIGHTS.get(code, 0.0) for code in set(result.tier_c_present))
     d_total = sum(_TIER_D_PENALTIES.get(code, 0.0) for code in set(result.tier_d_present))
-    score = _RETAIL_BASE + b_total + c_total - d_total
-    return max(0.0, min(SCORE_MAX, score))
+    raw = _RETAIL_BASE + b_total + c_total - d_total
+    capped = cap_score_for_excellence(result, raw)
+    return max(0.0, min(SCORE_MAX, capped))
+
+
+def cap_score_for_excellence(result: ScoredFrame, proposed_score: float) -> float:
+    """
+    Keep 100 as a rare art-tier outcome.
+
+    We intentionally cap most frames below elite ranges even when stacked
+    criteria are present. This stops "good" from crowding into 99-100.
+    """
+    score = float(proposed_score or 0.0)
+    b_codes = set(result.tier_b_present or [])
+    c_codes = set(result.tier_c_present or [])
+    d_codes = set(result.tier_d_present or [])
+    evidence = (result.action_evidence or "NONE").upper()
+    model_raw = float(result.model_score_raw or 0.0)
+
+    no_penalties = len(d_codes) == 0
+    strong_action = evidence in {"EXPLICIT_PENETRATION", "ORAL_CONTACT"}
+    key_moment = bool({"B7", "B9", "B12", "B13"} & b_codes)
+    core_presence = "B1" in b_codes and "B6" in b_codes
+    rich_b = len(b_codes) >= 6
+    rich_c = len(c_codes) >= 4 and {"C1", "C2", "C4", "C5"}.issubset(c_codes)
+    high_pen_conf = (not result.penetration_visible) or (float(result.penetration_confidence or 0.0) >= 0.90)
+
+    art_tier = all([no_penalties, strong_action, key_moment, core_presence, rich_b, rich_c, high_pen_conf])
+    elite_tier = all([no_penalties, strong_action, key_moment, core_presence, len(b_codes) >= 5, len(c_codes) >= 3, high_pen_conf])
+
+    if art_tier and model_raw >= 98.0 and score >= 99.0:
+        return min(100.0, score)
+    if elite_tier:
+        return min(98.8, score)
+    return min(96.0, score)

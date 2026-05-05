@@ -59,6 +59,8 @@ data/title_corpus/*
 data/operator_feedback/*.jsonl
 data/tutorial_keyframes/
 data/ui_uploads/
+# Training exports / local datasets (operator-machine specific)
+data/training/
 
 # Claude Code per-machine settings (project-level allow/deny lists, hooks, etc.)
 .claude/settings.local.json

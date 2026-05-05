@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from amg.config import OPERATOR_FEEDBACK_PATH, DECISION_LOGS_DIR
@@ -22,7 +23,21 @@ def _load_decision_log(scene_id: str) -> Optional[dict]:
         return None
 
 
-def _rows() -> List[dict]:
+def _parse_timestamp(ts: str) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def load_feedback_rows(
+    *,
+    scene_id: Optional[str] = None,
+    studio: Optional[str] = None,
+    since_days: Optional[int] = None,
+) -> List[dict]:
     if not OPERATOR_FEEDBACK_PATH.exists():
         return []
     out = []
@@ -35,21 +50,36 @@ def _rows() -> List[dict]:
                 out.append(json.loads(line))
             except Exception:
                 continue
+
+    if scene_id:
+        out = [r for r in out if r.get("scene_id") == scene_id]
+
+    if studio:
+        filtered = []
+        log_cache: Dict[str, Optional[dict]] = {}
+        for r in out:
+            sid = str(r.get("scene_id", "") or "")
+            if sid not in log_cache:
+                log_cache[sid] = _load_decision_log(sid)
+            d = log_cache[sid]
+            if d and (d.get("input", {}).get("studio") or "").lower() == studio.lower():
+                filtered.append(r)
+        out = filtered
+
+    if since_days is not None and since_days > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+        filtered = []
+        for r in out:
+            parsed = _parse_timestamp(str(r.get("timestamp", "") or ""))
+            if parsed and parsed >= cutoff:
+                filtered.append(r)
+        out = filtered
+
     return out
 
 
 def evaluate_feedback(scene_id: Optional[str] = None, studio: Optional[str] = None) -> Dict[str, object]:
-    rows = _rows()
-    if scene_id:
-        rows = [r for r in rows if r.get("scene_id") == scene_id]
-
-    if studio:
-        filtered = []
-        for r in rows:
-            d = _load_decision_log(r.get("scene_id", ""))
-            if d and (d.get("input", {}).get("studio") or "").lower() == studio.lower():
-                filtered.append(r)
-        rows = filtered
+    rows = load_feedback_rows(scene_id=scene_id, studio=studio)
 
     total = len(rows)
     if total == 0:
@@ -59,6 +89,9 @@ def evaluate_feedback(scene_id: Optional[str] = None, studio: Optional[str] = No
     pen_matches = 0
     pos_labeled = 0
     pos_matches = 0
+    score_labeled = 0
+    score_abs_err_sum = 0.0
+    score_within_5 = 0
 
     by_scene: Dict[str, int] = {}
     for r in rows:
@@ -82,6 +115,22 @@ def evaluate_feedback(scene_id: Optional[str] = None, studio: Optional[str] = No
             if op_pos == model_pos:
                 pos_matches += 1
 
+        op_score = op.get("score_100")
+        model_score = model.get("score_100")
+        if op_score is not None and model_score is not None:
+            try:
+                op_v = float(op_score)
+                m_v = float(model_score)
+            except (TypeError, ValueError):
+                op_v = None
+                m_v = None
+            if op_v is not None and m_v is not None:
+                score_labeled += 1
+                err = abs(op_v - m_v)
+                score_abs_err_sum += err
+                if err <= 5.0:
+                    score_within_5 += 1
+
     return {
         "total_rows": total,
         "scene_count": len(by_scene),
@@ -89,6 +138,9 @@ def evaluate_feedback(scene_id: Optional[str] = None, studio: Optional[str] = No
         "penetration_match_rate": round((pen_matches / pen_labeled) * 100, 1) if pen_labeled else None,
         "position_labeled_rows": pos_labeled,
         "position_match_rate": round((pos_matches / pos_labeled) * 100, 1) if pos_labeled else None,
+        "score_labeled_rows": score_labeled,
+        "score_mae": round(score_abs_err_sum / score_labeled, 2) if score_labeled else None,
+        "score_within_5_rate": round((score_within_5 / score_labeled) * 100, 1) if score_labeled else None,
         "rows_by_scene": by_scene,
     }
 
@@ -109,6 +161,10 @@ def format_feedback_report(metrics: Dict[str, object]) -> str:
     lines.append(
         f"Position match: {metrics.get('position_match_rate')}% "
         f"(labeled={metrics.get('position_labeled_rows')})"
+    )
+    lines.append(
+        f"Score MAE: {metrics.get('score_mae')} "
+        f"(labeled={metrics.get('score_labeled_rows')}, within±5={metrics.get('score_within_5_rate')}%)"
     )
     lines.append("")
     lines.append("Rows by scene:")

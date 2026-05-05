@@ -33,21 +33,27 @@
 
 <div class="grid grid-2">
   <div class="col">
-    {% if contact_sheet %}
-      <div class="card">
-        <h3 class="card-section-title">Contact Sheet</h3>
-        <img src="/artifact?path={{ contact_sheet }}" alt="contact sheet" style="width: 100%; border-radius: 8px; border: 1px solid var(--line-soft);" />
-        <div class="muted" style="font-size: 11px; margin-top: 6px;">{{ contact_sheet.name }}</div>
-      </div>
-    {% endif %}
-
     <form id="review-form" method="post" action="/scene/{{ scene_id }}/review">
+      <div class="card card-tight review-toolbar">
+        <div class="between">
+          <div class="row">
+            <span class="pill ok">keep <span id="review-count-keep">0</span></span>
+            <span class="pill warn">maybe <span id="review-count-maybe">0</span></span>
+            <span class="pill err">reject <span id="review-count-reject">0</span></span>
+            <span id="review-unsaved" class="pill neutral">saved</span>
+          </div>
+          <button type="submit" class="btn-primary">Save Review</button>
+        </div>
+        <div class="hint" style="margin-top: 6px;">
+          Keyboard: 1 keep, 2 maybe, 3 reject, 0 clear, j/k or [/] move between covers.
+        </div>
+      </div>
       <div class="card">
         <h3 class="card-section-title">Selected Thumbnails <span class="muted">{{ covers | length }}</span></h3>
         {% if covers %}
         <div class="cover-grid">
           {% for c in covers %}
-            <div class="cover-card">
+            <div class="cover-card" data-cover-card data-cover-idx="{{ loop.index0 }}" tabindex="0">
               <div class="review-thumb-window">
                 <img
                   src="/artifact?path={{ c.path }}"
@@ -59,7 +65,10 @@
                 />
                 <div class="overlay-tl"><span class="rank-badge">{{ "%02d" | format(loop.index) }}</span></div>
                 <div class="overlay-tr">
-                  {% if c.score %}<span class="score-badge">{{ c.score }}</span>{% endif %}
+                  {% if c.score is not none %}
+                    {% set score_disp = (c.score * 10.0) if ((c.score|float) > 0 and (c.score|float) <= 10.0) else (c.score|float) %}
+                    <span class="score-badge">{{ "%.1f"|format(score_disp) }}</span>
+                  {% endif %}
                 </div>
                 <div class="overlay-bl">
                   {% if c.model_pen_visible %}
@@ -101,12 +110,13 @@
 
                 <label class="field">
                   <span>decision</span>
-                  <select name="decision_{{ c.filename }}">
-                    <option value="">(no change)</option>
-                    <option value="keep">keep</option>
-                    <option value="maybe">maybe</option>
-                    <option value="reject">reject</option>
-                  </select>
+                  <input type="hidden" name="decision_{{ c.filename }}" id="decision_{{ loop.index }}" value="" />
+                  <div class="decision-row" data-decision-row data-target="decision_{{ loop.index }}" data-cover-idx="{{ loop.index0 }}">
+                    <button type="button" class="decision-btn keep" data-value="keep" title="Keep (included)">✓ Keep</button>
+                    <button type="button" class="decision-btn maybe" data-value="maybe" title="Maybe (included)">~ Maybe</button>
+                    <button type="button" class="decision-btn reject" data-value="reject" title="Reject (excluded)">✕ Reject</button>
+                    <button type="button" class="decision-btn clear" data-value="" title="Clear decision">Clear</button>
+                  </div>
                 </label>
 
                 <label class="field">
@@ -114,10 +124,13 @@
                   <input type="text" name="reason_{{ c.filename }}" placeholder="optional reason" />
                 </label>
 
+                <label class="field">
+                  <span>your score</span>
+                  <input type="number" name="score_{{ c.filename }}" min="0" max="100" step="0.5" placeholder="0-100 (or 0-10)" />
+                </label>
+
                 <div class="cover-actions">
-                  <label style="display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted);">
-                    <input type="checkbox" name="cover" value="{{ c.filename }}" /> include in final
-                  </label>
+                  <span class="muted" style="font-size: 12px;">Keep/Maybe = included · Reject = excluded</span>
                 </div>
               </div>
             </div>
@@ -128,14 +141,50 @@
         {% endif %}
       </div>
     </form>
+
+    {% if soft_thumbnail %}
+      <div class="card">
+        <h3 class="card-section-title">Soft Thumbnail (Non-Nude)</h3>
+        <img src="/artifact?path={{ soft_thumbnail.path }}" alt="soft thumbnail" style="width: 100%; border-radius: 8px; border: 1px solid var(--line-soft);" />
+        <div class="row" style="margin-top: 6px; gap: 8px;">
+          {% if soft_thumbnail.score is not none %}
+            <span class="score-badge">{{ "%.1f"|format((soft_thumbnail.score or 0)|float) }}</span>
+          {% endif %}
+          {% if soft_thumbnail.timestamp_sec is not none %}
+            <span class="pill">t={{ (soft_thumbnail.timestamp_sec or 0)|round(1) }}s</span>
+          {% endif %}
+          <span class="pill ok">auto-selected</span>
+        </div>
+        <div class="grid grid-2" style="margin-top: 10px; gap: 10px;">
+          <label class="field">
+            <span>soft pick decision</span>
+            <select form="review-form" name="soft_thumb_decision">
+              <option value="">(no change)</option>
+              <option value="keep">keep</option>
+              <option value="reject">reject</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>your soft score</span>
+            <input form="review-form" type="number" name="soft_thumb_score" min="0" max="100" step="0.5" placeholder="0-100 (or 0-10)" />
+          </label>
+        </div>
+        <div class="muted" style="font-size: 12px; margin-top: 6px;">
+          This writes explicit feedback for the auto-picked non-nude thumbnail.
+        </div>
+      </div>
+    {% endif %}
+
+    {% if contact_sheet %}
+      <div class="card">
+        <h3 class="card-section-title">Contact Sheet</h3>
+        <img src="/artifact?path={{ contact_sheet }}" alt="contact sheet" style="width: 100%; border-radius: 8px; border: 1px solid var(--line-soft);" />
+        <div class="muted" style="font-size: 11px; margin-top: 6px;">{{ contact_sheet.name }}</div>
+      </div>
+    {% endif %}
   </div>
 
   <div class="col">
-    <div class="card">
-      <h3 class="card-section-title">Title</h3>
-      <textarea form="review-form" name="title" rows="2" placeholder="Optional title override (or pick one below)"></textarea>
-    </div>
-
     {% include "_insight_panel.html" %}
     {% include "_provided_thumbs_panel.html" %}
 
@@ -199,7 +248,16 @@
     var modal = document.getElementById('thumb-preview-modal');
     var img = document.getElementById('thumb-preview-img');
     var cap = document.getElementById('thumb-preview-caption');
-    if (!modal || !img || !cap) return;
+    var form = document.getElementById('review-form');
+    if (!modal || !img || !cap || !form) return;
+    var keepCount = document.getElementById('review-count-keep');
+    var maybeCount = document.getElementById('review-count-maybe');
+    var rejectCount = document.getElementById('review-count-reject');
+    var unsaved = document.getElementById('review-unsaved');
+    var coverCards = Array.from(document.querySelectorAll('[data-cover-card]'));
+    var decisionRows = Array.from(document.querySelectorAll('[data-decision-row]'));
+    var activeIndex = 0;
+    var dirty = false;
 
     function openPreview(src, caption) {
       img.src = src || '';
@@ -227,11 +285,135 @@
       }
     });
 
+    function applyDecision(row, hidden, value) {
+      hidden.value = value;
+      row.querySelectorAll('.decision-btn').forEach(function(btn) {
+        btn.classList.toggle('active', (btn.getAttribute('data-value') || '') === value);
+      });
+      updateDecisionCounts();
+      markDirty(true);
+    }
+
+    function markDirty(nextDirty) {
+      dirty = !!nextDirty;
+      if (!unsaved) return;
+      if (dirty) {
+        unsaved.textContent = 'unsaved changes';
+        unsaved.classList.remove('neutral');
+        unsaved.classList.add('warn');
+      } else {
+        unsaved.textContent = 'saved';
+        unsaved.classList.remove('warn');
+        unsaved.classList.add('neutral');
+      }
+    }
+
+    function updateDecisionCounts() {
+      var counts = { keep: 0, maybe: 0, reject: 0 };
+      decisionRows.forEach(function(row) {
+        var hidden = document.getElementById(row.getAttribute('data-target'));
+        var value = hidden ? (hidden.value || '') : '';
+        if (value === 'keep' || value === 'maybe' || value === 'reject') {
+          counts[value] += 1;
+        }
+      });
+      if (keepCount) keepCount.textContent = String(counts.keep);
+      if (maybeCount) maybeCount.textContent = String(counts.maybe);
+      if (rejectCount) rejectCount.textContent = String(counts.reject);
+    }
+
+    function setActiveIndex(nextIndex) {
+      if (!coverCards.length) return;
+      if (nextIndex < 0) nextIndex = 0;
+      if (nextIndex >= coverCards.length) nextIndex = coverCards.length - 1;
+      activeIndex = nextIndex;
+      coverCards.forEach(function(card, idx) {
+        card.classList.toggle('active-review-card', idx === activeIndex);
+      });
+      var activeCard = coverCards[activeIndex];
+      if (activeCard) {
+        activeCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        activeCard.focus({ preventScroll: true });
+      }
+    }
+
+    function applyDecisionForActive(value) {
+      if (!decisionRows.length) return;
+      var row = decisionRows[activeIndex];
+      if (!row) return;
+      var hidden = document.getElementById(row.getAttribute('data-target'));
+      if (!hidden) return;
+      applyDecision(row, hidden, value);
+    }
+
+    document.querySelectorAll('[data-decision-row]').forEach(function(row) {
+      var targetId = row.getAttribute('data-target');
+      var hidden = document.getElementById(targetId);
+      if (!hidden) return;
+      row.addEventListener('click', function(ev) {
+        var btn = ev.target.closest('.decision-btn');
+        if (!btn) return;
+        ev.preventDefault();
+        applyDecision(row, hidden, btn.getAttribute('data-value') || '');
+      });
+      applyDecision(row, hidden, hidden.value || '');
+    });
+
+    coverCards.forEach(function(card) {
+      card.addEventListener('click', function() {
+        var idx = Number(card.getAttribute('data-cover-idx') || 0);
+        setActiveIndex(idx);
+      });
+    });
+
     document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape' && !modal.hidden) {
+      if (!modal.hidden && e.key === 'Escape') {
         closePreview();
+        return;
+      }
+      if (!modal.hidden) return;
+      var tag = (document.activeElement && document.activeElement.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      if (e.key === '1') {
+        e.preventDefault();
+        applyDecisionForActive('keep');
+      } else if (e.key === '2') {
+        e.preventDefault();
+        applyDecisionForActive('maybe');
+      } else if (e.key === '3') {
+        e.preventDefault();
+        applyDecisionForActive('reject');
+      } else if (e.key === '0') {
+        e.preventDefault();
+        applyDecisionForActive('');
+      } else if (e.key === 'j' || e.key === ']') {
+        e.preventDefault();
+        setActiveIndex(activeIndex + 1);
+      } else if (e.key === 'k' || e.key === '[') {
+        e.preventDefault();
+        setActiveIndex(activeIndex - 1);
       }
     });
+
+    form.addEventListener('change', function() {
+      markDirty(true);
+      updateDecisionCounts();
+    });
+
+    form.addEventListener('submit', function() {
+      markDirty(false);
+    });
+
+    window.addEventListener('beforeunload', function(e) {
+      if (!dirty) return;
+      e.preventDefault();
+      e.returnValue = '';
+    });
+
+    setActiveIndex(0);
+    updateDecisionCounts();
+    markDirty(false);
   })();
 </script>
 

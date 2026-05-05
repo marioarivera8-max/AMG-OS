@@ -11,55 +11,95 @@
   </div>
 </div>
 
+<form method="get" action="/feedback" class="card card-tight" style="margin-bottom: 16px;">
+  <div class="row">
+    <input type="text" name="scene" value="{{ feedback_filter.scene }}" placeholder="Scene id" style="min-width: 200px;" />
+    <input type="text" name="studio" value="{{ feedback_filter.studio }}" placeholder="Studio" />
+    <select name="since_days">
+      <option value="" {% if not feedback_filter.since_days %}selected{% endif %}>All time</option>
+      <option value="7" {% if feedback_filter.since_days == '7' %}selected{% endif %}>Last 7 days</option>
+      <option value="14" {% if feedback_filter.since_days == '14' %}selected{% endif %}>Last 14 days</option>
+      <option value="30" {% if feedback_filter.since_days == '30' %}selected{% endif %}>Last 30 days</option>
+    </select>
+    <select name="view">
+      <option value="disagreements" {% if feedback_filter.view == 'disagreements' %}selected{% endif %}>View: Disagreements only</option>
+      <option value="all" {% if feedback_filter.view == 'all' %}selected{% endif %}>View: All comparisons</option>
+    </select>
+    <button type="submit" class="btn">Apply</button>
+    {% if feedback_filter.scene or feedback_filter.studio or feedback_filter.since_days or feedback_filter.view == 'all' %}
+      <a href="/feedback" class="btn btn-ghost">Clear</a>
+    {% endif %}
+  </div>
+</form>
+
 {% if metrics.total_rows == 0 %}
   <div class="empty">
     No feedback yet. Open a processed scene and use the per-cover dropdowns
-    (penetration?, position, keep/reject) to start building the dataset.
+    (penetration?, position, your score, keep/reject) to start building the dataset.
   </div>
 {% else %}
 
-<div class="grid grid-4" style="margin-bottom: 18px;">
-  <div class="card">
-    <div class="muted" style="font-size: 12px;">Feedback rows</div>
-    <div style="font-size: 26px; font-weight: 600; margin-top: 4px;">{{ metrics.total_rows }}</div>
-    <div class="muted" style="font-size: 11px;">across {{ metrics.scene_count }} scenes</div>
-  </div>
-  <div class="card">
-    <div class="muted" style="font-size: 12px;">Penetration agreement</div>
-    <div style="font-size: 26px; font-weight: 600; margin-top: 4px;">
-      {% if metrics.penetration_match_rate is not none %}
-        <span class="{% if metrics.penetration_match_rate >= 80 %}ok{% elif metrics.penetration_match_rate >= 60 %}warn{% else %}err{% endif %}">{{ metrics.penetration_match_rate }}%</span>
-      {% else %}<span class="muted">—</span>{% endif %}
-    </div>
-    <div class="muted" style="font-size: 11px;">{{ metrics.penetration_labeled_rows }} rows labeled</div>
-  </div>
-  <div class="card">
-    <div class="muted" style="font-size: 12px;">Position agreement</div>
-    <div style="font-size: 26px; font-weight: 600; margin-top: 4px;">
-      {% if metrics.position_match_rate is not none %}
-        <span class="{% if metrics.position_match_rate >= 80 %}ok{% elif metrics.position_match_rate >= 60 %}warn{% else %}err{% endif %}">{{ metrics.position_match_rate }}%</span>
-      {% else %}<span class="muted">—</span>{% endif %}
-    </div>
-    <div class="muted" style="font-size: 11px;">{{ metrics.position_labeled_rows }} rows labeled</div>
-  </div>
-  <div class="card">
-    <div class="muted" style="font-size: 12px;">Decisions captured</div>
-    <div style="font-size: 26px; font-weight: 600; margin-top: 4px;">
-      {{ decision_counts.keep }}<span class="muted" style="font-size: 14px;"> keep</span>
-    </div>
-    <div class="muted" style="font-size: 11px;">{{ decision_counts.reject }} reject · {{ decision_counts.maybe }} maybe</div>
-  </div>
+<div class="grid grid-3" style="margin-bottom: 18px;">
+  {% set metric_title = "Feedback rows" %}
+  {% set metric_value = metrics.total_rows %}
+  {% set metric_value_class = "" %}
+  {% set metric_subtext = "across " ~ metrics.scene_count ~ " scenes" %}
+  {% include "_metric_card.html" %}
+
+  {% set metric_title = "Penetration agreement" %}
+  {% set metric_value = (metrics.penetration_match_rate ~ "%") if metrics.penetration_match_rate is not none else none %}
+  {% set metric_value_class = "ok" if metrics.penetration_match_rate is not none and metrics.penetration_match_rate >= 80 else ("warn" if metrics.penetration_match_rate is not none and metrics.penetration_match_rate >= 60 else ("err" if metrics.penetration_match_rate is not none else "")) %}
+  {% set metric_subtext = (metrics.penetration_labeled_rows or 0) ~ " rows labeled" %}
+  {% include "_metric_card.html" %}
+
+  {% set metric_title = "Position agreement" %}
+  {% set metric_value = (metrics.position_match_rate ~ "%") if metrics.position_match_rate is not none else none %}
+  {% set metric_value_class = "ok" if metrics.position_match_rate is not none and metrics.position_match_rate >= 80 else ("warn" if metrics.position_match_rate is not none and metrics.position_match_rate >= 60 else ("err" if metrics.position_match_rate is not none else "")) %}
+  {% set metric_subtext = (metrics.position_labeled_rows or 0) ~ " rows labeled" %}
+  {% include "_metric_card.html" %}
+
+  {% set metric_title = "Score agreement" %}
+  {% set metric_value = (metrics.score_within_5_rate ~ "%") if metrics.score_within_5_rate is not none else none %}
+  {% set metric_value_class = "ok" if metrics.score_within_5_rate is not none and metrics.score_within_5_rate >= 70 else ("warn" if metrics.score_within_5_rate is not none and metrics.score_within_5_rate >= 50 else ("err" if metrics.score_within_5_rate is not none else "")) %}
+  {% set metric_subtext = "within ±5 points · " ~ (("MAE " ~ metrics.score_mae ~ " · ") if metrics.score_mae is not none else "") ~ (metrics.score_labeled_rows or 0) ~ " rows labeled" %}
+  {% include "_metric_card.html" %}
+
+  {% set metric_title = "Decisions captured" %}
+  {% set metric_value = decision_counts.keep ~ " keep" %}
+  {% set metric_value_class = "" %}
+  {% set metric_subtext = decision_counts.reject ~ " reject · " ~ decision_counts.maybe ~ " maybe" %}
+  {% include "_metric_card.html" %}
 </div>
 
 <div class="grid grid-2">
   <div class="card">
-    <h3 class="card-section-title">Disagreements <span class="muted">last {{ recent_rows | length }} rows</span></h3>
+    <div class="muted" style="font-size: 12px;">Recent activity</div>
+    {% if trend_rows %}
+      <div class="stack" style="margin-top: 8px;">
+        {% for row in trend_rows %}
+          <div class="between" style="font-size: 12px;">
+            <span class="mono">{{ row.day }}</span>
+            <span class="pill">{{ row.count }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="muted" style="font-size: 12px; margin-top: 8px;">No recent timestamped rows.</div>
+    {% endif %}
+  </div>
+  <div class="card">
+    <h3 class="card-section-title">
+      {% if feedback_filter.view == 'all' %}Recent comparisons{% else %}Disagreements{% endif %}
+      <span class="muted">last {{ recent_rows | length }} rows</span>
+    </h3>
     {% if recent_rows %}
       <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
         <thead>
           <tr style="text-align: left; color: var(--muted); border-bottom: 1px solid var(--line-soft);">
             <th style="padding: 6px 4px;">Scene</th>
-            <th style="padding: 6px 4px;">Frame</th>
+            <th style="padding: 6px 4px;">Cover</th>
+            <th style="padding: 6px 4px;">t(s)</th>
+            <th style="padding: 6px 4px;">Saved at</th>
             <th style="padding: 6px 4px;">Field</th>
             <th style="padding: 6px 4px;">Model</th>
             <th style="padding: 6px 4px;">Operator</th>
@@ -71,7 +111,9 @@
               <td style="padding: 6px 4px; max-width: 240px;">
                 <a href="/scene/{{ r.scene_id }}" title="{{ r.scene_id }}" style="display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ r.scene_id }}</a>
               </td>
-              <td class="mono" style="padding: 6px 4px; color: var(--muted);">{{ r.timestamp_short }}</td>
+              <td class="mono" style="padding: 6px 4px; color: var(--muted); max-width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ r.filename }}</td>
+              <td class="mono" style="padding: 6px 4px; color: var(--muted);">{{ r.cover_time or "—" }}</td>
+              <td class="mono" style="padding: 6px 4px; color: var(--muted);">{{ r.saved_at }}</td>
               <td style="padding: 6px 4px;">{{ r.field }}</td>
               <td style="padding: 6px 4px;"><span class="pill">{{ r.model_value }}</span></td>
               <td style="padding: 6px 4px;"><span class="pill {{ r.match_cls }}">{{ r.operator_value }}</span></td>
@@ -80,7 +122,7 @@
         </tbody>
       </table>
     {% else %}
-      <div class="muted" style="font-size: 13px;">No disagreements recorded yet.</div>
+      <div class="muted" style="font-size: 13px;">No rows for the current filter/view.</div>
     {% endif %}
   </div>
 

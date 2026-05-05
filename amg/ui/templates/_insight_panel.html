@@ -1,38 +1,90 @@
 <div id="insight-panel">
-  {% if not insight %}
-    <div class="empty muted">
-      No AI insight yet for this scene.
-      <div style="margin-top: 10px;">
-        <button class="btn btn-primary"
-                hx-post="/scene/{{ scene_id }}/insight"
-                hx-target="#insight-panel"
-                hx-swap="outerHTML"
-                hx-indicator="#insight-spinner">
-          ✨ Generate insight + titles
-        </button>
-        <span id="insight-spinner" class="muted htmx-indicator" style="margin-left: 8px;">working… (one AI call)</span>
+  <div class="card">
+    <h3 class="card-section-title">Generated title options</h3>
+    {% if insight and insight.ai_titles %}
+      <div class="stack">
+        {% for t in insight.ai_titles %}
+          <label class="row" style="gap: 10px; align-items: flex-start;">
+            <input type="radio" name="title" value="{{ t.text }}" form="review-form" />
+            <div style="flex: 1;">
+              <div style="font-size: 14px;">{{ t.text }}</div>
+              <div class="muted" style="font-size: 11px;">
+                {{ t.style or "—" }} · {{ t.char_count }}c
+                {% if t.warnings %} · <span class="warn">{{ t.warnings | join("; ") }}</span>{% endif %}
+              </div>
+            </div>
+          </label>
+        {% endfor %}
       </div>
-    </div>
-  {% else %}
-    {% set ins = insight.insight %}
-    <div class="card">
-      <div class="between">
-        <h3 class="card-section-title" style="margin: 0;">
-          AI scene insight
-          {% if insight.ai_used %}<span class="pill ok">live</span>{% else %}<span class="pill warn">fallback</span>{% endif %}
-        </h3>
-        <button class="btn btn-ghost"
-                hx-post="/scene/{{ scene_id }}/insight"
-                hx-target="#insight-panel"
-                hx-swap="outerHTML"
-                hx-indicator="#insight-spinner">
-          ✨ Regenerate
-        </button>
+    {% else %}
+      <div class="muted" style="font-size: 13px;">
+        No generated titles yet.
       </div>
-      <span id="insight-spinner" class="muted htmx-indicator" style="font-size: 12px;">regenerating…</span>
+    {% endif %}
+    <textarea form="review-form" name="title" rows="2" placeholder="Or type your own title override here" style="margin-top: 10px; width: 100%;"></textarea>
+  </div>
 
-      {% if ins %}
-        <div class="row" style="margin-top: 10px;">
+  <div class="card" style="margin-top: 12px;">
+    <div class="between">
+      <h3 class="card-section-title" style="margin: 0;">
+        AI generated description
+        {% if insight and insight.ai_used %}<span class="pill ok">live</span>{% elif insight %}<span class="pill warn">fallback</span>{% endif %}
+      </h3>
+      <form hx-post="/scene/{{ scene_id }}/insight"
+            hx-target="#insight-panel"
+            hx-swap="outerHTML"
+            style="display: inline-flex; align-items: center; gap: 8px;">
+        <select name="title_tone" style="min-width: 150px;">
+          <option value="retail_safe" {% if insight and insight.title_tone == 'retail_safe' %}selected{% endif %}>Retail Safe</option>
+          <option value="edgy" {% if not insight or not insight.title_tone or insight.title_tone == 'edgy' %}selected{% endif %}>Edgy</option>
+          <option value="creative" {% if insight and insight.title_tone == 'creative' %}selected{% endif %}>Creative</option>
+          <option value="premium_story" {% if insight and insight.title_tone == 'premium_story' %}selected{% endif %}>Premium Story</option>
+        </select>
+        <button class="btn btn-ghost" type="submit" hx-indicator="#insight-spinner">✨ Regenerate</button>
+      </form>
+    </div>
+    <span id="insight-spinner" class="muted htmx-indicator" style="font-size: 12px;">regenerating…</span>
+    {% if insight and insight.long_description %}
+      <div style="font-size: 13px; line-height: 1.55; margin-top: 8px;">{{ insight.long_description }}</div>
+      <input type="hidden" form="review-form" name="title_tone" value="{{ insight.title_tone or 'edgy' }}" />
+      <textarea form="review-form" name="long_description" rows="3" style="margin-top: 10px; width: 100%;">{{ insight.long_description }}</textarea>
+    {% else %}
+      <div class="muted" style="font-size: 13px; margin-top: 8px;">Generate to produce a stronger long description.</div>
+      <input type="hidden" form="review-form" name="title_tone" value="{{ insight.title_tone if insight else 'edgy' }}" />
+      <textarea form="review-form" name="long_description" rows="3" style="margin-top: 10px; width: 100%;"></textarea>
+    {% endif %}
+  </div>
+
+  {% if insight and insight.ai_tags %}
+    <div class="card" style="margin-top: 12px;">
+      <h3 class="card-section-title">Tags (best first)</h3>
+      <div style="margin-top: 6px;">
+        {% for t in insight.ai_tags[:30] %}
+          <span class="chip">{{ t }}</span>
+        {% endfor %}
+      </div>
+      <textarea form="review-form" name="tags_csv" rows="3" style="margin-top: 10px; width: 100%;">{{ insight.ai_tags | join(", ") }}</textarea>
+    </div>
+  {% endif %}
+
+  {% if insight and insight.ai_categories %}
+    <div class="card" style="margin-top: 12px;">
+      <h3 class="card-section-title">Categories (best first)</h3>
+      <div style="margin-top: 6px;">
+        {% for c in insight.ai_categories %}
+          <span class="chip">{{ c }}</span>
+        {% endfor %}
+      </div>
+      <textarea form="review-form" name="categories_csv" rows="2" style="margin-top: 10px; width: 100%;">{{ insight.ai_categories | join(", ") }}</textarea>
+    </div>
+  {% endif %}
+
+  {% if insight and insight.insight %}
+    <details style="margin-top: 10px;">
+      <summary class="muted" style="cursor: pointer; font-size: 12px;">Advanced: scene insight details</summary>
+      <div class="card card-tight" style="margin-top: 8px;">
+        {% set ins = insight.insight %}
+        <div class="row">
           {% if ins.setting %}<span class="chip">setting · {{ ins.setting }}</span>{% endif %}
           {% if ins.location_hint and ins.location_hint != 'none' %}<span class="chip">loc · {{ ins.location_hint }}</span>{% endif %}
           {% if ins.mood %}<span class="chip">mood · {{ ins.mood }}</span>{% endif %}
@@ -42,59 +94,7 @@
             {% for f in ins.notable_features %}<span class="chip">{{ f }}</span>{% endfor %}
           </div>
         {% endif %}
-        {% if ins.action_summary %}
-          <div class="muted" style="margin-top: 10px; font-size: 13px;">{{ ins.action_summary }}</div>
-        {% endif %}
-      {% else %}
-        <div class="muted" style="margin-top: 10px; font-size: 13px;">No vision insight (AI offline).</div>
-      {% endif %}
-
-      {% if insight.position_summary %}
-        <div style="margin-top: 12px;">
-          <div class="muted" style="font-size: 11px; letter-spacing: 0.04em;">POSITION ROLLUP</div>
-          <div style="margin-top: 4px;">
-            {% for k, v in insight.position_summary.items() %}
-              <span class="chip">{{ k }} × {{ v }}</span>
-            {% endfor %}
-          </div>
-        </div>
-      {% endif %}
-
-      {% if insight.folder_context and insight.folder_context.is_generic_filename %}
-        <div class="pill warn" style="margin-top: 10px;">
-          generic filename — pulled from {{ insight.folder_context.source_folder or 'parent folder' }}
-        </div>
-      {% endif %}
-    </div>
-
-    <div class="card" style="margin-top: 12px;">
-      <h3 class="card-section-title">AI title suggestions</h3>
-      {% if insight.ai_titles %}
-        <div class="stack">
-          {% for t in insight.ai_titles %}
-            <label class="row" style="gap: 10px; align-items: flex-start;">
-              <input type="radio" name="title" value="{{ t.text }}" form="review-form" />
-              <div style="flex: 1;">
-                <div style="font-size: 14px;">{{ t.text }}</div>
-                <div class="muted" style="font-size: 11px;">
-                  {{ t.style or "—" }} · {{ t.char_count }}c
-                  {% if t.warnings %} · <span class="warn">{{ t.warnings | join("; ") }}</span>{% endif %}
-                </div>
-              </div>
-            </label>
-          {% endfor %}
-        </div>
-      {% else %}
-        <div class="muted">No titles generated.</div>
-      {% endif %}
-    </div>
-
-    {% if insight.long_description %}
-      <div class="card" style="margin-top: 12px;">
-        <h3 class="card-section-title">Long description</h3>
-        <div style="font-size: 13px; line-height: 1.55;">{{ insight.long_description }}</div>
-        <textarea form="review-form" name="long_description" rows="3" style="margin-top: 10px; width: 100%;">{{ insight.long_description }}</textarea>
       </div>
-    {% endif %}
+    </details>
   {% endif %}
 </div>

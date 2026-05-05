@@ -31,6 +31,11 @@ from amg.config import (
     MIN_FREE_SPACE_GB,
     REQUIRE_2257_DOC,
     SCORE_TIER_3_SUCCESS_FLOOR,
+    TITLE_TONE_DEFAULT,
+    SOFT_THUMB_ENABLED,
+    SOFT_THUMB_SAMPLE_COUNT,
+    SOFT_THUMB_MIN_SCORE,
+    SOFT_THUMB_FILENAME,
 )
 from amg.ingest.inventory import find_companion_files, make_work_dir, make_covers_dir
 from amg.ingest.studio_profiles import detect_studio, get_or_create_profile
@@ -44,6 +49,7 @@ from amg.ingest.title_parser import parse_title_with_context, derive_primary_sce
 from amg.video.metadata import get_metadata
 from amg.video.frames import calibrate_thresholds
 from amg.scoring.ai_client import AIClient
+from amg.scoring.insight_pipeline import generate_scene_insight_payload
 from amg.scoring.prompt import build_scoring_prompt, SYSTEM_PROMPT
 from amg.scoring.position_classifier import classify_candidate_positions
 from amg.scanning.tiered import run_tiered_scan
@@ -465,14 +471,11 @@ def process_scene(
         try:
             with phase_timer("scene_insight") as t_ins:
                 insight_dict, title_payload = _generate_scene_insight_and_titles(
-                    studio_name=studio_name,
-                    folder_ctx=folder_ctx,
-                    primary_type=primary_type,
-                    title_info=title_info,
+                    video_path=video_path,
                     saved_covers=saved_covers,
-                    contact_sheet_path=contact_sheet_path,
                     work_dir=work_dir,
                     ai_client=ai_client,
+                    title_tone=TITLE_TONE_DEFAULT,
                 )
             phase_results["scene_insight"] = {
                 "duration_sec": t_ins.elapsed,
@@ -484,11 +487,40 @@ def process_scene(
             log.warn(f"[scene_insight] failed: {e}")
             phase_results["scene_insight"] = {"duration_sec": 0, "error": str(e)}
 
+    # --- PHASE 12: OPTIONAL SOFT THUMBNAIL (NON-NUDE) ---
+    soft_thumb_info = None
+    if not dry_run and SOFT_THUMB_ENABLED and work_dir:
+        try:
+            with phase_timer("soft_thumbnail") as t_soft:
+                from amg.output.covers import select_soft_thumbnail
+                soft_thumb_info = select_soft_thumbnail(
+                    video_path=video_path,
+                    output_dir=work_dir,
+                    ai_client=ai_client,
+                    performer_name=performer_name,
+                    performer_code=code_info.get("code", "") if code_info else "",
+                    duration_sec=duration_sec,
+                    sample_count=SOFT_THUMB_SAMPLE_COUNT,
+                    min_score=SOFT_THUMB_MIN_SCORE,
+                    filename=SOFT_THUMB_FILENAME,
+                )
+            phase_results["soft_thumbnail"] = {
+                "duration_sec": t_soft.elapsed,
+                "selected": bool(soft_thumb_info),
+                "score": (soft_thumb_info or {}).get("score"),
+            }
+        except Exception as e:
+            log.warn(f"[soft_thumbnail] failed: {e}")
+            phase_results["soft_thumbnail"] = {"duration_sec": 0, "error": str(e)}
+
     if insight_dict:
         title_info["insight"] = insight_dict
     if title_payload:
         title_info["ai_titles"] = title_payload.get("titles", [])
         title_info["long_description"] = title_payload.get("long_description", "")
+        title_info["title_tone"] = title_payload.get("title_tone", TITLE_TONE_DEFAULT)
+    if soft_thumb_info:
+        title_info["soft_thumbnail"] = soft_thumb_info
 
     # --- DECISION LOG ---
     total_duration = time.time() - pipeline_start
@@ -509,6 +541,9 @@ def process_scene(
         operator=operator,
         machine_id=machine_id,
     )
+    if decision_log_path is None:
+        warnings.append("Decision log write failed")
+        error_codes.append("E_DECISION_LOG_WRITE")
 
     # --- LEARNING UPDATE ---
     record_scene_outcome(
@@ -581,14 +616,11 @@ def process_scene(
 
 def _generate_scene_insight_and_titles(
     *,
-    studio_name,
-    folder_ctx,
-    primary_type,
-    title_info,
+    video_path,
     saved_covers,
-    contact_sheet_path,
     work_dir,
     ai_client,
+    title_tone,
 ):
     """Phase 11 helper: vision insight + AI-driven titles & long description.
 
@@ -596,86 +628,24 @@ def _generate_scene_insight_and_titles(
     persists ``insight.json`` to the work dir for the UI / CLI to consume.
     Failures are logged and swallowed.
     """
-    import json as _json
-    from amg.scoring.scene_describer import (
-        describe_scene_from_covers,
-        generate_titles_with_insight,
-        summarize_positions,
-    )
-
-    # 1. Vision insight (one AI call against the contact sheet).
-    cover_paths = [Path(c["path"]) for c in saved_covers if c.get("path")]
-    insight = describe_scene_from_covers(
-        contact_sheet_path=Path(contact_sheet_path) if contact_sheet_path else None,
-        cover_paths=cover_paths,
+    payload = generate_scene_insight_payload(
+        video_path=video_path,
+        saved_covers=saved_covers,
+        work_dir=work_dir,
+        title_tone=title_tone,
         ai_client=ai_client,
+        persist=True,
     )
-    if insight:
-        log.info("[scene_insight] description ready",
-                 setting=insight.setting, mood=insight.mood,
-                 features=len(insight.notable_features))
-
-    # 2. Performer name resolution. Prefer metadata-supplied names, else fall
-    #    back to studio profile, else placeholder. Folder context wins.
-    performers = list(folder_ctx.performers or [])
-    if not performers:
-        regulars = (
-            (title_info.get("folder_performers") or [])
-            or (
-                # studio_profile.regular performers — read defensively
-                ((title_info.get("studio_profile") or {}).get("performers") or {}).get("regular", [])
-            )
-        )
-        if regulars:
-            performers = list(regulars)
-
-    pos_summary = summarize_positions(saved_covers)
-    description_for_prompt = (
-        title_info.get("description")
-        or folder_ctx.title
-        or title_info.get("metadata_title")
-        or ""
-    )
-
-    title_payload = generate_titles_with_insight(
-        studio=studio_name,
-        performers=performers,
-        scene_type=primary_type,
-        genres=title_info.get("detected_genres", []),
-        description=description_for_prompt,
-        insight=insight,
-        position_summary=pos_summary,
-        ai_client=ai_client,
-    )
-
-    # 3. Persist insight.json so UI/CLI can show it without re-running AI.
-    try:
-        if work_dir:
-            Path(work_dir).mkdir(parents=True, exist_ok=True)
-            payload = {
-                "studio": studio_name,
-                "performers": performers,
-                "scene_type": primary_type,
-                "genres": title_info.get("detected_genres", []),
-                "operator_description": description_for_prompt,
-                "folder_context": {
-                    "is_generic_filename": folder_ctx.is_generic_filename,
-                    "source_folder": str(folder_ctx.source_folder) if folder_ctx.source_folder else None,
-                    "metadata_documents_found": len(folder_ctx.metadata_documents),
-                    "ancestor_names": folder_ctx.ancestor_names,
-                },
-                "insight": insight.to_dict() if insight else None,
-                "position_summary": pos_summary,
-                "ai_titles": title_payload.get("titles", []),
-                "long_description": title_payload.get("long_description", ""),
-                "ai_used": title_payload.get("ai_used", False),
-            }
-            with open(Path(work_dir) / "insight.json", "w") as f:
-                _json.dump(payload, f, indent=2)
-    except Exception as e:
-        log.warn(f"[scene_insight] failed to write insight.json: {e}")
-
-    return (insight.to_dict() if insight else None), title_payload
+    insight_dict = payload.get("insight")
+    title_payload = {
+        "titles": payload.get("ai_titles", []),
+        "long_description": payload.get("long_description", ""),
+        "title_tone": payload.get("title_tone", title_tone),
+        "categories": payload.get("ai_categories", []),
+        "tags": payload.get("ai_tags", []),
+        "ai_used": payload.get("ai_used", False),
+    }
+    return insight_dict, title_payload
 
 
 def _build_result(**kwargs):
@@ -709,6 +679,9 @@ def _abort_with_partial(
         operator=operator,
         machine_id=machine_id,
     )
+    if decision_log_path is None:
+        warnings.append("Decision log write failed")
+        error_codes.append("E_DECISION_LOG_WRITE")
     return _build_result(
         success=False,
         scene_path=video_path,

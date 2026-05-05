@@ -18,7 +18,10 @@ from typing import List, Optional
 from amg.config import (
     FINISH_HUNTER_ZONE_START_PCT,
     FINISH_HUNTER_TOP_N,
+    FINISH_HUNTER_INTERVAL_BASE,
+    FINISH_HUNTER_INTERVAL_MAX,
     SCORE_TIER_2_SUCCESS_FLOOR,
+    get_adaptive_interval,
 )
 from amg.video.reader import VideoReader
 from amg.video.frames import measure_sharpness, is_frame_too_dark
@@ -55,7 +58,11 @@ def run_finish_hunter(
 
     # Higher sampling density in finish zone (every 1 second)
     candidates = []
-    interval = 1.0
+    interval = get_adaptive_interval(
+        FINISH_HUNTER_INTERVAL_BASE,
+        duration_sec,
+        FINISH_HUNTER_INTERVAL_MAX,
+    )
 
     with VideoReader(video_path) as vr:
         for ts, frame in vr.iter_frames_sequential(start_sec, duration_sec, interval):
@@ -107,5 +114,6 @@ def run_finish_hunter(
     return {
         "candidates": passing,
         "all_scored": scored,
+        "interval_sec": interval,
         "aborted": False,
     }

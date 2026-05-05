@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or "AMG OS" }}</title>
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <link rel="stylesheet" href="/static/ui.css" />
     <style>
       /* === Design tokens === */
       :root {
@@ -218,11 +219,13 @@
 
       .score-badge {
         display: inline-flex; align-items: center;
-        font-size: 12px; font-weight: 700;
-        padding: 3px 8px; border-radius: 6px;
-        background: rgba(132, 227, 159, 0.18);
-        color: var(--ok);
-        border: 1px solid rgba(132, 227, 159, 0.3);
+        font-size: 12px; font-weight: 800;
+        padding: 4px 9px; border-radius: 7px;
+        background: rgba(8, 19, 13, 0.92);
+        color: #ccffdc;
+        border: 1px solid rgba(132, 227, 159, 0.75);
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+        box-shadow: 0 1px 8px rgba(0, 0, 0, 0.35);
       }
       .rank-badge {
         display: inline-flex; align-items: center;
@@ -376,6 +379,38 @@
       .cover-actions {
         display: flex; justify-content: space-between; align-items: center; margin-top: 4px;
       }
+      .decision-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr auto;
+        gap: 6px;
+      }
+      .decision-btn {
+        border: 1px solid var(--line);
+        background: var(--bg-3);
+        color: var(--muted);
+        border-radius: 8px;
+        padding: 7px 8px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .decision-btn:hover { border-color: rgba(255,255,255,0.25); color: var(--text); }
+      .decision-btn.keep.active {
+        border-color: rgba(132, 227, 159, 0.8);
+        background: rgba(20, 58, 31, 0.92);
+        color: #b9f4c8;
+      }
+      .decision-btn.maybe.active {
+        border-color: rgba(246, 207, 117, 0.8);
+        background: rgba(62, 47, 16, 0.92);
+        color: #f6cf75;
+      }
+      .decision-btn.reject.active {
+        border-color: rgba(242, 154, 154, 0.85);
+        background: rgba(66, 20, 20, 0.92);
+        color: #f29a9a;
+      }
+      .decision-btn.clear { min-width: 62px; }
 
       /* Generative gradient placeholder when no thumbnail — picks color by hash */
       .grad-0 { background: linear-gradient(135deg, #2c3e6e, #5b8def); }
@@ -453,6 +488,20 @@
       .review-thumb-window .overlay-tl { top: 8px; left: 8px; }
       .review-thumb-window .overlay-tr { top: 8px; right: 8px; }
       .review-thumb-window .overlay-bl { bottom: 8px; left: 8px; right: 8px; display: flex; gap: 4px; flex-wrap: wrap; }
+
+      .review-toolbar {
+        position: sticky;
+        top: 68px;
+        z-index: 30;
+      }
+      .review-toolbar .hint {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .active-review-card {
+        border-color: rgba(91, 141, 239, 0.75) !important;
+        box-shadow: 0 0 0 2px rgba(91, 141, 239, 0.2);
+      }
 
       /* === Image preview modal === */
       .preview-modal {

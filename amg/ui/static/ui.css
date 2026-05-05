@@ -1,0 +1,33 @@
+.section-head {
+  margin-bottom: 10px;
+}
+
+.section-subtle {
+  font-size: 12px;
+}
+
+.row-center {
+  justify-content: center;
+}
+
+.mt-10 {
+  margin-top: 10px;
+}
+
+.mt-12 {
+  margin-top: 12px;
+}
+
+.mt-16 {
+  margin-top: 16px;
+}
+
+.mt-24 {
+  margin-top: 24px;
+}
+
+.ellipsis {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

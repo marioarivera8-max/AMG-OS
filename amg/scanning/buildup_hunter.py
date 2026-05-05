@@ -16,8 +16,11 @@ from amg.config import (
     BUILDUP_HUNTER_ZONE_START_PCT,
     BUILDUP_HUNTER_ZONE_END_PCT,
     BUILDUP_HUNTER_TOP_N,
+    BUILDUP_HUNTER_INTERVAL_BASE,
+    BUILDUP_HUNTER_INTERVAL_MAX,
     BUILDUP_DEDUP_HAMMING_THRESHOLD,
     SCORE_TIER_2_SUCCESS_FLOOR,
+    get_adaptive_interval,
 )
 from amg.video.reader import VideoReader
 from amg.video.frames import measure_sharpness, is_frame_too_dark
@@ -54,7 +57,11 @@ def run_buildup_hunter(
              start_sec=start_sec, end_sec=end_sec, sharp_floor=sharpness_floor)
 
     candidates = []
-    interval = 2.0  # Sample every 2 sec in buildup zone
+    interval = get_adaptive_interval(
+        BUILDUP_HUNTER_INTERVAL_BASE,
+        duration_sec,
+        BUILDUP_HUNTER_INTERVAL_MAX,
+    )
 
     with VideoReader(video_path) as vr:
         for ts, frame in vr.iter_frames_sequential(start_sec, end_sec, interval):
@@ -108,5 +115,6 @@ def run_buildup_hunter(
     return {
         "candidates": passing,
         "all_scored": scored,
+        "interval_sec": interval,
         "aborted": False,
     }

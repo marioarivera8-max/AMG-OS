@@ -14,7 +14,7 @@ They form the historical corpus for v11.1+ learning features.
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from amg.config import DECISION_LOGS_DIR, DEFAULT_OPERATOR, DEFAULT_MACHINE_ID
 from amg.__version__ import __version__
@@ -39,11 +39,11 @@ def write_decision_log(
     total_duration_sec: float,
     operator: str = None,
     machine_id: str = None,
-) -> Path:
+) -> Optional[Path]:
     """
     Compose and write the decision log JSON.
 
-    Returns path to the written file.
+    Returns path to the written file. Returns None on write failure.
     """
     DECISION_LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -73,10 +73,10 @@ def write_decision_log(
         with open(log_path, "w") as f:
             json.dump(record, f, indent=2, default=str)
         log.info("Decision log written", path=str(log_path))
+        return log_path
     except Exception as e:
-        log.error("Failed to write decision log", error=str(e))
-
-    return log_path
+        log.error("Failed to write decision log", error=str(e), path=str(log_path))
+        return None
 
 
 def _build_record(

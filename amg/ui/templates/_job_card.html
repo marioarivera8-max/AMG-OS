@@ -9,15 +9,18 @@
 >
   <div class="between">
     <div style="display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1;">
-      <strong style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ job.scene_id or "(resolving…)" }}</strong>
+      <strong class="ellipsis">{{ job.scene_id or "(resolving…)" }}</strong>
       <span class="pill" title="job id">{{ job.job_id }}</span>
+      {% if job.queue_pos %}<span class="pill">#{{ job.queue_pos }}</span>{% endif %}
       {% if job.source_mode %}<span class="pill">src: {{ job.source_mode }}</span>{% endif %}
     </div>
     <div>
       {% if job.status == "done" %}
         <span class="pill ok">DONE</span>
+      {% elif job.status == "stopped" %}
+        <span class="pill err">STOPPED</span>
       {% elif job.status == "error" %}
-        <span class="pill err">ERROR</span>
+        <span class="pill err">FAILED</span>
       {% elif job.status == "running" %}
         <span class="pill info"><span class="dot ok"></span>RUNNING</span>
       {% else %}
@@ -26,7 +29,7 @@
     </div>
   </div>
 
-  <div class="muted mono" style="margin-top: 6px; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ job.video_path }}</div>
+  <div class="muted mono ellipsis" style="margin-top: 6px; font-size: 11px;">{{ job.video_path }}</div>
 
   {% if job.progress_pct is defined and job.status in ["running", "done"] %}
     <div class="progress" style="margin-top: 12px;">

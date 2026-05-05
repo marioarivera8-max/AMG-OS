@@ -18,9 +18,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Callable
 import numpy as np
 
-from amg.config import AI_PARALLEL_WORKERS, SCORE_TIER_3_SUCCESS_FLOOR
+from amg.config import AI_PARALLEL_WORKERS, SCORE_TIER_3_SUCCESS_FLOOR, SCORE_MAX
 from amg.scoring.ai_client import AIClient, AIResponse
-from amg.scoring.parser import parse_ai_response, ScoredFrame
+from amg.scoring.parser import parse_ai_response, ScoredFrame, cap_score_for_excellence
+from amg.video.frames import measure_sharpness
 from amg.utils.logging import get_logger
 
 log = get_logger("scoring.orchestrator")
@@ -84,6 +85,13 @@ def score_frames_parallel(
 
         if ai_resp.success:
             scored = parse_ai_response(ai_resp.raw_text)
+            if scored.parse_succeeded and scored.score > 0:
+                refined = _refine_score_with_frame_quality(
+                    scored,
+                    frame,
+                    sharpness=entry.get("sharpness"),
+                )
+                scored.score = round(cap_score_for_excellence(scored, refined), 1)
         else:
             scored = ScoredFrame(parse_succeeded=False)
 
@@ -165,3 +173,63 @@ def get_zero_rate(scored_frames: List[dict]) -> float:
         and f["scored_frame"].score == 0
     )
     return zero_count / len(scored_frames)
+
+
+def _refine_score_with_frame_quality(
+    scored: ScoredFrame,
+    frame: np.ndarray,
+    *,
+    sharpness: Optional[float] = None,
+) -> float:
+    """
+    Add continuous per-frame quality spread to avoid clustered tie scores.
+
+    Base score is still rubric-driven (Tier B/C/D). This adds small, bounded
+    adjustments from objective frame quality and confidence signals.
+    """
+    base = float(scored.score or 0.0)
+    sharp = float(sharpness) if sharpness is not None else measure_sharpness(frame)
+    adj = _sharpness_score_adjustment(sharp)
+
+    # Action visibility nuance.
+    evidence = (scored.action_evidence or "NONE").upper()
+    if evidence == "ORAL_CONTACT":
+        adj += 1.0
+    elif evidence == "EXPLICIT_PENETRATION":
+        adj += 0.6
+    elif evidence in {"OCCLUDED", "WATER_OCCLUSION"}:
+        adj -= 1.2
+
+    # Confidence nuance for penetration-heavy frames.
+    if scored.penetration_visible:
+        conf = float(scored.penetration_confidence or 0.0)
+        adj += max(-1.0, min(2.0, (conf - 0.70) * 4.0))
+
+    # Keep some signal from model's raw score as a bounded tie-breaker.
+    if scored.model_score_raw is not None:
+        delta_raw = float(scored.model_score_raw) - base
+        adj += max(-2.0, min(2.0, delta_raw * 0.20))
+
+    final = max(0.0, min(SCORE_MAX, round(base + adj, 1)))
+    return final
+
+
+def _sharpness_score_adjustment(sharpness: float) -> float:
+    """
+    Map Laplacian sharpness into a bounded score adjustment.
+    """
+    if sharpness < 120:
+        return -10.0
+    if sharpness < 180:
+        return -7.0
+    if sharpness < 250:
+        return -4.0
+    if sharpness < 330:
+        return -2.0
+    if sharpness < 450:
+        return 0.0
+    if sharpness < 650:
+        return 1.5
+    if sharpness < 900:
+        return 3.0
+    return 4.5

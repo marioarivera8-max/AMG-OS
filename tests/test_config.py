@@ -1,7 +1,12 @@
-"""Tests for config helpers — cover caps, cluster windows."""
-import pytest
+"""Tests for config helpers — cover caps, cluster windows, interval scaling."""
 
-from amg.config import get_cover_cap, get_cluster_window, COVER_FLOOR
+from amg.config import (
+    get_cover_cap,
+    get_cluster_window,
+    get_interval_scale,
+    get_adaptive_interval,
+    COVER_FLOOR,
+)
 
 
 class TestCoverCap:
@@ -68,3 +73,23 @@ class TestClusterWindow:
     def test_boundary_80(self):
         window, interval = get_cluster_window(80.0)
         assert window == 7
+
+
+class TestAdaptiveIntervals:
+    def test_interval_scale_short(self):
+        assert get_interval_scale(1200) == 1.0
+
+    def test_interval_scale_medium_boundary(self):
+        assert get_interval_scale(1800) == 1.8
+
+    def test_interval_scale_long_boundary(self):
+        assert get_interval_scale(3900) == 3.0
+
+    def test_adaptive_interval_unbounded(self):
+        assert get_adaptive_interval(1.0, 3900) == 3.0
+
+    def test_adaptive_interval_capped(self):
+        assert get_adaptive_interval(2.0, 3900, max_interval=4.0) == 4.0
+
+    def test_adaptive_interval_never_below_base(self):
+        assert get_adaptive_interval(2.0, 200, max_interval=1.0) == 2.0

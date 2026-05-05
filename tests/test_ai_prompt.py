@@ -181,3 +181,41 @@ class TestParseAiResponse:
         # 34 + (10+12+14) + (5+4) - (8+7) = 64
         assert result.score == 64.0
         assert result.model_score_raw == 99.0
+
+    def test_non_elite_scores_capped_below_97(self):
+        text = """
+        TIER_A_PASS: yes
+        TIER_B_PRESENT: B1,B3,B5,B6,B8
+        TIER_C_PRESENT: C1,C2,C3
+        TIER_D_PRESENT: NONE
+        SCORE: 100.0
+        TYPE: SEX_ACT
+        GAZE: SINGLE
+        AESTHETIC: PROFESSIONAL
+        PENETRATION_VISIBLE: yes
+        PENETRATION_CONFIDENCE: 0.75
+        ACTION_EVIDENCE: EXPLICIT_PENETRATION
+        END
+        """
+        result = parse_ai_response(text)
+        assert result.parse_succeeded
+        assert result.score <= 96.0
+
+    def test_art_tier_can_reach_100(self):
+        text = """
+        TIER_A_PASS: yes
+        TIER_B_PRESENT: B1,B2,B3,B5,B6,B7,B8,B9,B10,B12,B13
+        TIER_C_PRESENT: C1,C2,C3,C4,C5
+        TIER_D_PRESENT: NONE
+        SCORE: 99.0
+        TYPE: PENETRATION
+        GAZE: DUAL
+        AESTHETIC: PROFESSIONAL
+        PENETRATION_VISIBLE: yes
+        PENETRATION_CONFIDENCE: 0.95
+        ACTION_EVIDENCE: EXPLICIT_PENETRATION
+        END
+        """
+        result = parse_ai_response(text)
+        assert result.parse_succeeded
+        assert result.score == 100.0

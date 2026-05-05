@@ -20,6 +20,17 @@ Commands:
     amg clean [--older-than]    Clean old work directories
     amg ui                      Start local web UI (run + review)
     amg feedback-eval           Compare model labels vs operator corrections
+    amg import-personal-examples <file>  Import manual labels (CSV/JSONL/XLSX)
+    amg build-training-dataset  Build canonical train/val/test dataset
+    amg export-text-training    Export dataset split to text-training JSONL
+    amg export-scoring-training Export scoring points/pairs for ranking model
+    amg training-status         Show training artifact registry summary
+    amg eval-text-dataset       Evaluate text dataset quality metrics
+    amg eval-scoring-dataset    Evaluate scoring dataset quality metrics
+    amg timing-calibrate        Calibrate phase timing thresholds from run logs
+    amg retrain-score           Build/evaluate scoring retrain candidate
+    amg retrain-status          Show recent scoring retrain runs
+    amg promote-score-candidate Promote a passed scoring retrain candidate
 """
 import argparse
 import os
@@ -135,6 +146,73 @@ def main():
     p_fe.add_argument("--scene-id", type=str, default=None)
     p_fe.add_argument("--studio", type=str, default=None)
 
+    # import-personal-examples
+    p_imp = subparsers.add_parser(
+        "import-personal-examples",
+        help="Import manually labeled examples (CSV/JSONL/XLSX) into training examples store",
+    )
+    p_imp.add_argument("input_path", type=Path, help="Path to CSV, JSONL, or XLSX file")
+    p_imp.add_argument("--dataset-name", type=str, default="personal_examples")
+    p_imp.add_argument("--dry-run", action="store_true")
+
+    # build-training-dataset
+    p_btd = subparsers.add_parser(
+        "build-training-dataset",
+        help="Build canonical train/val/test dataset from feedback + imported examples",
+    )
+    p_btd.add_argument("--dataset-name", type=str, default="scoring_v1")
+    p_btd.add_argument("--val-pct", type=float, default=0.10)
+    p_btd.add_argument("--test-pct", type=float, default=0.10)
+
+    # export-text-training
+    p_ett = subparsers.add_parser(
+        "export-text-training",
+        help="Export canonical dataset split to text-training JSONL pairs",
+    )
+    p_ett.add_argument("--dataset-name", type=str, default="scoring_selection_v1")
+    p_ett.add_argument("--split", type=str, default="all", help="Dataset split: all/train/val/test")
+    p_ett.add_argument("--all-splits", action="store_true", help="Export train/val/test/all and write bundle manifest")
+    p_ett.add_argument("--format", type=str, default="instruction", choices=["instruction", "messages"])
+    p_ett.add_argument("--output-name", type=str, default=None, help="Optional output filename")
+
+    # export-scoring-training
+    p_est = subparsers.add_parser(
+        "export-scoring-training",
+        help="Export canonical dataset split to scoring point/pair training JSONL",
+    )
+    p_est.add_argument("--dataset-name", type=str, default="scoring_selection_v1")
+    p_est.add_argument("--split", type=str, default="all")
+    p_est.add_argument("--output-prefix", type=str, default=None)
+    p_est.add_argument(
+        "--max-pairs-per-scene",
+        type=int,
+        default=0,
+        help="Optional cap for ranking pairs per scene (0 = no cap)",
+    )
+
+    # training-status
+    p_ts = subparsers.add_parser(
+        "training-status",
+        help="Show summary of training artifacts and latest outputs",
+    )
+    p_ts.add_argument("--limit", type=int, default=200, help="How many latest registry rows to inspect")
+
+    # eval-text-dataset
+    p_etd = subparsers.add_parser(
+        "eval-text-dataset",
+        help="Evaluate text dataset quality (coverage, performer mention, diversity)",
+    )
+    p_etd.add_argument("--dataset-name", type=str, default="scoring_selection_v1")
+    p_etd.add_argument("--split", type=str, default="val")
+
+    # eval-scoring-dataset
+    p_esd = subparsers.add_parser(
+        "eval-scoring-dataset",
+        help="Evaluate scoring dataset quality (labels, pair potential, MAE)",
+    )
+    p_esd.add_argument("--dataset-name", type=str, default="scoring_selection_v1")
+    p_esd.add_argument("--split", type=str, default="val")
+
     # generate-title
     p_gt = subparsers.add_parser(
         "generate-title",
@@ -142,6 +220,60 @@ def main():
     )
     p_gt.add_argument("scene", type=str, help="Scene ID (folder name) or path to a video / scene folder")
     p_gt.add_argument("--print-only", action="store_true", help="Print results, do not update insight.json")
+
+    # timing-calibrate
+    p_tc = subparsers.add_parser(
+        "timing-calibrate",
+        help="Calibrate phase timing thresholds from UI run timing ledger",
+    )
+    p_tc.add_argument(
+        "--run-timings-path",
+        type=Path,
+        default=DATA_DIR / "logs" / "run_timings.jsonl",
+        help="Path to run timings JSONL",
+    )
+    p_tc.add_argument(
+        "--min-samples",
+        type=int,
+        default=5,
+        help="Minimum rows per phase to include in thresholds",
+    )
+    p_tc.add_argument(
+        "--doc-path",
+        type=Path,
+        default=Path("docs/phase_timing_cheat_sheet.md"),
+        help="Cheat-sheet markdown path",
+    )
+    p_tc.add_argument(
+        "--update-doc",
+        action="store_true",
+        help="Write auto-calibrated threshold table into the cheat sheet",
+    )
+
+    # retrain-score
+    p_rs = subparsers.add_parser(
+        "retrain-score",
+        help="Run manual scoring retrain pipeline from current feedback/examples",
+    )
+    p_rs.add_argument("--from-flag", type=str, default=None, help="Scene ID to flag and include in retrain trigger")
+    p_rs.add_argument("--tag", type=str, default="golden_positive", choices=["golden_positive", "golden_negative"])
+    p_rs.add_argument("--note", type=str, default=None)
+    p_rs.add_argument("--dataset-prefix", type=str, default="scoring_retrain")
+    p_rs.add_argument("--max-pairs-per-scene", type=int, default=300)
+
+    # retrain-status
+    p_rstat = subparsers.add_parser(
+        "retrain-status",
+        help="Show recent scoring retrain run manifests",
+    )
+    p_rstat.add_argument("--limit", type=int, default=10)
+
+    # promote-score-candidate
+    p_psc = subparsers.add_parser(
+        "promote-score-candidate",
+        help="Promote a passed scoring retrain candidate by run ID",
+    )
+    p_psc.add_argument("--run-id", type=str, required=True)
 
     args = parser.parse_args()
 
@@ -177,7 +309,18 @@ def _dispatch(args):
     if cmd == "clean":     return cmd_clean(args)
     if cmd == "ui":        return cmd_ui(args)
     if cmd == "feedback-eval": return cmd_feedback_eval(args)
+    if cmd == "import-personal-examples": return cmd_import_personal_examples(args)
+    if cmd == "build-training-dataset": return cmd_build_training_dataset(args)
+    if cmd == "export-text-training": return cmd_export_text_training(args)
+    if cmd == "export-scoring-training": return cmd_export_scoring_training(args)
+    if cmd == "training-status": return cmd_training_status(args)
+    if cmd == "eval-text-dataset": return cmd_eval_text_dataset(args)
+    if cmd == "eval-scoring-dataset": return cmd_eval_scoring_dataset(args)
     if cmd == "generate-title": return cmd_generate_title(args)
+    if cmd == "timing-calibrate": return cmd_timing_calibrate(args)
+    if cmd == "retrain-score": return cmd_retrain_score(args)
+    if cmd == "retrain-status": return cmd_retrain_status(args)
+    if cmd == "promote-score-candidate": return cmd_promote_score_candidate(args)
     return 1
 
 
@@ -693,19 +836,203 @@ def cmd_feedback_eval(args):
     return 0
 
 
+def cmd_import_personal_examples(args):
+    """Import manually labeled training examples from CSV/JSONL/XLSX."""
+    from amg.learning.import_personal_examples import import_personal_examples
+
+    init_logging()
+    input_path = Path(args.input_path).expanduser().resolve()
+    if not input_path.exists():
+        print(f"Input file not found: {input_path}")
+        return 1
+
+    stats = import_personal_examples(
+        input_path=input_path,
+        dataset_name=args.dataset_name,
+        dry_run=bool(args.dry_run),
+    )
+    print("Import personal examples")
+    print("=" * 64)
+    print(f"Input rows: {stats.input_rows}")
+    print(f"Accepted: {stats.accepted_rows}")
+    print(f"Skipped: {stats.skipped_rows}")
+    print(f"Deduped: {stats.deduped_rows}")
+    print(f"Errors: {stats.errors}")
+    if args.dry_run:
+        print("Dry-run: no files written")
+    elif stats.output_path:
+        print(f"Output: {stats.output_path}")
+    return 0 if stats.accepted_rows > 0 else 1
+
+
+def cmd_build_training_dataset(args):
+    """Build canonical train/val/test dataset from current learning signals."""
+    from amg.learning.dataset_builder import build_training_dataset
+
+    init_logging()
+    val_pct = float(args.val_pct)
+    test_pct = float(args.test_pct)
+    if val_pct < 0 or test_pct < 0 or (val_pct + test_pct) >= 0.9:
+        print("Invalid split values. Use non-negative values with val_pct + test_pct < 0.9")
+        return 1
+
+    stats = build_training_dataset(
+        dataset_name=args.dataset_name,
+        val_pct=val_pct,
+        test_pct=test_pct,
+    )
+    print("Build training dataset")
+    print("=" * 64)
+    print(f"Total rows: {stats.total_rows}")
+    print(f"Train: {stats.train_rows}")
+    print(f"Val: {stats.val_rows}")
+    print(f"Test: {stats.test_rows}")
+    print(f"Output dir: {stats.output_dir}")
+    return 0 if stats.total_rows > 0 else 1
+
+
+def cmd_export_text_training(args):
+    """Export dataset split into text-training JSONL examples."""
+    from amg.learning.text_style_export import export_text_training_bundle, export_text_training_dataset
+
+    init_logging()
+    if bool(args.all_splits):
+        try:
+            bundle = export_text_training_bundle(
+                dataset_name=args.dataset_name,
+                splits=("train", "val", "test", "all"),
+                format_type=args.format,
+            )
+        except FileNotFoundError as e:
+            print(str(e))
+            return 1
+        except ValueError as e:
+            print(str(e))
+            return 1
+
+        print("Export text training bundle")
+        print("=" * 64)
+        print(f"Format: {bundle.format_type}")
+        for split, out in bundle.outputs.items():
+            print(f"{split}: {out}")
+        print(
+            "Totals: "
+            f"input={bundle.totals.get('input_rows', 0)} "
+            f"exported={bundle.totals.get('exported_rows', 0)} "
+            f"skipped={bundle.totals.get('skipped_rows', 0)}"
+        )
+        print(f"Manifest: {bundle.manifest_path}")
+        return 0 if bundle.totals.get("exported_rows", 0) > 0 else 1
+
+    try:
+        stats = export_text_training_dataset(
+            dataset_name=args.dataset_name,
+            split=args.split,
+            output_name=args.output_name,
+            format_type=args.format,
+        )
+    except FileNotFoundError as e:
+        print(str(e))
+        return 1
+    except ValueError as e:
+        print(str(e))
+        return 1
+
+    print("Export text training dataset")
+    print("=" * 64)
+    print(f"Format: {args.format}")
+    print(f"Input rows: {stats.input_rows}")
+    print(f"Exported: {stats.exported_rows}")
+    print(f"Skipped: {stats.skipped_rows}")
+    print(f"Output: {stats.output_path}")
+    return 0 if stats.exported_rows > 0 else 1
+
+
+def cmd_export_scoring_training(args):
+    """Export scoring/ranking training artifacts from canonical split."""
+    from amg.learning.scoring_training_export import export_scoring_training_dataset
+
+    init_logging()
+    try:
+        stats = export_scoring_training_dataset(
+            dataset_name=args.dataset_name,
+            split=args.split,
+            output_prefix=args.output_prefix,
+            max_pairs_per_scene=(args.max_pairs_per_scene or None),
+        )
+    except FileNotFoundError as e:
+        print(str(e))
+        return 1
+
+    print("Export scoring training dataset")
+    print("=" * 64)
+    print(f"Input rows: {stats.input_rows}")
+    print(f"Point rows: {stats.point_rows}")
+    print(f"Pair rows: {stats.pair_rows}")
+    print(f"Points output: {stats.points_path}")
+    print(f"Pairs output: {stats.pairs_path}")
+    return 0 if stats.point_rows > 0 else 1
+
+
+def cmd_training_status(args):
+    """Show summary of locally tracked training artifacts."""
+    from amg.learning.training_registry import summarize_training_registry
+
+    init_logging()
+    summary = summarize_training_registry(limit=int(args.limit))
+    print("Training artifact status")
+    print("=" * 64)
+    print(f"Rows scanned: {summary.get('total_rows', 0)}")
+    by_type = summary.get("by_type", {}) or {}
+    if by_type:
+        print("Counts by artifact type:")
+        for k in sorted(by_type):
+            print(f"  - {k}: {by_type[k]}")
+    else:
+        print("No registry entries yet.")
+
+    latest = summary.get("latest_existing_by_type", {}) or summary.get("latest_by_type", {}) or {}
+    if latest:
+        print("\nLatest by type:")
+        for k in sorted(latest):
+            row = latest[k]
+            print(f"  - {k}: {row.get('artifact_path')} ({row.get('ts_utc')})")
+    return 0
+
+
+def cmd_eval_text_dataset(args):
+    """Evaluate text dataset quality metrics for a split."""
+    from amg.learning.eval_harness import evaluate_text_dataset, format_text_eval
+
+    init_logging()
+    try:
+        metrics = evaluate_text_dataset(dataset_name=args.dataset_name, split=args.split)
+    except FileNotFoundError as e:
+        print(str(e))
+        return 1
+    print(format_text_eval(metrics))
+    return 0
+
+
+def cmd_eval_scoring_dataset(args):
+    """Evaluate scoring dataset quality metrics for a split."""
+    from amg.learning.scoring_training_export import evaluate_scoring_dataset, format_scoring_eval
+
+    init_logging()
+    try:
+        metrics = evaluate_scoring_dataset(dataset_name=args.dataset_name, split=args.split)
+    except FileNotFoundError as e:
+        print(str(e))
+        return 1
+    print(format_scoring_eval(metrics))
+    return 0
+
+
 def cmd_generate_title(args):
     """Re-run vision insight + AI title/description generation for an existing scene."""
     import json
-    from amg.ingest.folder_context import resolve_folder_context
-    from amg.ingest.title_parser import parse_title_with_context, derive_primary_scene_type
-    from amg.ingest.performer_code import parse_performer_code_with_context, detect_scene_type_from_code
-    from amg.ingest.studio_profiles import detect_studio
     from amg.ingest.inventory import discover_scenes, make_work_dir
-    from amg.scoring.scene_describer import (
-        describe_scene_from_covers,
-        generate_titles_with_insight,
-        summarize_positions,
-    )
+    from amg.scoring.insight_pipeline import generate_scene_insight_payload
 
     init_logging()
 
@@ -760,86 +1087,169 @@ def cmd_generate_title(args):
         print(f"No covers or contact sheet in {work_dir}")
         return 1
 
-    # Resolve folder context + ingestion fields.
-    folder_ctx = resolve_folder_context(video_path)
-    studio = folder_ctx.studio or detect_studio(video_path)
-    code_info = parse_performer_code_with_context(video_path, folder_ctx)
-    title_info = parse_title_with_context(video_path, folder_ctx)
-    primary = derive_primary_scene_type(
-        title_info.get("detected_genres", []),
-        code_info.get("total") if code_info else None,
+    out_payload = generate_scene_insight_payload(
+        video_path=video_path,
+        saved_covers=saved_covers,
+        work_dir=work_dir,
+        title_tone=TITLE_TONE_DEFAULT,
+        persist=not args.print_only,
     )
-    if code_info:
-        from_code = detect_scene_type_from_code(code_info)
-        if from_code != "STANDARD":
-            primary = from_code
 
     print(f"Scene: {video_path.parent.name}")
-    print(f"  Studio: {studio}")
-    print(f"  Performers (folder): {folder_ctx.performers or '(none — using studio defaults)'}")
-    print(f"  Generic filename: {folder_ctx.is_generic_filename}")
-    print(f"  Description: {title_info.get('description') or '(none)'}")
+    print(f"  Studio: {out_payload.get('studio') or '(unknown)'}")
+    performers = out_payload.get("performers") or []
+    print(f"  Performers: {performers or '(none)'}")
+    folder_ctx = out_payload.get("folder_context") or {}
+    print(f"  Generic filename: {bool(folder_ctx.get('is_generic_filename'))}")
+    print(f"  Description: {out_payload.get('operator_description') or '(none)'}")
     print()
 
-    insight = describe_scene_from_covers(
-        contact_sheet_path=contact_sheet,
-        cover_paths=[Path(c["path"]) for c in saved_covers if c.get("path")],
-    )
+    insight = out_payload.get("insight")
     if insight:
         print("Insight:")
-        print(f"  Setting: {insight.setting}")
-        print(f"  Location: {insight.location_hint}")
-        print(f"  Features: {', '.join(insight.notable_features) or '(none)'}")
-        print(f"  Mood: {insight.mood}")
-        print(f"  Action: {insight.action_summary}")
+        print(f"  Setting: {insight.get('setting')}")
+        print(f"  Location: {insight.get('location_hint')}")
+        print(f"  Features: {', '.join(insight.get('notable_features') or []) or '(none)'}")
+        print(f"  Mood: {insight.get('mood')}")
+        print(f"  Action: {insight.get('action_summary')}")
         print()
     else:
         print("Insight: (AI offline or unavailable)\n")
 
-    pos_summary = summarize_positions(saved_covers)
-    payload = generate_titles_with_insight(
-        studio=studio,
-        performers=folder_ctx.performers,
-        scene_type=primary,
-        genres=title_info.get("detected_genres", []),
-        description=title_info.get("description") or folder_ctx.title or "",
-        insight=insight,
-        position_summary=pos_summary,
-    )
-
-    print("Title suggestions:" + ("" if payload["ai_used"] else " (template fallback — AI offline)"))
-    for i, t in enumerate(payload["titles"], 1):
+    print("Title suggestions:" + ("" if out_payload.get("ai_used") else " (template fallback — AI offline)"))
+    for i, t in enumerate(out_payload.get("ai_titles", []), 1):
         warn = f"  ⚠ {'; '.join(t['warnings'])}" if t.get("warnings") else ""
         print(f"  {i}. [{t.get('style','?')}] {t['text']}  ({t['char_count']}c){warn}")
-    if payload.get("long_description"):
+    if out_payload.get("long_description"):
         print()
         print("Long description:")
-        print(f"  {payload['long_description']}")
-
-    # Persist updated insight.json unless --print-only.
+        print(f"  {out_payload['long_description']}")
     if not args.print_only:
-        out = work_dir / "insight.json"
-        out_payload = {
-            "studio": studio,
-            "performers": folder_ctx.performers,
-            "scene_type": primary,
-            "genres": title_info.get("detected_genres", []),
-            "operator_description": title_info.get("description") or "",
-            "folder_context": {
-                "is_generic_filename": folder_ctx.is_generic_filename,
-                "source_folder": str(folder_ctx.source_folder) if folder_ctx.source_folder else None,
-                "metadata_documents_found": len(folder_ctx.metadata_documents),
-                "ancestor_names": folder_ctx.ancestor_names,
-            },
-            "insight": insight.to_dict() if insight else None,
-            "position_summary": pos_summary,
-            "ai_titles": payload["titles"],
-            "long_description": payload.get("long_description", ""),
-            "ai_used": payload.get("ai_used", False),
-        }
-        with open(out, "w") as f:
-            json.dump(out_payload, f, indent=2)
-        print(f"\nWrote {out}")
+        print(f"\nWrote {work_dir / 'insight.json'}")
+    return 0
+
+
+def cmd_timing_calibrate(args):
+    """Calibrate phase timing thresholds from run_timings.jsonl."""
+    from amg.learning.timing_calibration import (
+        calibrate_phase_thresholds,
+        format_thresholds_markdown_table,
+        update_cheat_sheet_thresholds,
+    )
+
+    init_logging()
+    run_timings_path = Path(args.run_timings_path).expanduser().resolve()
+    doc_path = Path(args.doc_path).expanduser().resolve()
+    min_samples = max(1, int(args.min_samples))
+
+    rows = calibrate_phase_thresholds(run_timings_path, min_samples=min_samples)
+    if not rows:
+        print("No calibratable timing data found.")
+        print(f"  - Expected ledger: {run_timings_path}")
+        print(f"  - Min samples per phase: {min_samples}")
+        print("Run a few scenes from the UI first, then retry.")
+        return 1
+
+    print("Phase timing thresholds (auto-calibrated)")
+    print("=" * 64)
+    print(f"Run timings: {run_timings_path}")
+    print(f"Min samples per phase: {min_samples}")
+    print()
+    print(format_thresholds_markdown_table(rows))
+
+    if args.update_doc:
+        ok = update_cheat_sheet_thresholds(
+            doc_path=doc_path,
+            rows=rows,
+            run_timings_path=run_timings_path,
+            min_samples=min_samples,
+        )
+        if ok:
+            print()
+            print(f"Updated cheat sheet: {doc_path}")
+        else:
+            print()
+            print("Could not update cheat sheet automatically.")
+            print(f"Ensure markers exist in: {doc_path}")
+            print("  <!-- AUTO_THRESHOLD_TABLE_START -->")
+            print("  <!-- AUTO_THRESHOLD_TABLE_END -->")
+            return 1
+    return 0
+
+
+def cmd_retrain_score(args):
+    """Run scoring retrain pipeline and print gate results."""
+    from amg.learning.retrain_scoring import run_scoring_retrain
+
+    init_logging()
+    try:
+        result = run_scoring_retrain(
+            from_scene_id=args.from_flag,
+            tag=args.tag,
+            note=args.note,
+            dataset_prefix=args.dataset_prefix,
+            max_pairs_per_scene=int(args.max_pairs_per_scene),
+        )
+    except Exception as e:
+        print(f"Retrain failed: {e}")
+        return 1
+
+    print("Scoring retrain run")
+    print("=" * 64)
+    print(f"Run ID: {result.run_id}")
+    print(f"Dataset: {result.dataset_name}")
+    print(f"Manifest: {result.manifest_path}")
+    print(f"Points: {result.points_path}")
+    print(f"Pairs: {result.pairs_path}")
+    if result.candidate_ready:
+        print("Gate status: PASS (candidate ready)")
+        return 0
+
+    print("Gate status: BLOCKED")
+    for reason in result.blocked_reasons:
+        print(f"  - {reason}")
+    return 1
+
+
+def cmd_retrain_status(args):
+    """Show recent scoring retrain run summaries."""
+    from amg.learning.retrain_scoring import list_retrain_runs
+
+    init_logging()
+    runs = list_retrain_runs(limit=int(args.limit))
+    if not runs:
+        print("No retrain runs found.")
+        return 0
+
+    print("Recent scoring retrain runs")
+    print("=" * 64)
+    for r in runs:
+        run_id = r.get("run_id")
+        ready = bool(r.get("candidate_ready"))
+        gates = r.get("gates") if isinstance(r.get("gates"), dict) else {}
+        blocked = gates.get("blocked_reasons") or []
+        print(f"{run_id} :: {'READY' if ready else 'BLOCKED'} :: dataset={r.get('dataset_name')}")
+        if blocked:
+            print(f"  blocked: {', '.join(blocked)}")
+    return 0
+
+
+def cmd_promote_score_candidate(args):
+    """Promote a scoring retrain candidate if gates passed."""
+    from amg.learning.retrain_scoring import promote_score_candidate
+
+    init_logging()
+    try:
+        pointer = promote_score_candidate(args.run_id)
+    except Exception as e:
+        print(f"Promotion failed: {e}")
+        return 1
+
+    print("Scoring candidate promoted")
+    print("=" * 64)
+    print(f"Run ID: {pointer.get('run_id')}")
+    print(f"Dataset: {pointer.get('dataset_name')}")
+    print(f"Pointer: {pointer.get('manifest_path')}")
     return 0
 
 
@@ -855,8 +1265,10 @@ def _acquire_batch_lock():
             print(f"Another batch is running. Lock contents:\n{content}")
             print("If you're sure no batch is running, run: amg batch --force")
             return False
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Batch lock exists but could not be read: {e}")
+            print("Assuming another batch may be active; use --force only if you are sure.")
+            return False
 
     BATCH_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     BATCH_LOCK_FILE.write_text(
