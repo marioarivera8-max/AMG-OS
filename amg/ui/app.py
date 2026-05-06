@@ -407,17 +407,31 @@ def _persist_review_to_decision_log(
 ) -> None:
     """
     Persist review choices back into decision log for downstream learning.
+
+    Resilience: if the decision log doesn't exist (e.g. cloud pull-back
+    failed), we still write a stub log carrying the review block so the
+    operator's feedback isn't silently dropped. The stub gets overwritten
+    if the real log lands later.
     """
     sid = _safe_scene_id(scene_id)
     path = DECISION_LOGS_DIR / f"{sid}.json"
-    if not path.exists():
-        return
-    try:
-        with open(path, "r") as f:
-            dlog = json.load(f)
-    except Exception as e:
-        log.warn("Failed to read decision log for review persistence", error=str(e), scene_id=scene_id)
-        return
+    DECISION_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    dlog: dict = {}
+    if path.exists():
+        try:
+            with open(path, "r") as f:
+                dlog = json.load(f)
+                if not isinstance(dlog, dict):
+                    dlog = {}
+        except Exception as e:
+            log.warn("Failed to read decision log for review persistence", error=str(e), scene_id=scene_id)
+            dlog = {}
+    if not dlog:
+        dlog = {
+            "scene_id": scene_id,
+            "review_only_stub": True,
+            "stub_reason": "decision_log not present at review time (cloud pull-back may have failed)",
+        }
 
     review = dlog.get("review") if isinstance(dlog.get("review"), dict) else {}
     review.update(
