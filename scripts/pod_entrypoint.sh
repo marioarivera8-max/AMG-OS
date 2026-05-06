@@ -6,8 +6,11 @@
 #   1. Start `ollama serve` in the background.
 #   2. Poll http://127.0.0.1:11434/api/tags until Ollama responds (max 60s).
 #   3. Pre-pull the vision model so the first scan doesn't pay the 5 GB
-#      download cost. Skipped if the model is already cached on the
-#      attached network volume (OLLAMA_MODELS=/data/ollama).
+#      download cost. Skipped if the model is already cached at
+#      $OLLAMA_MODELS (default /workspace/ollama). When a Runpod network
+#      volume is attached via AMG_RUNPOD_NETWORK_VOLUME_ID, the cache
+#      survives pod recycles — first cold boot pays the model pull;
+#      every subsequent pod skips it.
 #   4. exec the command passed in by Docker CMD (default: amg pod-worker).
 #      `exec` lets the worker take over PID 2 so SIGTERM from Runpod
 #      propagates correctly through tini -> worker -> uvicorn shutdown.
@@ -27,8 +30,17 @@ OLLAMA_HEALTH_URL="http://${OLLAMA_HOST_BIND}/api/tags"
 OLLAMA_LOG="/tmp/ollama.log"
 MODEL="${AMG_VISION_MODEL:-qwen2.5vl:7b}"
 READY_TIMEOUT_SEC="${AMG_OLLAMA_READY_TIMEOUT_SEC:-60}"
+MODELS_DIR="${OLLAMA_MODELS:-/workspace/ollama}"
 
 log() { echo "[pod-entrypoint $(date -u +%H:%M:%S)] $*"; }
+
+# Ensure the model cache dir exists. When a Runpod network volume is
+# attached at /workspace, the volume mount supersedes the empty directory
+# baked into the image at build-time, so we have to mkdir at start-time
+# to create the per-pod ollama subdir on the volume itself. No-op on
+# subsequent boots once the dir already exists on the volume.
+mkdir -p "$MODELS_DIR"
+log "ollama models dir: ${MODELS_DIR} (volume-backed if AMG_RUNPOD_NETWORK_VOLUME_ID is set)"
 
 log "starting ollama serve (host=${OLLAMA_HOST_BIND})"
 ollama serve > "$OLLAMA_LOG" 2>&1 &

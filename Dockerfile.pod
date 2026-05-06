@@ -34,9 +34,16 @@
 #     -e AMG_VISION_MODEL=qwen2.5vl:3b \
 #     ghcr.io/<owner>/amg-pod:0.1
 #
-# On Runpod, the network-volume mount path (typically /workspace) should be
-# bound to /root/.ollama so the qwen2.5vl model is cached between pods.
-# Set AMG_RUNPOD_NETWORK_VOLUME_ID in the controller env to wire that up.
+# Cold-boot accelerator: when AMG_RUNPOD_NETWORK_VOLUME_ID is set in the
+# controller env, Runpod attaches a persistent block volume at /workspace.
+# We point OLLAMA_MODELS at /workspace/ollama so the qwen2.5vl:7b weights
+# (~5 GB) survive pod recycles. First boot still pulls the model; every
+# subsequent pod skips the 3-5 min model download.
+#
+# Other on-pod state (AMG decision logs, work dirs, downloaded videos) lives
+# under AMG_DATA_DIR=/data which stays ephemeral — the controller pulls those
+# artifacts back via /jobs/{id}/zip at the end of each job, so caching them
+# on a volume would be wasteful.
 
 FROM python:3.12-slim-bookworm
 
@@ -111,13 +118,16 @@ COPY amg/ ./amg/
 COPY scripts/pod_entrypoint.sh /usr/local/bin/pod-entrypoint
 RUN chmod +x /usr/local/bin/pod-entrypoint
 
-# Defaults. AMG_DATA_DIR maps to the network-volume mount on Runpod.
-# OLLAMA_HOST is local because we run Ollama in the same container.
-# OLLAMA_MODELS points at the data dir so the model survives pod recycles
-# (provided AMG_RUNPOD_NETWORK_VOLUME_ID is set in the controller env).
+# Defaults.
+# AMG_DATA_DIR=/data is ephemeral container scratch (artifacts get shipped
+#   back to the controller via /jobs/{id}/zip, no need to persist on volume).
+# OLLAMA_MODELS=/workspace/ollama is the *only* path that benefits from a
+#   network volume — Runpod mounts AMG_RUNPOD_NETWORK_VOLUME_ID at /workspace,
+#   so this lets the model weights survive pod recycles.
+# OLLAMA_HOST is loopback because we run Ollama side-by-side in this container.
 ENV AMG_DATA_DIR=/data \
     OLLAMA_HOST=127.0.0.1:11434 \
-    OLLAMA_MODELS=/data/ollama \
+    OLLAMA_MODELS=/workspace/ollama \
     OLLAMA_KEEP_ALIVE=24h \
     OLLAMA_NUM_PARALLEL=4 \
     OLLAMA_FLASH_ATTENTION=1 \
@@ -128,7 +138,11 @@ ENV AMG_DATA_DIR=/data \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-RUN mkdir -p /data /data/ollama
+# Both dirs need to exist before pod_entrypoint.sh runs. Without a network
+# volume attached, /workspace is a normal container directory; with one
+# attached, Runpod mounts over /workspace and the entrypoint mkdirs
+# /workspace/ollama into the volume itself.
+RUN mkdir -p /data /workspace
 
 # pod-worker port (controller talks to it via the Runpod proxy URL).
 EXPOSE 8000
