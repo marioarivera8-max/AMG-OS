@@ -76,9 +76,17 @@ def process_scene(
     operator: Optional[str] = None,
     machine_id: Optional[str] = None,
     dry_run: bool = False,
+    on_progress=None,
 ) -> dict:
     """
     Process one scene end-to-end.
+
+    Args:
+        on_progress: optional callable ``f(pct: int) -> None`` invoked at
+            phase boundaries with a coarse 0..100 estimate of overall
+            completion. Used by the cloud edition to drive a progress bar
+            in the operator UI; local CLI runs leave it ``None``. Each
+            call is wrapped so a hook raising never breaks the pipeline.
 
     Returns:
         {
@@ -97,6 +105,14 @@ def process_scene(
     video_path = Path(video_path).resolve()
     scene_id = video_path.parent.name  # Use folder name as scene ID
     init_logging(run_log_name=scene_id)
+
+    def _emit_progress(pct: int) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(int(max(0, min(100, pct))))
+        except Exception as exc:  # noqa: BLE001 - hooks must never break the pipeline
+            log.warn("on_progress hook raised; continuing", error=str(exc))
 
     log.info("=" * 64)
     log.info(f"AMG OS {__version__} — Processing Scene")
@@ -142,6 +158,7 @@ def process_scene(
              scene_type=primary_type,
              genres=title_info.get("detected_genres", []),
              folder_context=str(folder_ctx.source_folder) if folder_ctx.source_folder else None)
+    _emit_progress(5)
 
     # --- PHASE 2: COMPLIANCE ---
     compliance = verify_2257(video_path)
@@ -192,6 +209,7 @@ def process_scene(
     hard_budget = min(duration_sec * TIME_BUDGET_HARD_PCT, TIME_BUDGET_ABSOLUTE_MAX)
     deadline = pipeline_start + hard_budget
     log.info(f"Time budget: {format_duration(hard_budget)} hard cap")
+    _emit_progress(10)
 
     # --- PHASE 4: CALIBRATION ---
     with phase_timer("calibration", PHASE_HARD_TIMEOUT_SEC["calibration"]) as t:
@@ -210,6 +228,7 @@ def process_scene(
     if calibration["all_blurry"]:
         warnings.append("Source appears entirely blurry")
         error_codes.append("E_CALIB_ALL_BLURRY")
+    _emit_progress(20)
 
     # Verify Ollama is alive before scoring
     ai_client = AIClient()
@@ -262,6 +281,7 @@ def process_scene(
 
     all_scored = list(tier_result["all_scored"])
     candidates = list(tier_result["candidates"])
+    _emit_progress(45)
 
     # --- PHASE 6: FINISH HUNTER ---
     if time.time() < deadline and not quota_satisfied(candidates):
@@ -284,6 +304,7 @@ def process_scene(
             "reason": "quota_satisfied",
             "quota_progress": quota_progress(candidates),
         }
+    _emit_progress(60)
 
     # --- PHASE 7: BUILDUP HUNTER ---
     if time.time() < deadline and not quota_satisfied(candidates):
@@ -306,6 +327,7 @@ def process_scene(
             "reason": "quota_satisfied",
             "quota_progress": quota_progress(candidates),
         }
+    _emit_progress(72)
 
     # --- PHASE 8: CLUSTER EXPANSION ---
     if time.time() < deadline and candidates and not quota_satisfied(candidates):
@@ -358,6 +380,7 @@ def process_scene(
             error_codes.append("E_FLOOR_FALLBACK_D")
         if not cascade_result["floor_met"]:
             error_codes.append("E_FLOOR_NOT_MET")
+    _emit_progress(85)
 
     # Apply adaptive cover cap (review-burden control).
     cover_cap = get_cover_cap(duration_sec)
@@ -462,6 +485,7 @@ def process_scene(
             "provided_thumbnails_accepted": (provided_thumb_stats or {}).get("accepted", 0),
             "provided_thumbnails_imported": (provided_thumb_stats or {}).get("imported", 0),
         }
+    _emit_progress(92)
 
     # --- PHASE 11: SCENE INSIGHT + AI TITLE/DESCRIPTION ---
     # Best-effort. Always degrades safely on AI offline / parse fail.
@@ -597,6 +621,7 @@ def process_scene(
     mark = "✓" if success and not partial_success else ("⚠" if partial_success else "✗")
     log.info(f"{mark} {outcome_label} — {n_saved} covers in {format_duration(total_duration)}")
     log.info("=" * 64)
+    _emit_progress(100)
 
     return _build_result(
         success=success,
