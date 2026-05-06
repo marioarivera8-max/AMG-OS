@@ -598,6 +598,23 @@ def _work_dir_from_decision_log(decision_log: Optional[dict]) -> Optional[Path]:
     return video_path.parent / f"{video_path.stem}_amg_v11"
 
 
+def _resolve_scene_work_dir(scene_id: str, decision_log: Optional[dict]) -> Optional[Path]:
+    """Pick a usable scene work dir for UI actions.
+
+    Decision logs from pod-side runs often carry pod-local scene paths
+    under /data/pod_uploads/... which do not exist on the controller.
+    Always prefer an existing path; fall back to controller-extracted
+    /data/work_dirs/<safe_scene_id>/ when needed.
+    """
+    dlog_work_dir = _work_dir_from_decision_log(decision_log)
+    if dlog_work_dir and dlog_work_dir.is_dir():
+        return dlog_work_dir
+    fallback = _find_work_dir(scene_id)
+    if fallback and fallback.is_dir():
+        return fallback
+    return dlog_work_dir or fallback
+
+
 def _artifact_allowed_roots() -> List[Path]:
     """
     Limit file-serving to AMG data + configured incoming roots.
@@ -1991,7 +2008,9 @@ def create_app() -> FastAPI:
     async def scene_detail(request: Request, scene_id: str, saved: int = 0):
         decision_log = _load_decision_log(scene_id)
         reviewed = _load_reviewed(scene_id)
-        work_dir = _work_dir_from_decision_log(decision_log) or _find_work_dir(scene_id)
+        dlog_work_dir = _work_dir_from_decision_log(decision_log)
+        fallback_work_dir = _find_work_dir(scene_id)
+        work_dir = _resolve_scene_work_dir(scene_id, decision_log)
         covers = []
         contact_sheet = None
         insight = None
@@ -2048,6 +2067,24 @@ def create_app() -> FastAPI:
                 "saved": saved,
                 "active_nav": "library",
                 "health": _health_snapshot(),
+                "agent_debug_state": {
+                    "scene_id": scene_id,
+                    "decision_log_loaded": bool(decision_log),
+                    "decision_log_scene_path": (
+                        (decision_log or {}).get("scene_path")
+                        if isinstance(decision_log, dict)
+                        else None
+                    ),
+                    "dlog_work_dir": str(dlog_work_dir) if dlog_work_dir else None,
+                    "dlog_work_dir_exists": bool(dlog_work_dir and Path(dlog_work_dir).is_dir()),
+                    "fallback_work_dir": str(fallback_work_dir) if fallback_work_dir else None,
+                    "fallback_work_dir_exists": bool(
+                        fallback_work_dir and Path(fallback_work_dir).is_dir()
+                    ),
+                    "selected_work_dir": str(work_dir) if work_dir else None,
+                    "selected_work_dir_exists": bool(work_dir and Path(work_dir).is_dir()),
+                    "covers_rendered": len(covers),
+                },
             },
         )
 
@@ -2057,7 +2094,7 @@ def create_app() -> FastAPI:
         decision_log = _load_decision_log(scene_id)
         if not decision_log:
             raise HTTPException(404, "No decision log for that scene")
-        work_dir = _work_dir_from_decision_log(decision_log) or _find_work_dir(scene_id)
+        work_dir = _resolve_scene_work_dir(scene_id, decision_log)
         if not work_dir:
             raise HTTPException(404, "Work directory missing")
         reviewed = _load_reviewed(scene_id)
@@ -2101,7 +2138,7 @@ def create_app() -> FastAPI:
             title_tone = TITLE_TONE_DEFAULT
 
         decision_log = _load_decision_log(scene_id)
-        work_dir = _work_dir_from_decision_log(decision_log) or _find_work_dir(scene_id)
+        work_dir = _resolve_scene_work_dir(scene_id, decision_log)
         cover_items = _cover_items(scene_id, decision_log, work_dir)
         soft_thumbnail = _load_soft_thumbnail(work_dir)
         selected = []

@@ -35,6 +35,7 @@ import io
 import json
 import os
 import shutil
+import tempfile
 import time
 import zipfile
 from abc import ABC, abstractmethod
@@ -329,18 +330,46 @@ class RunpodBackend(JobBackend):
         # Decrypt the credential up front (before paying for a pod). If the
         # credential store is misconfigured, fail FAST with no GPU charges.
         rclone_config = store.get_remote(cloud_source.remote)
+        upload_fallback_video: Optional[Path] = None
 
-        return self._run_with_lifecycle(
-            on_log=on_log,
-            on_progress=on_progress,
-            submit=lambda pod_id: self._submit_cloud_job(
-                pod_id,
-                remote=cloud_source.remote,
-                path=cloud_source.path,
-                rclone_config=rclone_config,
-                scene_id=cloud_source.scene_id,
-            ),
-        )
+        def _submit_with_fallback(pod_id: str) -> str:
+            nonlocal upload_fallback_video
+            try:
+                return self._submit_cloud_job(
+                    pod_id,
+                    remote=cloud_source.remote,
+                    path=cloud_source.path,
+                    rclone_config=rclone_config,
+                    scene_id=cloud_source.scene_id,
+                )
+            except RuntimeError as exc:
+                msg = str(exc)
+                if "no cloud submit route" not in msg:
+                    raise
+                on_log(
+                    "[runpod] pod lacks cloud-submit routes; "
+                    "falling back to controller-side rclone download + /jobs upload"
+                )
+                upload_fallback_video = self._download_cloud_source_for_upload(
+                    cloud_source=cloud_source,
+                    rclone_config=rclone_config,
+                    on_log=on_log,
+                    on_progress=on_progress,
+                )
+                return self._submit_job(pod_id, upload_fallback_video)
+
+        try:
+            return self._run_with_lifecycle(
+                on_log=on_log,
+                on_progress=on_progress,
+                submit=_submit_with_fallback,
+            )
+        finally:
+            if upload_fallback_video is not None:
+                try:
+                    shutil.rmtree(upload_fallback_video.parent.parent, ignore_errors=True)
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
 
     def _run_with_lifecycle(
         self,
@@ -544,6 +573,66 @@ class RunpodBackend(JobBackend):
             f"pod {pod_id} has no cloud submit route (HTTP 404 on /jobs/cloud "
             f"and /jobs-cloud). Body: {last_txt}"
         )
+
+    def _download_cloud_source_for_upload(
+        self,
+        *,
+        cloud_source: CloudSource,
+        rclone_config: str,
+        on_log: LogHook,
+        on_progress: ProgressHook,
+    ) -> Path:
+        """Fallback path when pod cloud-submit routes are unavailable.
+
+        Download source on the controller via rclone, then upload with
+        multipart ``POST /jobs`` (which has proven more stable through
+        the Runpod proxy than ``POST /jobs/cloud`` on some pods).
+        """
+        from amg.cloud.rclone import Rclone, RcloneError
+
+        scene_folder = (cloud_source.scene_id or Path(cloud_source.path).stem).strip() or "cloud_job"
+        root = DATA_DIR / "cloud_submit_fallback" / f"{int(time.time())}_{scene_folder[:80]}"
+        download_dir = root / scene_folder
+        download_dir.mkdir(parents=True, exist_ok=True)
+
+        cfg_fd, cfg_path = tempfile.mkstemp(prefix="amg-rclone-", suffix=".conf")
+        try:
+            with os.fdopen(cfg_fd, "w") as fh:
+                fh.write(rclone_config)
+            try:
+                os.chmod(cfg_path, 0o600)
+            except OSError:
+                pass
+            on_log(
+                f"[runpod] fallback download {cloud_source.remote}:{cloud_source.path} "
+                f"-> {download_dir}"
+            )
+            try:
+                Rclone(config_path=Path(cfg_path)).copy(
+                    f"{cloud_source.remote}:{cloud_source.path.lstrip('/')}",
+                    download_dir,
+                    on_progress=lambda stats: on_progress(min(25, int(0.25 * stats.get("pct", 0)))),
+                    on_log=lambda line: on_log(f"[rclone-fallback] {line}"),
+                )
+            except RcloneError as exc:
+                raise RuntimeError(f"fallback rclone copy failed: {exc}") from exc
+        finally:
+            try:
+                os.unlink(cfg_path)
+            except OSError:
+                pass
+
+        expected = download_dir / Path(cloud_source.path).name
+        video_path = expected if expected.is_file() else next(
+            (p for p in download_dir.iterdir() if p.is_file() and not p.name.startswith(".")),
+            None,
+        )
+        if video_path is None:
+            raise RuntimeError(
+                f"fallback rclone copy reported success but no file landed in {download_dir}"
+            )
+        on_log(f"[runpod] fallback download complete -> {video_path}")
+        return video_path
 
     def _wait_for_job(
         self,
