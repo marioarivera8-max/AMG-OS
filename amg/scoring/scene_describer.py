@@ -186,8 +186,15 @@ def generate_titles_with_insight(
     titles = parsed["titles"] if parsed["titles"] else _fallback_titles(
         studio, performers, scene_type, genres, n_suggestions
     )
+    titles = _sanitize_title_candidates(titles)
+    if not titles:
+        log.warn("All AI titles filtered as low-quality, using fallback templates")
+        titles = _fallback_titles(studio, performers, scene_type, genres, n_suggestions)
     lead = _lead_performer_name(performers)
     titles = _enforce_lead_performer_in_titles(titles, lead)
+    titles = _sanitize_title_candidates(titles)
+    if not titles:
+        titles = _fallback_titles(studio, performers, scene_type, genres, n_suggestions)
     long_desc = _enforce_lead_performer_in_description(parsed.get("long_description", ""), lead)
     titles = _annotate(titles)
     categories = _prioritize_tokens(
@@ -206,6 +213,45 @@ def generate_titles_with_insight(
         "title_tone": title_tone,
         "ai_used": True,
     }
+
+
+def _sanitize_title_candidates(titles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Remove malformed/repetitive title candidates (common model failure mode).
+    """
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for t in titles or []:
+        raw = (t.get("text") or "").strip()
+        text = re.sub(r"\s+", " ", raw).strip(" \"'")
+        if not text:
+            continue
+        lower = text.lower()
+        if lower in seen:
+            continue
+        # Reject highly repetitive gibberish-like outputs.
+        words = re.findall(r"[A-Za-z0-9']+", lower)
+        if words:
+            uniq_ratio = len(set(words)) / max(1, len(words))
+            if len(words) >= 10 and uniq_ratio < 0.35:
+                continue
+            max_run = 1
+            run = 1
+            for i in range(1, len(words)):
+                if words[i] == words[i - 1]:
+                    run += 1
+                    max_run = max(max_run, run)
+                else:
+                    run = 1
+            if max_run >= 4:
+                continue
+        if len(text) < 12:
+            continue
+        if len(text) > 110:
+            text = text[:110].rstrip()
+        seen.add(lower)
+        out.append({**t, "text": text})
+    return out
 
 
 def summarize_positions(saved_covers: List[Dict[str, Any]]) -> Dict[str, int]:
