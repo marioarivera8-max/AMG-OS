@@ -5,11 +5,19 @@ Claude Code, Aider, Continue, etc.). Read this first.
 
 ## What this project is
 
-AMG OS — local-first Python pipeline that processes adult VOD scenes
-for Amy's B2B distribution business. Replaces a manual Photoshop
-"pick ~15 cover frames per scene" workflow. Local-only because
-Anthropic / OpenAI / Google vision APIs prohibit adult content;
-Ollama + qwen2.5vl on Apple Silicon is the only viable path.
+AMG OS — Python pipeline that processes adult VOD scenes for Amy's B2B
+distribution business. Replaces a manual Photoshop "pick ~15 cover frames
+per scene" workflow.
+
+As of **2026-05-06** the system runs as a **cloud-hosted edition** —
+controller VM on Hetzner + on-demand RTX 4090 pods on Runpod, accessible
+to the operator at https://amg.exoticplug.app . The local-first v11.x
+pipeline still works (`amg process <video>` from the Mac venv) but is
+no longer the production path.
+
+The pipeline is local-Ollama-on-the-pod by design (qwen2.5vl on the
+GPU). Anthropic / OpenAI / Google vision APIs prohibit adult content,
+so cloud GPU + local Ollama on that GPU is the only viable path.
 
 ## Read these before doing substantive work
 
@@ -18,16 +26,28 @@ In order of importance for getting current:
 1. **`TOMORROW.md`** — current state, what's open, where the operator
    wants to go next. Updated at the end of each session. Read this
    first to know what's already done and what's contemplated.
-2. **`SESSION_NOTES_2026-05-04.md`** (or the latest dated equivalent)
-   — conversational context from the most recent session that the
-   git log + commit messages don't capture (rejected proposals,
-   misdiagnoses, design discussions, the "why").
-3. **`CLAUDE.md`** — standing project guide written for AI agents.
+2. **`AGENT_CONTEXT_2026-05-06_CLOUD_EDITION.md`** — comprehensive
+   handoff for the cloud edition (Hetzner + Runpod + GHA). Architecture,
+   bug graveyard from the cutover session, recovery procedures.
+3. **`SESSION_NOTES_2026-05-06.md`** (or the latest dated equivalent)
+   — conversational context that the git log + commit messages don't
+   capture (rejected proposals, misdiagnoses, design discussions).
+4. **`docs/cloud_edition_runbook.md`** — the deployment runbook
+   (Hetzner setup, Caddy + Let's Encrypt, GHCR, systemd, secrets).
+5. **`docs/WINDOWS_G14_SETUP.md`** — only relevant if you're on the
+   Windows G14 machine and need to recreate dev environment context.
+6. **`CLAUDE.md`** — standing project guide written for AI agents.
    Architecture, conventions, what NOT to do. Originally written
    for Claude Code but the content is tool-agnostic.
-4. **`CLAUDE_CODE_HANDOFF.md`** — the operator's strategic brief.
-   Business context, locked decisions (Tauri, HTMX, Python 3.12),
-   v11.2 regression history, what's deferred and why.
+7. **`CLAUDE_CODE_HANDOFF.md`** — the operator's strategic brief.
+   Business context, locked decisions, v11.2 regression history, what's
+   deferred and why. Pre-dates the cloud pivot but the working
+   agreements still apply.
+
+The 2026-05-04-era docs (`AGENT_CONTEXT_2026-05-04_LATEST.md`,
+`SESSION_NOTES_2026-05-04.md`) describe local-only training/scoring
+work. That work is paused but valid — read those if Mario wants to
+resume that branch.
 5. **`README.md`** — user-facing setup + usage. Read this if you need
    to know how `amg verify` works or which env vars Ollama needs.
 
