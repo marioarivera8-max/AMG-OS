@@ -46,18 +46,26 @@ Procedure:
 6. When job moves to "Recent completed", click into it. View the contact sheet.
 7. Eyeball it.
 
-## Open issue: network volume in wrong DC
+## Resolved: network volume DC swap (2026-05-06 PM)
 
-`AMG_RUNPOD_NETWORK_VOLUME_ID=higomno9lt` was working but the volume's pinned
-to **US-NE-1** which currently has zero 4090 / A6000 / L40 capacity. Every pod
-provision returned HTTP 500 instantly. We blanked the env var to unblock; now
-pods provision wherever capacity is hot, but every cold boot pays the 5 GB
-model pull (~3-5 min).
+Old volume `higomno9lt` in **US-NE-1** deleted; new 20 GB volume
+`ibrfa4p6o1` (`amg-ollama-cache`) created in **US-CA-2**. Env var
+`AMG_RUNPOD_NETWORK_VOLUME_ID=ibrfa4p6o1` is live in
+`/etc/amg/controller.env`; controller restarted and confirmed picking up
+the new value (`docker exec amg-controller printenv | grep
+AMG_RUNPOD_NETWORK_VOLUME_ID`).
 
-To fix (when not blocked on smoke test): delete the US-NE-1 volume, create a
-new 20 GB volume in **US-CA-2** or **US-GA-1**, plug ID back into
-`/etc/amg/controller.env`, restart controller. Procedure detailed in the
-context doc under "How to recover the volume situation."
+Effect on next runs:
+- **First pipeline run after the swap** still pays the model pull
+  (~5 GB / 3–5 min) because the volume is empty — but the pull writes
+  to the volume this time.
+- **Every run after that** skips the model pull. Cold boot drops to
+  ~2–3 min (just the docker image pull).
+
+Validation step (do once on the next smoke test): after a successful
+run, SSH into the running pod via Runpod's web terminal and
+`ls /workspace/ollama/manifests/registry.ollama.ai/library/qwen2.5vl/`
+— if you see a manifest there, the volume is being used.
 
 ## Other open items, in priority order
 
@@ -65,12 +73,21 @@ context doc under "How to recover the volume situation."
    each video cold-boots its own pod. Need `RunpodBackend._run_with_lifecycle`
    to: provision-once → drain-queue → idle-timer → terminate. ½–1 day.
 
-2. **Investigate the prior-agent UI WIP** that's still untracked or modified:
-   - `_job_card.html` — HTMX polling removed locally, intentional?
-   - `_insight_panel.html` — cosmetic tweaks (cap titles at 8, preserve form state)
-   - `tests/test_ui_kept_bundle.py` — new, untracked
-   Don't ship blindly. Read the prior session notes if they exist; if not,
-   evaluate against the live UI behavior.
+2. ~~Investigate the prior-agent UI WIP...~~ **Resolved 2026-05-06 PM.**
+   The Mac agent triaged all four files (`_job_card.html`,
+   `_insight_panel.html`, `scoring/scene_describer.py`,
+   `tests/test_ui_kept_bundle.py`), pushed them to a `wip/` branch, and
+   the G14 agent cherry-picked each file as its own commit onto `main`
+   (`9e89c46`, `f5d3e51`, `616bd0d`, `6c5eeba`). The transient
+   `wip/2026-05-06-mac-ui-leftovers` branch is deleted. Three follow-up
+   holes were called out in the commit bodies and should be addressed
+   when next touching those files:
+   - `scene_describer.py`: gibberish-rejection rules have no test
+     coverage; silent 110-char truncation; the twice-called sanitize
+     papers over a suspected bug in `_enforce_lead_performer_in_titles`.
+   - `_insight_panel.html`: leftover `style="grid-column: 1 / -1;"` on
+     the bottom `<details>` is a no-op without a grid parent — clean up
+     when next touching review-page layout.
 
 3. **Cover-quality smoke test on a long-form scene.** The verified run was
    on a ~10 min scene (NG008/muvie.mp4, 2.84 GB). Try a 45-min scene to
@@ -85,6 +102,33 @@ context doc under "How to recover the volume situation."
    {operator,reviewer,admin}`. Don't actually wire it up until Mario onboards
    Amy or a contractor; over-building auth before there are real users invites
    bugs and confusion.
+
+## Mac retirement — open ops items (raised by Mac data sweep, 2026-05-06 PM)
+
+The Mac agent did a full sweep before the operator retires the Mac. Most
+things are already on GitHub or in the cloud; these aren't:
+
+1. **Back up `/etc/amg/controller.env` somewhere durable.** Operator does
+   not have 1Password yet. `AMG_CREDENTIALS_KEY` is the only truly
+   unrecoverable secret in there (losing it bricks the encrypted rclone
+   configs). Plan: `scp` the env file off the Hetzner box and stash it in
+   a private gdrive folder under `gdrive_amy:Copy of Public
+   Links/AMG_OS_data/`. The G14 agent will do this; queued.
+2. **Migrate four Mac-only data dirs** to the same gdrive folder so the
+   learning loop has continuity later:
+   - `data/studio_profiles/` (operator-tuned thresholds, ~1.7 KB)
+   - `data/decision_logs/` (20 files, 228 KB)
+   - `data/reviewed/` (9 operator decisions)
+   - `data/operator_feedback/feedback.jsonl` (60 KB)
+   Operator runs the `tar czf ... && rclone copy ...` on the Mac (one
+   command, ~1 minute, ~1 MB total). G14 agent then `rclone copy`s back
+   to the Hetzner box and untars to `/var/lib/amg/data/`.
+3. **`data/training/`** (~8 MB) — preserve only if Mario plans to resume
+   the May-4 training/scoring work. Otherwise skip.
+4. **Mac-side SSH key revocation** — not strictly necessary while the
+   Mac sits in a drawer; do this in 30 seconds if/when the Mac is
+   actually wiped/sold/donated. Procedure: remove the Mac's pubkey from
+   `/root/.ssh/authorized_keys` on the controller.
 
 ## Things that are NOT pending (deferred / done)
 

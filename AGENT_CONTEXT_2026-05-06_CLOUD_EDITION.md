@@ -119,35 +119,26 @@ dir is created on the volume itself on first boot.
 
 ## What's currently NOT working (the open issue)
 
-**The network volume Mario created is in `US-NE-1` (Newark) but Runpod
-has zero 4090 / A6000 / L40 / L40S capacity in US-NE-1 right now.** A
-volume is hard-pinned to its DC; attaching it forces the pod into the
-same DC. Result: `create_pod` returns
-`HTTP 500 "could not find any pods with required specifications"` instantly.
+~~The network volume Mario created is in `US-NE-1`...~~
 
-**Current workaround (active):** `AMG_RUNPOD_NETWORK_VOLUME_ID` is blank
-in `/etc/amg/controller.env` on the Hetzner box, so pods spin up wherever
-4090s are hot. Cold boot pays the model pull (~5 GB, ~3-5 min) every time
-because nothing is cached. Functional but slow.
+**RESOLVED 2026-05-06 PM.** Old volume `higomno9lt` (US-NE-1) deleted;
+new 20 GB volume `ibrfa4p6o1` (`amg-ollama-cache`) created in
+**US-CA-2** — region with consistent 4090 capacity. Env var
+`AMG_RUNPOD_NETWORK_VOLUME_ID=ibrfa4p6o1` is live in
+`/etc/amg/controller.env`; controller restart confirmed via
+`docker exec amg-controller printenv`.
 
-**Volume info:**
-- Volume ID: `higomno9lt`
+The next pipeline run is the first cold boot against the empty
+new volume — it will still pay the ~5 GB / 3-5 min model pull, but
+the pull writes to the volume. Subsequent runs skip it (cold boot
+~2-3 min, just the docker image pull).
+
+**Volume info (current):**
+- Volume ID: `ibrfa4p6o1`
 - Name: `amg-ollama-cache`
 - Size: 20 GB
-- DC: US-NE-1
+- DC: US-CA-2
 - Cost: ~$1.40/mo
-
-**Three options to resolve:**
-1. **Wait it out** — US-NE-1 capacity fluctuates, may come back. Cheapest.
-2. **Move the volume** — delete + recreate in **US-CA-2** or **US-GA-1**
-   (consistent 4090 capacity historically). Then plug back into
-   `/etc/amg/controller.env`. Procedure documented at the bottom.
-3. **Drop the volume entirely** — accept the 5-min model pull per cold
-   boot. Saves $1.40/mo. Reasonable for low-volume use.
-
-When the volume IS attached and the DC has capacity, cold boot drops from
-~6-10 min to ~2-3 min (just the docker image pull, not the model pull).
-That's the upside.
 
 ---
 
@@ -236,7 +227,7 @@ That's the upside.
 | `AMG_RUNPOD_API_KEY` | Runpod REST API key | https://runpod.io/console/user/settings → API Keys |
 | `AMG_RUNPOD_IMAGE` | `ghcr.io/marioarivera8-max/amg-pod:latest` | hardcoded |
 | `AMG_RUNPOD_GPU_TYPE` | `NVIDIA GeForce RTX 4090` | hardcoded |
-| `AMG_RUNPOD_NETWORK_VOLUME_ID` | Optional — empty right now (US-NE-1 capacity issue) | see "Volume info" above |
+| `AMG_RUNPOD_NETWORK_VOLUME_ID` | `ibrfa4p6o1` — `amg-ollama-cache` 20 GB in US-CA-2 (set 2026-05-06 PM) | see "Volume info" above |
 | `AMG_DATA_DIR` | `/data` (mounted from `/var/lib/amg/data` on host) | runbook |
 | `AMG_JOB_BACKEND` | `runpod` | runbook |
 
@@ -294,6 +285,11 @@ These were tempting but rejected as scope creep (or punted to a later phase):
 ---
 
 ## How to recover the volume situation
+
+> **Note (2026-05-06 PM):** This was performed once already — the volume
+> now lives in US-CA-2 as `ibrfa4p6o1`. Kept here as a runbook in case
+> US-CA-2 ever loses 4090 capacity and the swap needs to be redone in
+> another DC.
 
 When you have a few minutes, do this once:
 
