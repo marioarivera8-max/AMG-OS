@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
@@ -888,6 +888,25 @@ def _dispatcher_loop() -> None:
         _dispatcher_thread = None
 
 
+def _cloud_browse_error(request, remote: str, path: str, message: str):
+    """Render the cloud-browser partial in error mode (rclone failure,
+    unknown remote, etc.). Surfacing the rclone error verbatim is fine —
+    the operator is the only one who sees this and the message guides
+    debugging (e.g. "expired token, re-run rclone authorize")."""
+    return templates.TemplateResponse(
+        request=request,
+        name="_cloud_browse.html",
+        context={
+            "request": request,
+            "remote": remote,
+            "path": path,
+            "parent_path": "",
+            "entries": [],
+            "error_msg": message,
+        },
+    )
+
+
 def _run_job(job_id: str) -> None:
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -899,6 +918,7 @@ def _run_job(job_id: str) -> None:
         job["message"] = f"Running · priority #{job.get('queue_seq')}"
         job["current_phase"] = "ingest"
         video_path = Path(job["video_path"])
+        cloud_source = job.get("cloud_source")
 
     try:
         backend = get_backend()
@@ -906,7 +926,10 @@ def _run_job(job_id: str) -> None:
         # remote backend already streams pod-side log lines through
         # on_log, and starting the disk-tail watcher would just clobber
         # those entries with an empty list when no local log exists.
-        if backend.name == "local":
+        # Also, cloud-source jobs don't have a local log file even on the
+        # LocalBackend (the rclone-then-pipeline path writes to the same
+        # logger but not to the per-job tail file the watcher expects).
+        if backend.name == "local" and cloud_source is None:
             _start_live_log_tail(job_id)
 
         def _on_log(line: str) -> None:
@@ -928,7 +951,19 @@ def _run_job(job_id: str) -> None:
                     return
                 j["progress_pct"] = max(0, min(100, int(pct)))
 
-        result = backend.run_job(video_path, on_log=_on_log, on_progress=_on_progress)
+        if cloud_source is not None:
+            from amg.cloud.job_backend import CloudSource
+            result = backend.run_cloud_job(
+                CloudSource(
+                    remote=cloud_source["remote"],
+                    path=cloud_source["path"],
+                    scene_id=cloud_source.get("scene_id"),
+                ),
+                on_log=_on_log,
+                on_progress=_on_progress,
+            )
+        else:
+            result = backend.run_job(video_path, on_log=_on_log, on_progress=_on_progress)
         with _jobs_lock:
             job = _jobs[job_id]
             job["result"] = result
@@ -1720,6 +1755,144 @@ def create_app() -> FastAPI:
             request=request,
             name="_job_card.html",
             context={"request": request, "job": _decorate_job(job), "health": _health_snapshot()},
+        )
+
+    # ---------- cloud-source picker (Phase 2) ----------
+
+    @app.get("/cloud", response_class=HTMLResponse)
+    async def cloud_picker(request: Request):
+        from amg.cloud.credentials import (
+            CredentialKeyMissingError,
+            CredentialStore,
+        )
+        try:
+            store = CredentialStore()
+            remotes = store.list_remotes()
+        except CredentialKeyMissingError as exc:
+            remotes = []
+            error_msg = str(exc)
+        else:
+            error_msg = None
+        return templates.TemplateResponse(
+            request=request,
+            name="cloud_picker.html",
+            context={
+                "request": request,
+                "active_nav": "cloud",
+                "remotes": remotes,
+                "error_msg": error_msg,
+                "health": _health_snapshot(),
+            },
+        )
+
+    @app.get("/partials/cloud-browse", response_class=HTMLResponse)
+    async def cloud_browse_partial(
+        request: Request,
+        remote: str,
+        path: str = "",
+    ):
+        from amg.cloud.credentials import (
+            CredentialNotFoundError,
+            CredentialStore,
+        )
+        from amg.cloud.rclone import (
+            Rclone,
+            RcloneError,
+            RcloneNotFoundError,
+        )
+        store = CredentialStore()
+        try:
+            with store.materialize_config(names=[remote]) as cfg_path:
+                try:
+                    entries = Rclone(config_path=cfg_path).lsjson(
+                        remote,
+                        path,
+                        max_depth=1,
+                        videos_only=True,
+                    )
+                except RcloneNotFoundError as exc:
+                    return _cloud_browse_error(request, remote, path, str(exc))
+                except RcloneError as exc:
+                    return _cloud_browse_error(request, remote, path, str(exc))
+        except CredentialNotFoundError as exc:
+            return _cloud_browse_error(request, remote, path, str(exc))
+
+        # Build parent crumb so the template can render a "go up" link
+        # without needing to do path arithmetic in Jinja.
+        parent_path = ""
+        if path:
+            parent_path = "/".join(path.rstrip("/").split("/")[:-1])
+
+        return templates.TemplateResponse(
+            request=request,
+            name="_cloud_browse.html",
+            context={
+                "request": request,
+                "remote": remote,
+                "path": path,
+                "parent_path": parent_path,
+                "entries": sorted(entries, key=lambda e: (not e.get("IsDir"), e.get("Name", ""))),
+            },
+        )
+
+    @app.post("/jobs/cloud")
+    async def create_cloud_job(
+        request: Request,
+        remote: str = Form(...),
+        path: str = Form(...),
+        scene_id: str = Form(default=""),
+    ):
+        if not remote.strip() or not path.strip():
+            raise HTTPException(status_code=400, detail="remote and path are required")
+        # Verify the credential actually exists before queueing — better to
+        # 400 here than queue a job that's guaranteed to fail.
+        from amg.cloud.credentials import (
+            CredentialKeyMissingError,
+            CredentialNotFoundError,
+            CredentialStore,
+        )
+        try:
+            CredentialStore().get_remote(remote)
+        except CredentialNotFoundError:
+            raise HTTPException(status_code=400, detail=f"unknown remote: {remote!r}")
+        except CredentialKeyMissingError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+        job_id = uuid.uuid4().hex[:10]
+        scene_folder = scene_id.strip() or Path(path).stem or job_id
+        global _job_seq_counter
+        with _jobs_lock:
+            _job_seq_counter += 1
+            queue_seq = _job_seq_counter
+        job = {
+            "job_id": job_id,
+            "status": "queued",
+            "scene_id": scene_folder,
+            "video_path": "",  # populated by the backend after rclone copy
+            "cloud_source": {"remote": remote, "path": path, "scene_id": scene_folder},
+            "created_at": datetime.now().isoformat(),
+            "message": f"Queued · cloud · {remote}:{path} · priority #{queue_seq}",
+            "result": None,
+            "source_mode": "cloud",
+            "log_tail": [],
+            "current_phase": None,
+            "progress_pct": 0,
+            "queue_seq": queue_seq,
+        }
+        with _jobs_lock:
+            _jobs[job_id] = job
+            _job_fifo.append(job_id)
+        _start_dispatcher_if_needed()
+
+        # The operator submitted from /cloud, but the queue panel + per-job
+        # cards live on /. Send them home so they can watch the job they
+        # just kicked off — HX-Redirect makes HTMX do a full navigation
+        # rather than swapping the queue HTML into the cloud-browser slot.
+        return Response(
+            status_code=204,
+            headers={
+                "HX-Redirect": f"/?job_id={job_id}",
+            },
         )
 
     @app.get("/library", response_class=HTMLResponse)

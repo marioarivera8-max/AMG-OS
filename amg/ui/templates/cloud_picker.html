@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="page-head between">
+  <div>
+    <h1>Cloud Storage</h1>
+    <div class="sub">
+      Browse a configured rclone remote and process a video directly from cloud storage.
+      The pod downloads it at datacenter-to-datacenter speed — your computer never holds the file.
+    </div>
+  </div>
+</div>
+
+{% if error_msg %}
+  <div class="card" style="border-left: 3px solid var(--color-warn, #d2a72d); padding: 12px 14px; margin-bottom: 16px;">
+    <strong>Cloud storage not configured:</strong>
+    <div class="muted" style="margin-top: 4px; font-size: 13px;">{{ error_msg }}</div>
+  </div>
+{% endif %}
+
+{% if not remotes %}
+  <div class="card" style="padding: 18px;">
+    <h3 style="margin-top: 0;">No remotes configured yet</h3>
+    <p class="muted">
+      Add a Drive / Dropbox / Mega remote with the <code>amg cloud-remote</code> CLI:
+    </p>
+    <pre style="background: rgba(255,255,255,0.04); padding: 10px 12px; border-radius: 6px; font-size: 12px; overflow-x: auto;">
+# 1. Generate the rclone config on your laptop
+rclone config
+
+# 2. Copy the resulting [section] block to a file (e.g. amy_drive.ini)
+# 3. Import into the controller
+amg cloud-remote add --from-file amy_drive.ini --notes "Amy's Drive"
+amg cloud-remote list
+    </pre>
+  </div>
+{% else %}
+  <div class="grid grid-2" style="gap: 24px; align-items: flex-start;">
+    <div>
+      <h3 class="card-section-title">Remotes</h3>
+      <div class="stack" id="cloud-remotes-list">
+        {% for r in remotes %}
+          <button
+            type="button"
+            class="card card-tight"
+            style="display: flex; flex-direction: column; gap: 4px; align-items: flex-start; text-align: left; cursor: pointer; width: 100%; border: none; color: inherit;"
+            hx-get="/partials/cloud-browse?remote={{ r.name | urlencode }}&path="
+            hx-target="#cloud-browse-panel"
+            hx-swap="innerHTML"
+          >
+            <div style="display: flex; gap: 10px; align-items: center;">
+              <span class="pill">{{ r.kind }}</span>
+              <strong>{{ r.name }}</strong>
+            </div>
+            {% if r.notes %}
+              <div class="muted" style="font-size: 12px;">{{ r.notes }}</div>
+            {% endif %}
+            <div class="muted" style="font-size: 11px;">
+              added {{ r.created_at }}{% if r.last_used_at %} · last used {{ r.last_used_at }}{% endif %}
+            </div>
+          </button>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div>
+      <h3 class="card-section-title">Browse</h3>
+      <div id="cloud-browse-panel" class="card" style="padding: 14px; min-height: 180px;">
+        <div class="muted" style="font-size: 13px;">
+          Select a remote on the left to start browsing.
+        </div>
+      </div>
+    </div>
+  </div>
+{% endif %}
+
+{% endblock %}

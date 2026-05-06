@@ -1,0 +1,70 @@
+{% if error_msg %}
+  <div style="border-left: 3px solid var(--color-warn, #d2a72d); padding: 8px 12px; margin-bottom: 10px;">
+    <strong>Browse failed</strong>
+    <div class="muted" style="margin-top: 4px; font-size: 12px;">{{ error_msg }}</div>
+  </div>
+{% endif %}
+
+<div class="row between" style="margin-bottom: 10px; align-items: center;">
+  <div style="font-family: var(--mono, monospace); font-size: 12px;">
+    <span class="muted">{{ remote }}:</span><span>{{ path or "/" }}</span>
+  </div>
+  {% if path %}
+    <button
+      type="button"
+      class="btn btn-ghost"
+      style="font-size: 12px; padding: 4px 10px;"
+      hx-get="/partials/cloud-browse?remote={{ remote | urlencode }}&path={{ parent_path | urlencode }}"
+      hx-target="#cloud-browse-panel"
+      hx-swap="innerHTML"
+    >
+      ↑ Up
+    </button>
+  {% endif %}
+</div>
+
+{% if entries %}
+  <div class="stack" style="gap: 4px;">
+    {% for entry in entries %}
+      {% set entry_path = (path + "/" + entry.Name) if path else entry.Name %}
+      {% if entry.IsDir %}
+        <button
+          type="button"
+          style="display: flex; gap: 10px; align-items: center; text-align: left; padding: 8px 10px; border: 1px solid var(--color-border, #2a2a2a); border-radius: 6px; background: rgba(255,255,255,0.02); color: inherit; cursor: pointer; width: 100%;"
+          hx-get="/partials/cloud-browse?remote={{ remote | urlencode }}&path={{ entry_path | urlencode }}"
+          hx-target="#cloud-browse-panel"
+          hx-swap="innerHTML"
+        >
+          <span aria-hidden="true">📁</span>
+          <span>{{ entry.Name }}</span>
+        </button>
+      {% else %}
+        <form
+          method="POST"
+          action="/jobs/cloud"
+          hx-post="/jobs/cloud"
+          hx-target="#process-jobs-panel"
+          hx-swap="innerHTML"
+          style="display: flex; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--color-border, #2a2a2a); border-radius: 6px;"
+        >
+          <span aria-hidden="true">🎬</span>
+          <span style="flex: 1;">{{ entry.Name }}</span>
+          <span class="muted" style="font-size: 11px;">
+            {% if entry.Size %}{{ (entry.Size / (1024 * 1024)) | round(1) }} MB{% endif %}
+          </span>
+          <input type="hidden" name="remote" value="{{ remote }}" />
+          <input type="hidden" name="path" value="{{ entry_path }}" />
+          <button type="submit" class="btn-primary" style="font-size: 12px; padding: 4px 10px;">
+            Process
+          </button>
+        </form>
+      {% endif %}
+    {% endfor %}
+  </div>
+{% else %}
+  {% if not error_msg %}
+    <div class="muted" style="font-size: 13px;">
+      No video files or subfolders here.
+    </div>
+  {% endif %}
+{% endif %}
