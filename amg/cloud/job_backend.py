@@ -12,10 +12,13 @@ This module abstracts "run a scene through the pipeline" behind a
 
 * ``LocalBackend`` — calls ``process_scene`` in-process. Identical to the
   v11.x behavior; this is the default so the existing single-Mac workflow
-  keeps working unchanged.
+  keeps working unchanged. Also implements ``run_cloud_job`` so the
+  end-to-end cloud-source path is testable on the Mac (operator just needs
+  rclone installed locally + a populated credential store).
 * ``RunpodBackend`` — provisions a Runpod GPU pod (via ``RunpodClient``),
-  uploads the video to the pod-worker, polls until done, downloads the
-  resulting zip, extracts it locally, and tears the pod down.
+  uploads the video (or hands the pod an rclone reference), polls until
+  done, downloads the resulting zip, extracts it locally, and tears the
+  pod down.
 
 Selection happens via ``AMG_JOB_BACKEND`` (``local`` | ``runpod``). The
 backend factory (``get_backend``) is the only thing the dispatcher needs
@@ -35,6 +38,7 @@ import shutil
 import time
 import zipfile
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -56,6 +60,19 @@ def _noop_log(_line: str) -> None:
 
 def _noop_progress(_pct: int) -> None:
     return None
+
+
+@dataclass(frozen=True)
+class CloudSource:
+    """Reference to a video sitting in cloud storage.
+
+    ``remote`` matches the rclone remote name (the ``[gdrive_amy]`` section
+    header in the stored config), ``path`` is the path within that remote
+    (e.g. ``incoming/scene4.mp4``)."""
+
+    remote: str
+    path: str
+    scene_id: Optional[str] = None
 
 
 # ---------- interface ----------
@@ -85,6 +102,28 @@ class JobBackend(ABC):
         either is invoked."""
         raise NotImplementedError
 
+    def run_cloud_job(
+        self,
+        cloud_source: CloudSource,
+        *,
+        on_log: LogHook = _noop_log,
+        on_progress: ProgressHook = _noop_progress,
+    ) -> Dict[str, Any]:
+        """Execute the pipeline against a cloud-storage reference.
+
+        The backend looks up the rclone credential for ``cloud_source.remote``
+        in the local CredentialStore (controller-side), then either copies
+        the file locally (LocalBackend) or hands the rclone reference to
+        the pod and lets it download directly (RunpodBackend).
+
+        Default is to refuse — backends that haven't opted in raise
+        ``NotImplementedError`` instead of silently doing the wrong thing
+        (e.g. uploading the entire 4 GB scene through the controller again,
+        defeating the whole point of the cloud-source path)."""
+        raise NotImplementedError(
+            f"backend {self.name!r} does not support cloud-source jobs"
+        )
+
     def shutdown(self) -> None:
         """Optional cleanup hook (close http sessions, terminate warm pods, …).
         Default is a no-op; override in subclasses that need it."""
@@ -94,7 +133,12 @@ class JobBackend(ABC):
 
 
 class LocalBackend(JobBackend):
-    """Run the pipeline in-process. Same behavior as v11.x."""
+    """Run the pipeline in-process. Same behavior as v11.x.
+
+    The cloud-source path uses the rclone CLI on this host (operator's
+    Mac) to pull the file into a local download dir, then runs the
+    pipeline against it. Useful for end-to-end testing of the
+    cloud-source flow without spinning up a Runpod pod."""
 
     name = "local"
 
@@ -112,6 +156,65 @@ class LocalBackend(JobBackend):
         on_progress(100)
         on_log(
             f"[local] finished: success={result.get('success')} "
+            f"covers_saved={result.get('covers_saved')}"
+        )
+        return result
+
+    def run_cloud_job(
+        self,
+        cloud_source: CloudSource,
+        *,
+        on_log: LogHook = _noop_log,
+        on_progress: ProgressHook = _noop_progress,
+    ) -> Dict[str, Any]:
+        # Imports deferred so AMG_JOB_BACKEND=local without rclone installed
+        # doesn't break import of this module.
+        from amg.cloud.credentials import CredentialStore
+        from amg.cloud.rclone import Rclone, RcloneError, RcloneNotFoundError
+        from amg.pipeline import process_scene
+
+        scene_folder = (cloud_source.scene_id or Path(cloud_source.path).stem).strip()
+        if not scene_folder:
+            scene_folder = "cloud_job"
+        download_dir = DATA_DIR / "cloud_downloads" / scene_folder
+        download_dir.mkdir(parents=True, exist_ok=True)
+
+        store = CredentialStore()
+        on_log(
+            f"[local-cloud] rclone copy {cloud_source.remote}:{cloud_source.path} "
+            f"-> {download_dir}"
+        )
+        with store.materialize_config(names=[cloud_source.remote]) as cfg_path:
+            try:
+                Rclone(config_path=cfg_path).copy(
+                    f"{cloud_source.remote}:{cloud_source.path.lstrip('/')}",
+                    download_dir,
+                    on_progress=lambda stats: on_progress(int(0.5 * stats.get("pct", 0))),
+                    on_log=lambda line: on_log(f"[rclone] {line}"),
+                )
+            except RcloneNotFoundError as exc:
+                raise RuntimeError(
+                    f"local cloud-source jobs need rclone installed: {exc}"
+                ) from exc
+            except RcloneError as exc:
+                raise RuntimeError(f"rclone copy failed: {exc}") from exc
+
+        expected = download_dir / Path(cloud_source.path).name
+        video_path = expected if expected.is_file() else next(
+            (p for p in download_dir.iterdir() if p.is_file() and not p.name.startswith(".")),
+            None,
+        )
+        if video_path is None:
+            raise RuntimeError(
+                f"rclone copy reported success but no file landed in {download_dir}"
+            )
+
+        on_log(f"[local-cloud] download complete -> {video_path}")
+        on_progress(50)
+        result = process_scene(video_path)
+        on_progress(100)
+        on_log(
+            f"[local-cloud] finished: success={result.get('success')} "
             f"covers_saved={result.get('covers_saved')}"
         )
         return result
@@ -203,6 +306,54 @@ class RunpodBackend(JobBackend):
         on_log: LogHook = _noop_log,
         on_progress: ProgressHook = _noop_progress,
     ) -> Dict[str, Any]:
+        return self._run_with_lifecycle(
+            on_log=on_log,
+            on_progress=on_progress,
+            submit=lambda pod_id: self._submit_job(pod_id, video_path),
+        )
+
+    def run_cloud_job(
+        self,
+        cloud_source: CloudSource,
+        *,
+        on_log: LogHook = _noop_log,
+        on_progress: ProgressHook = _noop_progress,
+    ) -> Dict[str, Any]:
+        from amg.cloud.credentials import CredentialStore
+
+        store = CredentialStore()
+        on_log(
+            f"[runpod] cloud-source job: {cloud_source.remote}:{cloud_source.path}"
+        )
+
+        # Decrypt the credential up front (before paying for a pod). If the
+        # credential store is misconfigured, fail FAST with no GPU charges.
+        rclone_config = store.get_remote(cloud_source.remote)
+
+        return self._run_with_lifecycle(
+            on_log=on_log,
+            on_progress=on_progress,
+            submit=lambda pod_id: self._submit_cloud_job(
+                pod_id,
+                remote=cloud_source.remote,
+                path=cloud_source.path,
+                rclone_config=rclone_config,
+                scene_id=cloud_source.scene_id,
+            ),
+        )
+
+    def _run_with_lifecycle(
+        self,
+        *,
+        on_log: LogHook,
+        on_progress: ProgressHook,
+        submit: Callable[[str], str],
+    ) -> Dict[str, Any]:
+        """Pod lifecycle template shared by both upload and cloud-source jobs.
+
+        ``submit`` is called once the pod is RUNNING and must return the
+        pod-side job_id. Splitting this out avoids duplicating the
+        provision/wait/download/teardown sequence between the two paths."""
         on_log(f"[runpod] provisioning GPU pod (gpu={self._spec.gpu_type})")
         spec = self._spec
         # Pass the same shared secret into the pod's env so the worker on the
@@ -216,9 +367,9 @@ class RunpodBackend(JobBackend):
         )
         pod_id = pod["id"]
         try:
-            on_log(f"[runpod] pod {pod_id} RUNNING; uploading video")
+            on_log(f"[runpod] pod {pod_id} RUNNING; submitting job")
             on_progress(15)
-            job_id = self._submit_job(pod_id, video_path)
+            job_id = submit(pod_id)
             on_log(f"[runpod] pod accepted job {job_id}; waiting for pipeline")
             result = self._wait_for_job(pod_id, job_id, on_log, on_progress)
             on_log(f"[runpod] pipeline done; pulling artifacts")
@@ -269,6 +420,36 @@ class RunpodBackend(JobBackend):
             )
         body = resp.json()
         return body["job_id"]
+
+    def _submit_cloud_job(
+        self,
+        pod_id: str,
+        *,
+        remote: str,
+        path: str,
+        rclone_config: str,
+        scene_id: Optional[str],
+    ) -> str:
+        url = f"{self._pod_base_url(pod_id)}/jobs/cloud"
+        body = {
+            "remote": remote,
+            "path": path,
+            "rclone_config": rclone_config,
+        }
+        if scene_id:
+            body["scene_id"] = scene_id
+        resp = self._session.post(
+            url,
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json=body,
+            timeout=60.0,  # the request itself is tiny — body is just the JSON
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"pod {pod_id} rejected /jobs/cloud submit: "
+                f"HTTP {resp.status_code} {resp.text[:300]}"
+            )
+        return resp.json()["job_id"]
 
     def _wait_for_job(
         self,
@@ -374,6 +555,7 @@ def get_backend() -> JobBackend:
 
 
 __all__ = [
+    "CloudSource",
     "JobBackend",
     "LocalBackend",
     "LogHook",

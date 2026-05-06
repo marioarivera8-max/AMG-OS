@@ -110,9 +110,14 @@ class _FakeHttpSession:
             raise RuntimeError("fake http session has no more queued responses")
         return self.responses.pop(0)
 
-    def post(self, url, *, headers=None, files=None, data=None, timeout=None):
-        self.calls.append({"method": "POST", "url": url, "data": data,
-                           "files": list(files.keys()) if files else None})
+    def post(self, url, *, headers=None, files=None, data=None, json=None, timeout=None):
+        self.calls.append({
+            "method": "POST",
+            "url": url,
+            "data": data,
+            "files": list(files.keys()) if files else None,
+            "json": json,
+        })
         return self._next()
 
     def get(self, url, *, headers=None, timeout=None, stream=False):
@@ -317,3 +322,278 @@ def test_runpod_backend_run_timeout(runpod_backend, tmp_path, monkeypatch):
     video.write_bytes(b"x")
     with pytest.raises(RuntimeError, match="did not finish"):
         backend.run_job(video)
+
+
+# --- cloud-source jobs ------------------------------------------------------
+
+
+SAMPLE_RCLONE_CONFIG = (
+    "[gdrive_amy]\n"
+    "type = drive\n"
+    "token = {\"access_token\":\"ya29.fake\"}\n"
+)
+
+
+@pytest.fixture
+def populated_credential_store(tmp_path, monkeypatch):
+    """A real CredentialStore in a per-test tmp dir, with a single
+    'gdrive_amy' remote already added."""
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("AMG_CREDENTIALS_DB", str(tmp_path / "creds.sqlite"))
+    monkeypatch.setenv("AMG_CREDENTIALS_KEY", Fernet.generate_key().decode("ascii"))
+    from amg.cloud.credentials import CredentialStore
+
+    store = CredentialStore()
+    store.add_remote(SAMPLE_RCLONE_CONFIG, notes="amy's drive")
+    return store
+
+
+class TestJobBackendInterface:
+    def test_default_run_cloud_job_raises(self):
+        from amg.cloud.job_backend import CloudSource, JobBackend
+
+        class _MinimalBackend(JobBackend):
+            name = "minimal"
+
+            def run_job(self, video_path, *, on_log=None, on_progress=None):
+                return {"success": True}
+
+        with pytest.raises(NotImplementedError, match="cloud-source"):
+            _MinimalBackend().run_cloud_job(
+                CloudSource(remote="x", path="y")
+            )
+
+
+class TestLocalBackendCloud:
+    def _stub_rclone(self, monkeypatch, *, drop_file_named: str = "scene4.mp4"):
+        """Replace amg.cloud.rclone.Rclone with a stub that 'downloads' one
+        fake file into the destination directory."""
+        from amg.cloud import rclone as rclone_mod
+
+        class _StubRclone:
+            def __init__(self, *_a, **_kw):
+                pass
+
+            def copy(self, src, dst, *, on_progress=None, on_log=None, **_kw):
+                Path(dst).mkdir(parents=True, exist_ok=True)
+                (Path(dst) / drop_file_named).write_bytes(b"fake video bytes")
+                if on_progress is not None:
+                    on_progress({"done": "1 MiB", "total": "1 MiB", "pct": 100})
+                if on_log is not None:
+                    on_log("INFO  : copied 1 file")
+
+        monkeypatch.setattr(rclone_mod, "Rclone", _StubRclone)
+
+    def test_local_cloud_job_round_trip(
+        self, populated_credential_store, monkeypatch, tmp_path
+    ):
+        # AMG_DATA_DIR controls where downloads land.
+        monkeypatch.setenv("AMG_DATA_DIR", str(tmp_path / "data"))
+
+        import importlib
+        import amg.config as cfg
+        importlib.reload(cfg)
+        import amg.cloud.job_backend as jb_mod
+        importlib.reload(jb_mod)
+
+        self._stub_rclone(monkeypatch, drop_file_named="scene4.mp4")
+
+        captured: Dict[str, Any] = {}
+
+        def _fake_process_scene(video_path):
+            captured["video_path"] = Path(video_path)
+            return {"success": True, "scene_id": "scene4", "covers_saved": 9}
+
+        import amg.pipeline as pipeline
+        monkeypatch.setattr(pipeline, "process_scene", _fake_process_scene)
+
+        from amg.cloud.job_backend import CloudSource, LocalBackend
+
+        backend = LocalBackend()
+        logs: List[str] = []
+        progresses: List[int] = []
+        result = backend.run_cloud_job(
+            CloudSource(remote="gdrive_amy", path="incoming/scene4.mp4"),
+            on_log=logs.append,
+            on_progress=progresses.append,
+        )
+
+        assert result["success"] is True
+        assert result["covers_saved"] == 9
+        # process_scene saw the rclone-downloaded file, not the cloud path.
+        assert captured["video_path"].name == "scene4.mp4"
+        assert captured["video_path"].is_file()
+        # Log surfaces both phases (rclone + pipeline).
+        assert any("rclone copy" in line for line in logs)
+        assert any("download complete" in line for line in logs)
+        # Progress ends at 100 (rclone fills 0..50, pipeline jumps to 100).
+        assert progresses[-1] == 100
+
+    def test_local_cloud_job_rclone_not_installed(
+        self, populated_credential_store, monkeypatch, tmp_path
+    ):
+        from amg.cloud import rclone as rclone_mod
+
+        class _MissingRclone:
+            def __init__(self, *_a, **_kw):
+                pass
+
+            def copy(self, *_a, **_kw):
+                raise rclone_mod.RcloneNotFoundError("rclone not on PATH")
+
+        monkeypatch.setattr(rclone_mod, "Rclone", _MissingRclone)
+        monkeypatch.setenv("AMG_DATA_DIR", str(tmp_path / "data"))
+
+        from amg.cloud.job_backend import CloudSource, LocalBackend
+
+        with pytest.raises(RuntimeError, match="rclone installed"):
+            LocalBackend().run_cloud_job(
+                CloudSource(remote="gdrive_amy", path="scene.mp4")
+            )
+
+    def test_local_cloud_job_unknown_remote(
+        self, populated_credential_store, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("AMG_DATA_DIR", str(tmp_path / "data"))
+
+        from amg.cloud.credentials import CredentialNotFoundError
+        from amg.cloud.job_backend import CloudSource, LocalBackend
+
+        with pytest.raises(CredentialNotFoundError):
+            LocalBackend().run_cloud_job(
+                CloudSource(remote="never_added", path="scene.mp4")
+            )
+
+
+class TestRunpodBackendCloud:
+    def test_runpod_cloud_job_full_happy_path(
+        self, runpod_backend, populated_credential_store, monkeypatch, tmp_path
+    ):
+        backend, client, session, work_root = runpod_backend
+        import amg.cloud.job_backend as jb
+        monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+        final_result = {"success": True, "scene_id": "scene-cloud", "covers_saved": 5}
+        zip_bytes = _make_zip_bytes({"out/cover_001.jpg": b"jpg"})
+
+        session.queue(
+            _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),  # POST /jobs/cloud
+            _FakePodResponse(200, {                                       # GET /jobs/j1
+                "status": "done",
+                "log_tail": ["downloading...", "process_scene done"],
+                "progress_pct": 100,
+                "result": final_result,
+            }),
+            _FakePodResponse(200, content=zip_bytes),                     # GET /jobs/j1/zip
+        )
+
+        from amg.cloud.job_backend import CloudSource
+
+        logs: List[str] = []
+        result = backend.run_cloud_job(
+            CloudSource(remote="gdrive_amy", path="incoming/scene4.mp4", scene_id="scene-cloud"),
+            on_log=logs.append,
+        )
+        assert result == final_result
+        assert client.provisioned, "should have provisioned a pod"
+        assert client.terminated == ["pod_test"], "should have terminated the pod"
+
+        # Verify the cloud path hit POST /jobs/cloud (not /jobs).
+        cloud_post = next(c for c in session.calls if c.get("method") == "POST")
+        assert cloud_post["url"].endswith("/jobs/cloud")
+
+        # Artifacts extracted under work_dirs/<scene_id>/.
+        extracted = work_root / "work_dirs" / "scene-cloud"
+        assert (extracted / "out" / "cover_001.jpg").read_bytes() == b"jpg"
+
+    def test_runpod_cloud_job_unknown_remote_skips_provisioning(
+        self, runpod_backend, populated_credential_store, monkeypatch
+    ):
+        """Credential lookup happens BEFORE provision_pod so a misconfig
+        doesn't burn a single second of GPU time."""
+        backend, client, _session, _ = runpod_backend
+        import amg.cloud.job_backend as jb
+        monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+        from amg.cloud.credentials import CredentialNotFoundError
+        from amg.cloud.job_backend import CloudSource
+
+        with pytest.raises(CredentialNotFoundError):
+            backend.run_cloud_job(
+                CloudSource(remote="never_added", path="scene.mp4")
+            )
+        assert client.provisioned == [], \
+            "controller must NOT provision a pod when the credential lookup fails"
+        assert client.terminated == [], \
+            "no pod was provisioned, so nothing should be terminated"
+
+    def test_runpod_cloud_job_pod_rejects_submit(
+        self, runpod_backend, populated_credential_store, monkeypatch
+    ):
+        backend, client, session, _ = runpod_backend
+        import amg.cloud.job_backend as jb
+        monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+        session.queue(_FakePodResponse(400, {"detail": "bad rclone_config"}))
+
+        from amg.cloud.job_backend import CloudSource
+
+        with pytest.raises(RuntimeError, match="rejected /jobs/cloud"):
+            backend.run_cloud_job(
+                CloudSource(remote="gdrive_amy", path="scene.mp4")
+            )
+        # Pod was provisioned then terminated (cleanup runs even on submit error).
+        assert client.terminated == ["pod_test"]
+
+    def test_runpod_cloud_job_decrypts_and_forwards_credential(
+        self, runpod_backend, populated_credential_store, monkeypatch
+    ):
+        """The decrypted rclone config must hit the pod's request body —
+        the pod can't run rclone without it."""
+        backend, _client, session, _ = runpod_backend
+        import amg.cloud.job_backend as jb
+        monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+        # Patch the fake session's POST to capture the JSON body, since the
+        # default _FakeHttpSession.post() doesn't store kwargs beyond data/files.
+        captured_body: Dict[str, Any] = {}
+        original_post = session.post
+
+        def _capturing_post(url, *, headers=None, files=None, data=None,
+                            json=None, timeout=None):
+            captured_body["json"] = json
+            captured_body["headers"] = headers
+            return original_post(url, headers=headers, files=files, data=data,
+                                 timeout=timeout)
+
+        session.post = _capturing_post
+
+        session.queue(
+            _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),
+            _FakePodResponse(200, {
+                "status": "done",
+                "log_tail": [],
+                "progress_pct": 100,
+                "result": {"success": True, "scene_id": "s", "covers_saved": 1},
+            }),
+            _FakePodResponse(200, content=_make_zip_bytes({"out/x.jpg": b"x"})),
+        )
+
+        from amg.cloud.job_backend import CloudSource
+
+        backend.run_cloud_job(
+            CloudSource(remote="gdrive_amy", path="incoming/scene4.mp4")
+        )
+
+        assert captured_body.get("json") is not None
+        body = captured_body["json"]
+        assert body["remote"] == "gdrive_amy"
+        assert body["path"] == "incoming/scene4.mp4"
+        # The decrypted rclone_config is in the body — without this the pod
+        # can't run rclone, so this is the test that catches "I forgot to
+        # call get_remote".
+        assert "[gdrive_amy]" in body["rclone_config"]
+        assert "ya29.fake" in body["rclone_config"]
+        # Bearer token present.
+        assert captured_body["headers"]["Authorization"].startswith("Bearer ")
