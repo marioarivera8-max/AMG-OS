@@ -6,8 +6,9 @@ commit 8f8cef0). Its only client is the controller VM's dispatcher; every
 endpoint except ``/healthz`` is gated by a per-pod bearer token that the
 controller passes in via ``AMG_POD_AUTH_TOKEN`` when the pod is provisioned.
 
-The worker accepts a video upload, runs ``amg.pipeline.process_scene``
-against it in a background thread, and lets the controller poll for status
+The worker accepts either an uploaded video OR a cloud-storage reference
+(rclone remote + path), runs ``amg.pipeline.process_scene`` against the
+result in a background thread, and lets the controller poll for status
 and pull back the resulting work-dir as a zip.
 
 Endpoints:
@@ -15,6 +16,11 @@ Endpoints:
 * ``POST /jobs`` (multipart) — start a job for an uploaded video. Returns
   ``{job_id, status: "queued"}``. The video is saved into
   ``AMG_DATA_DIR/pod_uploads/<job_id>/`` and the pipeline runs against it.
+* ``POST /jobs/cloud`` (JSON) — start a job that pulls the source from a
+  cloud-storage remote via rclone. The controller decrypts the relevant
+  credential and passes it in the request body so it lives only in pod
+  RAM (and a 0600 temp file) for the lifetime of the download. Status
+  flows: ``queued -> downloading -> running -> done|error``.
 * ``GET /jobs/{job_id}`` — poll status + log tail + result summary.
 * ``GET /jobs/{job_id}/zip`` — stream the entire scene work-dir (the
   ``out/...`` folder produced by the pipeline) back as a zip. The
@@ -57,6 +63,7 @@ from typing import Any, Deque, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from amg.config import DATA_DIR
@@ -135,11 +142,22 @@ class _JobTracker:
         self._lock = threading.Lock()
         self._max_retained = max_retained
 
-    def create(self, job_id: str, *, scene_id: str, video_path: Path, work_dir: Path) -> Dict[str, Any]:
+    def create(
+        self,
+        job_id: str,
+        *,
+        scene_id: str,
+        video_path: Path,
+        work_dir: Path,
+        source_kind: str = "upload",
+        cloud_source: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         with self._lock:
             job = {
                 "job_id": job_id,
                 "status": "queued",
+                "source_kind": source_kind,  # "upload" | "cloud"
+                "cloud_source": cloud_source,  # {"remote": ..., "path": ...} or None
                 "scene_id": scene_id,
                 "video_path": str(video_path),
                 "work_dir": str(work_dir),
@@ -149,6 +167,7 @@ class _JobTracker:
                 "log_tail": deque(maxlen=LOG_TAIL_LINES),
                 "result": None,
                 "error": None,
+                "download_pct": 0,
                 "progress_pct": 0,
             }
             self._jobs[job_id] = job
@@ -230,6 +249,129 @@ def _run_pipeline_in_thread(tracker: _JobTracker, job_id: str, video_path: Path)
         log.error(f"Job {job_id} failed: {exc}")
 
 
+def _write_temp_rclone_config(config_text: str, parent: Path) -> Path:
+    """Write ``config_text`` to a freshly-created 0600 file under ``parent``.
+
+    Returns the path. Caller is responsible for unlinking after the
+    download completes (or in a finally block on failure)."""
+    parent.mkdir(parents=True, exist_ok=True)
+    cfg_path = parent / f".rclone-{uuid.uuid4().hex[:8]}.conf"
+    fd = os.open(cfg_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fp:
+        fp.write(config_text)
+    return cfg_path
+
+
+def _locate_downloaded_video(download_dir: Path, expected_basename: str) -> Optional[Path]:
+    """Find the video that rclone copied into ``download_dir``.
+
+    rclone copy preserves the source filename, so the obvious match is
+    ``download_dir / expected_basename``. Fallback: pick the largest
+    file in the directory, since rclone might have written a temp
+    ``.partial`` file alongside on a retry. Returns ``None`` if the
+    directory is empty (= rclone produced no output despite reporting
+    success, which means an upstream config bug)."""
+    obvious = download_dir / expected_basename
+    if obvious.is_file():
+        return obvious
+    candidates = sorted(
+        (p for p in download_dir.iterdir() if p.is_file() and not p.name.startswith(".")),
+        key=lambda p: p.stat().st_size,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _run_cloud_job_in_thread(
+    tracker: _JobTracker,
+    job_id: str,
+    *,
+    remote: str,
+    remote_path: str,
+    rclone_config: str,
+    download_dir: Path,
+) -> None:
+    """rclone-copy the source then hand off to the pipeline runner.
+
+    The rclone config file is written to a sibling ``_creds`` directory
+    (NOT ``download_dir``, which gets zipped and shipped back to the
+    operator), set 0600, and unlinked the moment the copy finishes —
+    success or failure. The plaintext credential never outlives the
+    download phase."""
+    from amg.cloud.rclone import Rclone, RcloneError
+
+    tracker.update(job_id, status="downloading", started_at=_utcnow_iso())
+    tracker.append_log(
+        job_id,
+        f"[pod-worker] downloading {remote}:{remote_path} -> {download_dir}",
+    )
+
+    creds_dir = download_dir.parent / "_creds"
+    cfg_path: Optional[Path] = None
+    try:
+        cfg_path = _write_temp_rclone_config(rclone_config, creds_dir)
+
+        def _on_progress(stats: Dict[str, Any]) -> None:
+            tracker.update(job_id, download_pct=int(stats.get("pct", 0)))
+
+        def _on_log(line: str) -> None:
+            tracker.append_log(job_id, f"[rclone] {line}")
+
+        Rclone(config_path=cfg_path).copy(
+            f"{remote}:{remote_path.lstrip('/')}",
+            download_dir,
+            on_progress=_on_progress,
+            on_log=_on_log,
+        )
+    except RcloneError as exc:
+        tracker.update(
+            job_id,
+            status="error",
+            finished_at=_utcnow_iso(),
+            error=f"rclone copy failed: {exc}",
+        )
+        tracker.append_log(job_id, f"[pod-worker] rclone copy failed: {exc}")
+        log.error(f"Job {job_id} rclone copy failed: {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001 - any download failure must surface as error
+        tracker.update(
+            job_id,
+            status="error",
+            finished_at=_utcnow_iso(),
+            error=f"download setup failed: {exc}",
+        )
+        tracker.append_log(job_id, f"[pod-worker] download setup failed: {exc}")
+        log.error(f"Job {job_id} download setup failed: {exc}")
+        return
+    finally:
+        if cfg_path is not None:
+            try:
+                cfg_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                creds_dir.rmdir()
+            except OSError:
+                pass
+
+    tracker.update(job_id, download_pct=100)
+    expected = Path(remote_path).name
+    video_path = _locate_downloaded_video(download_dir, expected)
+    if video_path is None:
+        tracker.update(
+            job_id,
+            status="error",
+            finished_at=_utcnow_iso(),
+            error="rclone reported success but no file landed in the download dir",
+        )
+        tracker.append_log(job_id, "[pod-worker] no downloaded file found after rclone copy")
+        return
+
+    tracker.update(job_id, video_path=str(video_path))
+    tracker.append_log(job_id, f"[pod-worker] download complete -> {video_path}")
+    _run_pipeline_in_thread(tracker, job_id, video_path)
+
+
 # ---------- zip streaming ----------
 
 
@@ -247,6 +389,23 @@ def _stream_dir_as_zip(directory: Path):
                 zf.write(p, arcname=p.relative_to(directory))
     buf.seek(0)
     yield from iter(lambda: buf.read(64 * 1024), b"")
+
+
+# ---------- request models ----------
+
+
+class CloudJobRequest(BaseModel):
+    """JSON body for ``POST /jobs/cloud``.
+
+    ``rclone_config`` carries an entire rclone.conf-style section (the
+    ``[gdrive_amy]`` block including type and tokens). The pod writes
+    it to a 0600 temp file for the duration of the rclone copy and
+    deletes it the moment the copy finishes — success or failure."""
+
+    remote: str = Field(..., min_length=1, description="rclone remote name (no trailing colon)")
+    path: str = Field(..., min_length=1, description="path within the remote, e.g. 'incoming/scene4.mp4'")
+    rclone_config: str = Field(..., min_length=1, description="full rclone config section text")
+    scene_id: Optional[str] = Field(None, description="optional friendly id; defaults to filename stem")
 
 
 # ---------- app factory ----------
@@ -318,6 +477,59 @@ def create_app(*, auth_token: Optional[str] = None, tracker: Optional[_JobTracke
             "status": "queued",
             "bytes_received": bytes_written,
             "video_path": str(video_path),
+        }
+
+    @app.post("/jobs/cloud")
+    async def create_cloud_job(req: CloudJobRequest) -> Dict[str, Any]:
+        if ":" in req.remote:
+            raise HTTPException(
+                status_code=400,
+                detail="'remote' must be the bare remote name (no trailing colon)",
+            )
+        if "[" not in req.rclone_config or "type" not in req.rclone_config:
+            # Cheap structural check before we waste a thread on a doomed
+            # rclone invocation. The wrapper validates more rigorously.
+            raise HTTPException(
+                status_code=400,
+                detail="rclone_config does not look like a valid rclone section",
+            )
+        job_id = uuid.uuid4().hex[:12]
+        scene_folder = (req.scene_id or Path(req.path).stem).strip() or job_id
+        # Match the upload path's job_dir layout so /jobs/{id}/zip works the
+        # same way: the pipeline runs against `download_dir`, and we ship
+        # back the contents of `download_dir` (videos + outputs) as the zip.
+        download_dir = POD_UPLOADS_DIR / job_id / scene_folder
+        download_dir.mkdir(parents=True, exist_ok=True)
+
+        track.create(
+            job_id,
+            scene_id=scene_folder,
+            video_path=download_dir / Path(req.path).name,  # provisional; finalized after copy
+            work_dir=download_dir,
+            source_kind="cloud",
+            cloud_source={"remote": req.remote, "path": req.path},
+        )
+        thread = threading.Thread(
+            target=_run_cloud_job_in_thread,
+            kwargs={
+                "tracker": track,
+                "job_id": job_id,
+                "remote": req.remote,
+                "remote_path": req.path,
+                "rclone_config": req.rclone_config,
+                "download_dir": download_dir,
+            },
+            daemon=True,
+            name=f"pod-cloud-job-{job_id}",
+        )
+        thread.start()
+        log.info(f"Job {job_id} cloud-source queued: {req.remote}:{req.path}")
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "source_kind": "cloud",
+            "remote": req.remote,
+            "path": req.path,
         }
 
     @app.get("/jobs/{job_id}")

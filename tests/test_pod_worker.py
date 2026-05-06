@@ -243,6 +243,203 @@ class TestJobZip:
         assert r.status_code == 404
 
 
+# --- cloud-source jobs (POST /jobs/cloud) -----------------------------------
+
+
+class TestCloudJobs:
+    """The cloud-job path adds an rclone copy step in front of the pipeline.
+    Both the rclone wrapper and the pipeline are stubbed so these tests
+    don't touch the network or Ollama."""
+
+    SAMPLE_CONFIG = (
+        "[gdrive_amy]\n"
+        "type = drive\n"
+        "token = {\"access_token\":\"ya29.fake\"}\n"
+    )
+
+    def _stub_rclone_copy(self, monkeypatch, *, drop_file_named: str = "scene4.mp4"):
+        """Replace amg.cloud.rclone.Rclone with a stub that 'downloads' a
+        single fake file into the destination directory and emits one
+        progress callback so we can assert the wiring."""
+        from amg.cloud import rclone as rclone_mod
+
+        class _StubRclone:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def copy(self, src, dst, *, on_progress=None, on_log=None, **_kw):
+                dst_path = Path(dst)
+                dst_path.mkdir(parents=True, exist_ok=True)
+                (dst_path / drop_file_named).write_bytes(b"fake video bytes")
+                if on_progress is not None:
+                    on_progress({"done": "1 MiB", "total": "1 MiB", "pct": 100})
+                if on_log is not None:
+                    on_log("INFO  : copied 1 file")
+
+        monkeypatch.setattr(rclone_mod, "Rclone", _StubRclone)
+
+    def test_cloud_job_downloads_then_runs_pipeline(self, authed_client, monkeypatch):
+        client, pw = authed_client
+        self._stub_rclone_copy(monkeypatch, drop_file_named="scene4.mp4")
+
+        r = client.post(
+            "/jobs/cloud",
+            json={
+                "remote": "gdrive_amy",
+                "path": "incoming/scene4.mp4",
+                "rclone_config": self.SAMPLE_CONFIG,
+                "scene_id": "scene-cloud",
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "queued"
+        assert body["source_kind"] == "cloud"
+        assert body["remote"] == "gdrive_amy"
+        job_id = body["job_id"]
+
+        final = _wait_for_status(client, job_id, "done")
+        assert final is not None, "cloud job did not reach 'done'"
+        assert final["source_kind"] == "cloud"
+        assert final["cloud_source"] == {
+            "remote": "gdrive_amy",
+            "path": "incoming/scene4.mp4",
+        }
+        assert final["download_pct"] == 100
+        assert final["progress_pct"] == 100
+        assert final["result"]["covers_saved"] == 7
+        # Both phases logged.
+        assert any("downloading" in line for line in final["log_tail"])
+        assert any("download complete" in line for line in final["log_tail"])
+        assert any("starting process_scene" in line for line in final["log_tail"])
+        # The video the pipeline ran against is the file rclone "downloaded".
+        assert Path(final["video_path"]).name == "scene4.mp4"
+        assert Path(final["video_path"]).exists()
+
+    def test_cloud_job_credential_temp_file_cleaned_up(
+        self, authed_client, monkeypatch, pod_env
+    ):
+        client, pw = authed_client
+        self._stub_rclone_copy(monkeypatch)
+
+        r = client.post(
+            "/jobs/cloud",
+            json={
+                "remote": "gdrive_amy",
+                "path": "scene4.mp4",
+                "rclone_config": self.SAMPLE_CONFIG,
+            },
+        )
+        job_id = r.json()["job_id"]
+        _wait_for_status(client, job_id, "done")
+
+        # The _creds dir is a sibling of the per-job download dir; after
+        # cleanup neither it nor any *.conf inside it should remain.
+        uploads_root = pw.POD_UPLOADS_DIR / job_id
+        creds_dir = uploads_root / "_creds"
+        assert not creds_dir.exists(), \
+            "credential temp dir should be cleaned up after rclone copy"
+        # And no stray .conf files anywhere in the job tree.
+        leftover = list(uploads_root.rglob("*.conf"))
+        assert leftover == [], f"leaked credential file(s): {leftover}"
+
+    def test_cloud_job_rclone_failure_marks_error(self, authed_client, monkeypatch):
+        client, pw = authed_client
+        from amg.cloud import rclone as rclone_mod
+
+        class _ExplodingRclone:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def copy(self, *_args, **_kwargs):
+                raise rclone_mod.RcloneError("auth failure")
+
+        monkeypatch.setattr(rclone_mod, "Rclone", _ExplodingRclone)
+
+        r = client.post(
+            "/jobs/cloud",
+            json={
+                "remote": "gdrive_amy",
+                "path": "scene4.mp4",
+                "rclone_config": self.SAMPLE_CONFIG,
+            },
+        )
+        job_id = r.json()["job_id"]
+
+        final = _wait_for_status(client, job_id, "error")
+        assert final is not None, "rclone failure should mark the job error"
+        assert "rclone copy failed" in final["error"]
+        assert "auth failure" in final["error"]
+
+    def test_cloud_job_no_downloaded_file_marks_error(self, authed_client, monkeypatch):
+        client, _pw = authed_client
+        from amg.cloud import rclone as rclone_mod
+
+        class _NoOpRclone:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def copy(self, *_args, **_kwargs):
+                # rclone "succeeded" but produced nothing — config bug shape.
+                return None
+
+        monkeypatch.setattr(rclone_mod, "Rclone", _NoOpRclone)
+
+        r = client.post(
+            "/jobs/cloud",
+            json={
+                "remote": "gdrive_amy",
+                "path": "scene4.mp4",
+                "rclone_config": self.SAMPLE_CONFIG,
+            },
+        )
+        job_id = r.json()["job_id"]
+
+        final = _wait_for_status(client, job_id, "error")
+        assert final is not None
+        assert "no file landed" in final["error"]
+
+    def test_cloud_job_rejects_remote_with_colon(self, authed_client):
+        client, _ = authed_client
+        r = client.post(
+            "/jobs/cloud",
+            json={
+                "remote": "gdrive_amy:",
+                "path": "scene4.mp4",
+                "rclone_config": self.SAMPLE_CONFIG,
+            },
+        )
+        assert r.status_code == 400
+        assert "trailing colon" in r.json()["detail"]
+
+    def test_cloud_job_rejects_garbage_config(self, authed_client):
+        client, _ = authed_client
+        r = client.post(
+            "/jobs/cloud",
+            json={
+                "remote": "gdrive_amy",
+                "path": "scene4.mp4",
+                "rclone_config": "not actually rclone",
+            },
+        )
+        assert r.status_code == 400
+        assert "rclone_config" in r.json()["detail"]
+
+    def test_cloud_job_requires_auth(self, pod_env):
+        pw = pod_env["module"]
+        app = pw.create_app(auth_token=pod_env["token"])
+        client = TestClient(app)  # no Authorization header
+        r = client.post(
+            "/jobs/cloud",
+            json={
+                "remote": "gdrive_amy",
+                "path": "scene4.mp4",
+                "rclone_config": self.SAMPLE_CONFIG,
+            },
+        )
+        assert r.status_code == 401
+
+
 # --- job retention cap ------------------------------------------------------
 
 
