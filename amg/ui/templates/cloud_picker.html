@@ -1,6 +1,72 @@
 {% extends "base.html" %}
 {% block content %}
 
+<style>
+  .cloud-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    text-align: left;
+    padding: 10px 12px;
+    border: 1px solid var(--color-border, #2a2a2a);
+    border-radius: 6px;
+    background: rgba(255,255,255,0.02);
+    color: inherit;
+    cursor: pointer;
+    width: 100%;
+    transition: background 0.12s ease, border-color 0.12s ease, transform 0.05s ease;
+    font: inherit;
+  }
+  .cloud-row:hover {
+    background: rgba(255,255,255,0.06);
+    border-color: rgba(255,255,255,0.2);
+  }
+  .cloud-row:active {
+    transform: translateY(1px);
+  }
+  .cloud-row-dir {
+    cursor: pointer;
+  }
+  .cloud-row-file {
+    cursor: default;
+  }
+  .cloud-row-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cloud-row-chevron {
+    opacity: 0.4;
+    font-size: 18px;
+    line-height: 1;
+  }
+  .cloud-row-size {
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+  .cloud-row-process {
+    font-size: 12px;
+    padding: 6px 14px;
+    flex-shrink: 0;
+  }
+  /* HTMX request indicator: dim + non-interactive while a click is in flight. */
+  #cloud-browse-panel.htmx-request {
+    opacity: 0.55;
+    pointer-events: none;
+    position: relative;
+  }
+  #cloud-browse-panel.htmx-request::after {
+    content: "loading…";
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    font-size: 11px;
+    color: var(--color-muted, #9aa);
+    letter-spacing: 0.05em;
+  }
+</style>
+
 <div class="page-head between">
   <div>
     <h1>Cloud Storage</h1>

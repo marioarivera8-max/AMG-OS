@@ -17,6 +17,7 @@
       hx-get="/partials/cloud-browse?remote={{ remote | urlencode }}&path={{ parent_path | urlencode }}"
       hx-target="#cloud-browse-panel"
       hx-swap="innerHTML"
+      hx-indicator="#cloud-browse-panel"
     >
       ↑ Up
     </button>
@@ -30,31 +31,34 @@
       {% if entry.IsDir %}
         <button
           type="button"
-          style="display: flex; gap: 10px; align-items: center; text-align: left; padding: 8px 10px; border: 1px solid var(--color-border, #2a2a2a); border-radius: 6px; background: rgba(255,255,255,0.02); color: inherit; cursor: pointer; width: 100%;"
+          class="cloud-row cloud-row-dir"
           hx-get="/partials/cloud-browse?remote={{ remote | urlencode }}&path={{ entry_path | urlencode }}"
           hx-target="#cloud-browse-panel"
           hx-swap="innerHTML"
+          hx-indicator="#cloud-browse-panel"
         >
           <span aria-hidden="true">📁</span>
-          <span>{{ entry.Name }}</span>
+          <span class="cloud-row-name">{{ entry.Name }}</span>
+          <span aria-hidden="true" class="cloud-row-chevron">›</span>
         </button>
       {% else %}
         <form
           method="POST"
           action="/jobs/cloud"
           hx-post="/jobs/cloud"
-          hx-target="#process-jobs-panel"
-          hx-swap="innerHTML"
-          style="display: flex; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--color-border, #2a2a2a); border-radius: 6px;"
+          hx-target="this"
+          hx-swap="none"
+          hx-indicator="#cloud-browse-panel"
+          class="cloud-row cloud-row-file"
         >
           <span aria-hidden="true">🎬</span>
-          <span style="flex: 1;">{{ entry.Name }}</span>
-          <span class="muted" style="font-size: 11px;">
+          <span class="cloud-row-name">{{ entry.Name }}</span>
+          <span class="muted cloud-row-size">
             {% if entry.Size %}{{ (entry.Size / (1024 * 1024)) | round(1) }} MB{% endif %}
           </span>
           <input type="hidden" name="remote" value="{{ remote }}" />
           <input type="hidden" name="path" value="{{ entry_path }}" />
-          <button type="submit" class="btn-primary" style="font-size: 12px; padding: 4px 10px;">
+          <button type="submit" class="btn-primary cloud-row-process">
             Process
           </button>
         </form>
