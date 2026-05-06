@@ -521,8 +521,29 @@ def _scene_status(d: dict) -> tuple[str, str]:
 def _scene_summary(d: dict) -> dict:
     out = (d.get("outcomes") or {})
     saved_covers = out.get("saved_covers") or []
-    preview_path = saved_covers[0]["path"] if saved_covers else None
     sid = d.get("scene_id") or ""
+    preview_path: Optional[Path] = None
+    if saved_covers:
+        raw_path = (saved_covers[0] or {}).get("path")
+        if raw_path:
+            p = Path(raw_path)
+            if p.is_file():
+                preview_path = p
+    if preview_path is None:
+        # Cloud runs often persist pod-local cover paths in decision logs.
+        # Re-resolve against the controller's extracted work dir so library
+        # cards still render thumbnails.
+        work_dir = _resolve_scene_work_dir(sid, d)
+        covers_dir = (work_dir / "covers") if work_dir else None
+        if covers_dir and covers_dir.is_dir():
+            preferred = None
+            if saved_covers:
+                preferred_name = (saved_covers[0] or {}).get("filename")
+                if preferred_name:
+                    cand = covers_dir / str(preferred_name)
+                    if cand.is_file():
+                        preferred = cand
+            preview_path = preferred or next(iter(sorted(covers_dir.glob("*.jpg"))), None)
     status, status_cls = _scene_status(d)
     duration = (d.get("input") or {}).get("duration_sec") or 0
     input_blob = d.get("input") or {}
