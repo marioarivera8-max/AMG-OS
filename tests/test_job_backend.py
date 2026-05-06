@@ -342,6 +342,38 @@ def test_runpod_backend_run_timeout(runpod_backend, tmp_path, monkeypatch):
         backend.run_job(video)
 
 
+def test_runpod_backend_tolerates_transient_404_while_polling(runpod_backend, tmp_path, monkeypatch):
+    """A short burst of 404s on GET /jobs/{id} should retry, not fail."""
+    backend, client, session, work_root = runpod_backend
+    import amg.cloud.job_backend as jb
+    monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+    session.queue(
+        _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),       # POST /jobs
+        _FakePodResponse(404, {"detail": "unknown job"}),                   # transient poll miss
+        _FakePodResponse(404, {"detail": "unknown job"}),                   # transient poll miss
+        _FakePodResponse(200, {                                             # poll eventually succeeds
+            "status": "done",
+            "log_tail": [],
+            "progress_pct": 100,
+            "result": {"success": True, "scene_id": "scene-404", "covers_saved": 2},
+        }),
+        _FakePodResponse(200, content=_make_zip_bytes({"out/x.jpg": b"x"})),  # zip
+    )
+
+    video_dir = tmp_path / "scene-404"
+    video_dir.mkdir()
+    video = video_dir / "v.mp4"
+    video.write_bytes(b"x")
+
+    result = backend.run_job(video)
+    assert result["success"] is True
+    assert result["scene_id"] == "scene-404"
+    assert client.terminated == ["pod_test"]
+    extracted = work_root / "work_dirs" / "scene-404"
+    assert (extracted / "out" / "x.jpg").read_bytes() == b"x"
+
+
 def test_runpod_backend_bundle_layout_drops_decision_log_at_canonical_path(
     tmp_path, monkeypatch
 ):

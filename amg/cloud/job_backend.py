@@ -555,12 +555,25 @@ class RunpodBackend(JobBackend):
         url = f"{self._pod_base_url(pod_id)}/jobs/{job_id}"
         deadline = time.monotonic() + self._run_timeout_sec
         last_seen_log_idx = 0
+        transient_404s = 0
         while time.monotonic() < deadline:
             resp = self._session.get(url, headers=self._headers(), timeout=30.0)
             if resp.status_code != 200:
+                # Runpod proxy can briefly return 404 for /jobs/{id} right after
+                # a successful submit even though the worker accepted the job.
+                # Treat short 404 bursts as transient instead of failing the run.
+                if resp.status_code == 404 and transient_404s < 12:
+                    transient_404s += 1
+                    on_log(
+                        f"[runpod] transient 404 polling job {job_id} "
+                        f"(attempt {transient_404s}/12); retrying"
+                    )
+                    time.sleep(max(self._poll_interval_sec, 2.0))
+                    continue
                 raise RuntimeError(
                     f"pod {pod_id} job {job_id} poll failed: HTTP {resp.status_code}"
                 )
+            transient_404s = 0
             body = resp.json()
             # Stream new log lines through to the UI's per-job tail.
             tail = body.get("log_tail") or []
