@@ -28,6 +28,9 @@ data/
 # Tests, scripts, docs - not needed in the runtime image
 tests/
 scripts/
+# Exception: the pod-side entrypoint script IS part of the runtime image
+# (Dockerfile.pod COPY's it into /usr/local/bin/pod-entrypoint).
+!scripts/pod_entrypoint.sh
 docs/
 
 # Markdown files at repo root - context for humans, not the image
