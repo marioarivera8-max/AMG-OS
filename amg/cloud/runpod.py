@@ -305,11 +305,23 @@ class RunpodClient:
         ready_timeout: float = 600.0,
         poll_interval: float = 5.0,
     ) -> Dict[str, Any]:
-        """Create a pod and block until it's RUNNING with port mappings.
+        """Create a pod and block until Runpod reports desiredStatus=RUNNING.
 
-        Returns the final pod object. Caller is responsible for terminating
-        the pod when work is done (or for catching/wrapping this in a
-        try/finally with terminate_pod)."""
+        We deliberately do NOT wait for ``portMappings`` to populate. The
+        old GraphQL API returned that field eagerly, but the new REST
+        ``v1/pods`` response shape (observed live 2026-05-06) doesn't
+        include it at all — the field is null/absent for the entire pod
+        lifetime, so blocking on it just hangs until the readiness timeout.
+
+        We don't need it anyway. Runpod auto-routes
+        ``https://<pod-id>-<port>.proxy.runpod.net`` as soon as the
+        container starts listening, and the *real* readiness check
+        downstream is ``RunpodBackend._wait_for_pod_worker_ready()``,
+        which polls ``/healthz`` over that proxy URL.
+
+        Returns the final pod object. Caller is responsible for
+        terminating the pod when work is done (or for catching/wrapping
+        this in a try/finally with terminate_pod)."""
         pod = self.create_pod(spec)
         pod_id = pod.get("id")
         if not pod_id:
@@ -319,6 +331,7 @@ class RunpodClient:
                 pod_id,
                 timeout=ready_timeout,
                 poll_interval=poll_interval,
+                require_port_mappings=False,
             )
         except (RunpodError, RunpodTimeoutError):
             # Best-effort cleanup on a failed provision so we don't leak a pod

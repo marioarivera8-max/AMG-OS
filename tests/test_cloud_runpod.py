@@ -360,6 +360,36 @@ class TestProvisionPod:
         assert session.calls[1]["method"] == "GET"
         assert session.calls[1]["url"].endswith("/pods/pod_xyz")
 
+    def test_provision_returns_when_running_even_without_port_mappings(
+        self, client_factory
+    ):
+        """Regression test for the v1/pods REST API shape.
+
+        The new REST endpoint NEVER populates ``portMappings`` — that was a
+        GraphQL-API-era field. provision_pod must accept a bare RUNNING
+        status and return; the actual readiness signal is the
+        ``/healthz`` poll downstream in RunpodBackend, not metadata."""
+        client, _ = client_factory([
+            _FakeResponse(201, {"id": "pod_rest", "desiredStatus": "PROVISIONING"}),
+            _FakeResponse(200, {
+                "id": "pod_rest",
+                "desiredStatus": "RUNNING",
+                # No portMappings key at all — matches live REST response.
+                "ports": ["8000/http"],
+                "publicIp": "",
+                "machine": {},
+            }),
+        ])
+        from amg.cloud.runpod import PodSpec
+
+        pod = client.provision_pod(
+            PodSpec.from_env(),
+            ready_timeout=10.0,
+            poll_interval=0.0,
+        )
+        assert pod["desiredStatus"] == "RUNNING"
+        assert "portMappings" not in pod  # confirms we don't depend on it
+
     def test_provision_failure_terminates_pod_for_cleanup(self, client_factory):
         from amg.cloud.runpod import RunpodError
 
