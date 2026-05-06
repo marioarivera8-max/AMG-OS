@@ -1,12 +1,4 @@
-<div
-  id="job-{{ job.job_id }}"
-  class="card"
-  {% if job.status in ["queued", "running"] %}
-    hx-get="/jobs/{{ job.job_id }}"
-    hx-trigger="every 2s"
-    hx-swap="outerHTML"
-  {% endif %}
->
+<div id="job-{{ job.job_id }}" class="card">
   <div class="between">
     <div style="display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1;">
       <strong class="ellipsis">{{ job.scene_id or "(resolving…)" }}</strong>
