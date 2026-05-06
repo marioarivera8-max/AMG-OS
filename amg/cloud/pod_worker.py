@@ -17,10 +17,13 @@ Endpoints:
   ``{job_id, status: "queued"}``. The video is saved into
   ``AMG_DATA_DIR/pod_uploads/<job_id>/`` and the pipeline runs against it.
 * ``POST /jobs/cloud`` (JSON) — start a job that pulls the source from a
-  cloud-storage remote via rclone. The controller decrypts the relevant
-  credential and passes it in the request body so it lives only in pod
-  RAM (and a 0600 temp file) for the lifetime of the download. Status
+  cloud-storage remote via rclone. Alias: ``POST /jobs-cloud`` (same body —
+  some proxies mishandle nested ``/jobs/...`` paths). The controller decrypts
+  the relevant credential and passes it in the request body so it lives only
+  in pod RAM (and a 0600 temp file) for the lifetime of the download. Status
   flows: ``queued -> downloading -> running -> done|error``.
+* ``GET /jobs`` — list recent job ids (authenticated); used by the controller
+  readiness probe so we don't POST jobs until uvicorn has mounted all routes.
 * ``GET /jobs/{job_id}`` — poll status + log tail + result summary.
 * ``GET /jobs/{job_id}/zip`` — stream the entire scene work-dir (the
   ``out/...`` folder produced by the pipeline) back as a zip. The
@@ -459,55 +462,8 @@ def create_app(*, auth_token: Optional[str] = None, tracker: Optional[_JobTracke
         # proxy can probe liveness. Don't leak version numbers, env, etc.
         return {"ok": True}
 
-    @app.post("/jobs")
-    async def create_job(
-        video: UploadFile = File(...),
-        scene_id: Optional[str] = Form(None),
-    ) -> Dict[str, Any]:
-        if not video.filename:
-            raise HTTPException(status_code=400, detail="missing video filename")
-        job_id = uuid.uuid4().hex[:12]
-        # Each job gets its own folder so multiple jobs on the same warm pod
-        # don't clobber each other's uploads. The folder doubles as the work
-        # dir parent so process_scene's outputs land alongside the source.
-        scene_folder = (scene_id or Path(video.filename).stem).strip() or job_id
-        job_dir = POD_UPLOADS_DIR / job_id / scene_folder
-        job_dir.mkdir(parents=True, exist_ok=True)
-        video_path = job_dir / video.filename
-
-        # Stream the upload to disk in chunks so a 4GB scene doesn't blow up
-        # the pod's RAM.
-        bytes_written = 0
-        with video_path.open("wb") as f:
-            while True:
-                chunk = await video.read(1024 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-                bytes_written += len(chunk)
-        log.info(f"Job {job_id} uploaded {bytes_written} bytes -> {video_path}")
-
-        track.create(
-            job_id,
-            scene_id=scene_folder,
-            video_path=video_path,
-            work_dir=job_dir,
-        )
-        thread = threading.Thread(
-            target=_run_pipeline_in_thread,
-            args=(track, job_id, video_path),
-            daemon=True,
-            name=f"pod-job-{job_id}",
-        )
-        thread.start()
-        return {
-            "job_id": job_id,
-            "status": "queued",
-            "bytes_received": bytes_written,
-            "video_path": str(video_path),
-        }
-
     @app.post("/jobs/cloud")
+    @app.post("/jobs-cloud")
     async def create_cloud_job(req: CloudJobRequest) -> Dict[str, Any]:
         if ":" in req.remote:
             raise HTTPException(
@@ -566,16 +522,64 @@ def create_app(*, auth_token: Optional[str] = None, tracker: Optional[_JobTracke
             "path": req.path,
         }
 
+    @app.post("/jobs")
+    async def create_job(
+        video: UploadFile = File(...),
+        scene_id: Optional[str] = Form(None),
+    ) -> Dict[str, Any]:
+        if not video.filename:
+            raise HTTPException(status_code=400, detail="missing video filename")
+        job_id = uuid.uuid4().hex[:12]
+        # Each job gets its own folder so multiple jobs on the same warm pod
+        # don't clobber each other's uploads. The folder doubles as the work
+        # dir parent so process_scene's outputs land alongside the source.
+        scene_folder = (scene_id or Path(video.filename).stem).strip() or job_id
+        job_dir = POD_UPLOADS_DIR / job_id / scene_folder
+        job_dir.mkdir(parents=True, exist_ok=True)
+        video_path = job_dir / video.filename
+
+        # Stream the upload to disk in chunks so a 4GB scene doesn't blow up
+        # the pod's RAM.
+        bytes_written = 0
+        with video_path.open("wb") as f:
+            while True:
+                chunk = await video.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                bytes_written += len(chunk)
+        log.info(f"Job {job_id} uploaded {bytes_written} bytes -> {video_path}")
+
+        track.create(
+            job_id,
+            scene_id=scene_folder,
+            video_path=video_path,
+            work_dir=job_dir,
+        )
+        thread = threading.Thread(
+            target=_run_pipeline_in_thread,
+            args=(track, job_id, video_path),
+            daemon=True,
+            name=f"pod-job-{job_id}",
+        )
+        thread.start()
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "bytes_received": bytes_written,
+            "video_path": str(video_path),
+        }
+
+    @app.get("/jobs")
+    async def list_jobs() -> Dict[str, Any]:
+        return {"job_ids": track.list_ids()}
+
     @app.get("/jobs/{job_id}")
     async def get_job(job_id: str) -> Dict[str, Any]:
         j = track.serialize(job_id)
         if j is None:
             raise HTTPException(status_code=404, detail=f"unknown job: {job_id}")
         return j
-
-    @app.get("/jobs")
-    async def list_jobs() -> Dict[str, Any]:
-        return {"job_ids": track.list_ids()}
 
     @app.get("/jobs/{job_id}/zip")
     async def get_job_zip(job_id: str) -> StreamingResponse:

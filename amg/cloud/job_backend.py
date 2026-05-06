@@ -420,33 +420,61 @@ class RunpodBackend(JobBackend):
         timeout_sec: float = 600.0,
         poll_interval_sec: float = 5.0,
     ) -> None:
-        """Poll the pod's /healthz until it returns 200.
+        """Poll until the pod-worker FastAPI app is actually taking requests.
 
         Runpod marks a pod RUNNING the moment its container starts, but our
         pod entrypoint then has to (a) start ollama, (b) wait for it to be
         ready, (c) pre-pull qwen2.5vl on first boot (~5 min cold), then
-        (d) exec amg pod-worker. Until step (d), POSTs to /jobs fail with
-        connection refused. This method blocks the controller until the
-        pod-worker is actually serving requests.
+        (d) exec ``amg pod-worker``. Until step (d), TCP connects may succeed
+        at the proxy but no routes exist yet.
+
+        ``/healthz`` alone is insufficient — some proxies can satisfy probes
+        before uvicorn mounts our routes (brief window where POST
+        ``/jobs/cloud`` returns 404 empty-body while GET ``/healthz`` looks
+        fine). We therefore require **both**:
+
+          * GET ``/healthz`` → 200 (unauthenticated — proves TCP + routing),
+          * GET ``/jobs`` with our bearer token → 200 (proves pod-worker app +
+            auth middleware agree with the controller's secret).
 
         Phase 4 will distinguish "boot in progress" from "boot stuck"
-        based on /healthz body details. For now: a 200 = ready, anything
-        else = keep waiting.
+        based on richer readiness payloads.
         """
-        url = f"{self._pod_base_url(pod_id)}/healthz"
+        base = self._pod_base_url(pod_id)
+        health_url = f"{base}/healthz"
+        jobs_ping_url = f"{base}/jobs"
         deadline = time.monotonic() + float(timeout_sec)
         last_log_at = 0.0
         attempts = 0
         while time.monotonic() < deadline:
             attempts += 1
             try:
-                resp = self._session.get(url, timeout=10.0)
-                if resp.status_code == 200:
-                    on_log(f"[runpod] /healthz OK after {attempts} attempt(s)")
-                    return
+                h = self._session.get(health_url, timeout=10.0)
             except requests.RequestException:
-                # Pod-worker not yet listening — expected during cold boot.
                 pass
+            else:
+                if h.status_code != 200:
+                    pass
+                else:
+                    try:
+                        ping = self._session.get(
+                            jobs_ping_url, headers=self._headers(), timeout=10.0
+                        )
+                    except requests.RequestException:
+                        ping = None
+                    else:
+                        if ping.status_code == 401:
+                            raise RuntimeError(
+                                f"pod {pod_id} rejected bearer token on GET /jobs (HTTP 401). "
+                                "AMG_POD_AUTH_TOKEN on the controller must match the value "
+                                "injected into the pod env."
+                            )
+                        if ping.status_code == 200:
+                            on_log(
+                                f"[runpod] pod-worker ready (/healthz + /jobs OK after "
+                                f"{attempts} attempt(s))"
+                            )
+                            return
             now = time.monotonic()
             # Throttle progress logs so a 5-minute model pull doesn't spam.
             if now - last_log_at >= 30.0:
@@ -455,7 +483,7 @@ class RunpodBackend(JobBackend):
             time.sleep(poll_interval_sec)
         raise RuntimeError(
             f"pod {pod_id} did not become ready within {timeout_sec:.0f}s "
-            f"(after {attempts} /healthz checks). Likely Ollama failed to start "
+            f"(after {attempts} readiness checks). Likely Ollama failed to start "
             "or the model pull stalled — check the pod's container logs in the "
             "Runpod console."
         )
@@ -490,7 +518,7 @@ class RunpodBackend(JobBackend):
         rclone_config: str,
         scene_id: Optional[str],
     ) -> str:
-        url = f"{self._pod_base_url(pod_id)}/jobs/cloud"
+        base = self._pod_base_url(pod_id)
         body = {
             "remote": remote,
             "path": path,
@@ -498,18 +526,24 @@ class RunpodBackend(JobBackend):
         }
         if scene_id:
             body["scene_id"] = scene_id
-        resp = self._session.post(
-            url,
-            headers={**self._headers(), "Content-Type": "application/json"},
-            json=body,
-            timeout=60.0,  # the request itself is tiny — body is just the JSON
+        hdrs = {**self._headers(), "Content-Type": "application/json"}
+        last_txt = ""
+        for path_suffix in ("/jobs/cloud", "/jobs-cloud"):
+            url = f"{base}{path_suffix}"
+            resp = self._session.post(url, headers=hdrs, json=body, timeout=60.0)
+            last_txt = resp.text[:300]
+            if resp.status_code == 404:
+                continue
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"pod {pod_id} rejected cloud submit ({path_suffix}): "
+                    f"HTTP {resp.status_code} {last_txt}"
+                )
+            return resp.json()["job_id"]
+        raise RuntimeError(
+            f"pod {pod_id} has no cloud submit route (HTTP 404 on /jobs/cloud "
+            f"and /jobs-cloud). Body: {last_txt}"
         )
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"pod {pod_id} rejected /jobs/cloud submit: "
-                f"HTTP {resp.status_code} {resp.text[:300]}"
-            )
-        return resp.json()["job_id"]
 
     def _wait_for_job(
         self,

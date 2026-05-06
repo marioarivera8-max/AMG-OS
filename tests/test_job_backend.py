@@ -5,6 +5,7 @@ import io
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import urlparse
 
 import pytest
 
@@ -123,13 +124,17 @@ class _FakeHttpSession:
 
     def get(self, url, *, headers=None, timeout=None, stream=False):
         self.calls.append({"method": "GET", "url": url, "stream": stream})
-        # /healthz is the readiness probe the controller polls between
-        # provision and submit. Auto-respond OK so existing tests don't
-        # have to queue an extra response per call. Tests that want to
-        # exercise the readiness timeout pre-queue a non-200 + use
-        # auto_healthz_ok=False.
+        # /healthz is the TCP/proxy readiness probe. /jobs (authenticated)
+        # proves our FastAPI app + bearer middleware are mounted — the
+        # controller requires both before submitting work (see RunpodBackend
+        # ._wait_for_pod_worker_ready). Auto-respond so queue-based tests
+        # only model POST/poll/zip traffic.
         if self._auto_healthz_ok and url.endswith("/healthz"):
             return _FakePodResponse(200, {"status": "ok"})
+        if self._auto_healthz_ok:
+            path = urlparse(url).path.rstrip("/")
+            if path == "/jobs":
+                return _FakePodResponse(200, {"job_ids": []})
         return self._next()
 
     def close(self):
@@ -427,6 +432,7 @@ def test_runpod_backend_waits_for_pod_worker_healthz(runpod_backend, tmp_path, m
         _FakePodResponse(503, {}),                                     # /healthz - not ready
         _FakePodResponse(503, {}),                                     # /healthz - still not ready
         _FakePodResponse(200, {"status": "ok"}),                       # /healthz - ready!
+        _FakePodResponse(200, {"job_ids": []}),                        # GET /jobs - app mounted
         _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),   # POST /jobs
         _FakePodResponse(200, {"status": "done", "result": {"success": True, "scene_id": "s"},
                                "log_tail": [], "progress_pct": 100}),  # GET /jobs/j1
@@ -660,6 +666,44 @@ class TestRunpodBackendCloud:
         # at the local extracted path.
         assert Path(result["work_dir"]) == extracted
 
+    def test_runpod_cloud_job_falls_back_to_jobs_hyphen_on_404(
+        self, runpod_backend, populated_credential_store, monkeypatch, tmp_path
+    ):
+        """Some Runpod proxy edge cases return 404 on POST /jobs/cloud even
+        though the pod-worker is healthy; /jobs-cloud is a one-segment alias."""
+        backend, client, session, work_root = runpod_backend
+        import amg.cloud.job_backend as jb
+        monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+        final_result = {"success": True, "scene_id": "scene-hy", "covers_saved": 3}
+        zip_bytes = _make_zip_bytes({"out/x.jpg": b"x"})
+
+        session.queue(
+            _FakePodResponse(404, {"detail": "not found"}),
+            _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),
+            _FakePodResponse(200, {
+                "status": "done",
+                "log_tail": [],
+                "progress_pct": 100,
+                "result": final_result,
+            }),
+            _FakePodResponse(200, content=zip_bytes),
+        )
+
+        from amg.cloud.job_backend import CloudSource
+
+        result = backend.run_cloud_job(
+            CloudSource(remote="gdrive_amy", path="incoming/x.mp4", scene_id="scene-hy"),
+        )
+        assert result["covers_saved"] == 3
+        posts = [c for c in session.calls if c.get("method") == "POST"]
+        assert len(posts) == 2
+        assert posts[0]["url"].endswith("/jobs/cloud")
+        assert posts[1]["url"].endswith("/jobs-cloud")
+
+        extracted = work_root / "work_dirs" / "scene-hy"
+        assert (extracted / "out" / "x.jpg").read_bytes() == b"x"
+
     def test_runpod_cloud_job_unknown_remote_skips_provisioning(
         self, runpod_backend, populated_credential_store, monkeypatch
     ):
@@ -692,7 +736,7 @@ class TestRunpodBackendCloud:
 
         from amg.cloud.job_backend import CloudSource
 
-        with pytest.raises(RuntimeError, match="rejected /jobs/cloud"):
+        with pytest.raises(RuntimeError, match="rejected cloud submit"):
             backend.run_cloud_job(
                 CloudSource(remote="gdrive_amy", path="scene.mp4")
             )

@@ -432,6 +432,27 @@ class TestCloudJobs:
         assert Path(final["video_path"]).name == "scene4.mp4"
         assert Path(final["video_path"]).exists()
 
+    def test_jobs_hyphen_alias_matches_jobs_cloud(self, authed_client, monkeypatch):
+        client, _ = authed_client
+        self._stub_rclone_copy(monkeypatch, drop_file_named="scene4.mp4")
+
+        r = client.post(
+            "/jobs-cloud",
+            json={
+                "remote": "gdrive_amy",
+                "path": "incoming/scene4.mp4",
+                "rclone_config": self.SAMPLE_CONFIG,
+                "scene_id": "scene-hyphen",
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["source_kind"] == "cloud"
+        job_id = body["job_id"]
+        final = _wait_for_status(client, job_id, "done")
+        assert final is not None
+        assert final["result"]["covers_saved"] == 7
+
     def test_cloud_job_credential_temp_file_cleaned_up(
         self, authed_client, monkeypatch, pod_env
     ):
