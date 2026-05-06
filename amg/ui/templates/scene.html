@@ -67,8 +67,44 @@
           Keyboard: 1 keep, 2 maybe, 3 reject, 0 clear, j/k or [/] move between covers.
         </div>
       </div>
-      {% include "_insight_panel.html" %}
 
+      {% if finalized_items and finalized_items|length > 0 %}
+      <div class="card" style="margin-top: 12px;">
+        <div class="between" style="align-items: center;">
+          <h3 class="card-section-title" style="margin: 0;">Finalized Thumbnails <span class="muted">{{ finalized_items | length }}</span></h3>
+          {% if kept_zip_path %}
+            <a class="btn btn-ghost" href="/artifact?path={{ kept_zip_path | urlencode }}" download>Download finalized zip</a>
+          {% endif %}
+        </div>
+        <div class="cover-grid" style="margin-top: 10px;">
+          {% for f in finalized_items %}
+            <div class="cover-card" data-finalized-card="1">
+              <div class="review-thumb-window">
+                <img
+                  src="/artifact?path={{ f.path | urlencode }}"
+                  alt="{{ f.filename }}"
+                  loading="lazy"
+                  class="review-thumb-image js-thumb-preview"
+                  data-preview-src="/artifact?path={{ f.path | urlencode }}"
+                  data-preview-caption="{{ f.filename }}"
+                />
+              </div>
+              <div class="cover-body">
+                <div class="cover-meta mono" style="font-size: 11px;">{{ f.filename }}</div>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+      {% if finalized_thumbnails and (not finalized_items or finalized_items|length == 0) %}
+      <div class="card" style="margin-top: 12px;">
+        <h3 class="card-section-title" style="margin: 0;">Finalized Thumbnails</h3>
+        <div class="empty" style="margin-top: 10px;">
+          Finalize was saved, but no covers are marked as Keep yet. Set Keep on at least one thumbnail and save/finalize again.
+        </div>
+      </div>
+      {% endif %}
       <details {% if not finalized_thumbnails %}open{% endif %} class="card" style="margin-top: 12px;">
         <summary class="between" style="cursor: pointer; list-style: none;">
           <h3 class="card-section-title" style="margin: 0;">Generated Thumbnails <span class="muted">{{ covers | length }}</span></h3>
@@ -214,6 +250,7 @@
       {% endif %}
       </details>
     </form>
+    {% include "_insight_panel.html" %}
   </div>
 
   <div class="col">
@@ -290,18 +327,6 @@
     var activeIndex = 0;
     var dirty = false;
     var initialState = {{ (form_state or {}) | tojson }};
-    var agentDebugState = {{ (agent_debug_state or {}) | tojson }};
-    var agentRunId = 'run-' + Date.now();
-
-    // #region agent log
-    fetch('http://127.0.0.1:7870/ingest/adb48027-1c92-4bdb-bae2-2575faf35eb6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'a40662'},body:JSON.stringify({sessionId:'a40662',runId:agentRunId,hypothesisId:'H1',location:'scene.html:agent_debug_workdir_choice',message:'Workdir selection state on scene render',data:agentDebugState,timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-    // #region agent log
-    fetch('http://127.0.0.1:7870/ingest/adb48027-1c92-4bdb-bae2-2575faf35eb6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'a40662'},body:JSON.stringify({sessionId:'a40662',runId:agentRunId,hypothesisId:'H2',location:'scene.html:agent_debug_dom_cover_count',message:'DOM cover-card count after render',data:{sceneId:agentDebugState.scene_id,domCoverCards:coverCards.length,coversRendered:agentDebugState.covers_rendered},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-    // #region agent log
-    fetch('http://127.0.0.1:7870/ingest/adb48027-1c92-4bdb-bae2-2575faf35eb6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'a40662'},body:JSON.stringify({sessionId:'a40662',runId:agentRunId,hypothesisId:'H3',location:'scene.html:agent_debug_scenepath_mismatch',message:'Decision-log scene_path and derived directories',data:{sceneId:agentDebugState.scene_id,decisionLogScenePath:agentDebugState.decision_log_scene_path,dlogWorkDir:agentDebugState.dlog_work_dir,dlogWorkDirExists:agentDebugState.dlog_work_dir_exists,fallbackWorkDir:agentDebugState.fallback_work_dir,fallbackWorkDirExists:agentDebugState.fallback_work_dir_exists,selectedWorkDir:agentDebugState.selected_work_dir,selectedWorkDirExists:agentDebugState.selected_work_dir_exists},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
 
     function setFieldValueByName(name, value) {
       if (!name || !form || !form.elements) return;

@@ -329,6 +329,7 @@ def _build_kept_covers_package(
         for item in (cover_items or [])
         if item.get("filename") and item.get("path")
     }
+    covers_dir = Path(work_dir) / "covers"
     unique_kept = []
     seen = set()
     for name in kept_filenames:
@@ -338,7 +339,16 @@ def _build_kept_covers_package(
         seen.add(key)
         unique_kept.append(key)
 
-    kept_sources = [by_name[name] for name in unique_kept if name in by_name and by_name[name].exists()]
+    kept_sources: List[Path] = []
+    for name in unique_kept:
+        src = by_name.get(name)
+        if src and src.exists():
+            kept_sources.append(src)
+            continue
+        # Fallback for cloud logs where mapping may be stale/missing.
+        cand = covers_dir / name
+        if cand.exists():
+            kept_sources.append(cand)
     if not kept_sources:
         return out
 
@@ -2033,6 +2043,7 @@ def create_app() -> FastAPI:
         fallback_work_dir = _find_work_dir(scene_id)
         work_dir = _resolve_scene_work_dir(scene_id, decision_log)
         covers = []
+        finalized_items: list[dict] = []
         contact_sheet = None
         insight = None
         provided_thumb_report = None
@@ -2057,6 +2068,15 @@ def create_app() -> FastAPI:
                     cover_items=covers,
                     kept_filenames=[str(x) for x in reviewed_kept if isinstance(x, str)],
                 )
+                kept_folder_path = kept_bundle.get("kept_folder_path")
+                if kept_folder_path and Path(kept_folder_path).is_dir():
+                    for p in sorted(Path(kept_folder_path).glob("*.jpg")):
+                        finalized_items.append(
+                            {
+                                "filename": p.name,
+                                "path": p,
+                            }
+                        )
         form_state = _build_review_form_state(reviewed=reviewed, insight=insight, cover_items=covers)
         finalized_thumbnails = bool((reviewed or {}).get("finalized_thumbnails"))
         scene_source_name = None
@@ -2081,6 +2101,7 @@ def create_app() -> FastAPI:
                 "reviewed": reviewed,
                 "form_state": form_state,
                 "finalized_thumbnails": finalized_thumbnails,
+                "finalized_items": finalized_items,
                 "scene_source_name": scene_source_name,
                 "kept_count": kept_bundle.get("kept_count", 0),
                 "kept_folder_path": kept_bundle.get("kept_folder_path"),
@@ -2088,24 +2109,6 @@ def create_app() -> FastAPI:
                 "saved": saved,
                 "active_nav": "library",
                 "health": _health_snapshot(),
-                "agent_debug_state": {
-                    "scene_id": scene_id,
-                    "decision_log_loaded": bool(decision_log),
-                    "decision_log_scene_path": (
-                        (decision_log or {}).get("scene_path")
-                        if isinstance(decision_log, dict)
-                        else None
-                    ),
-                    "dlog_work_dir": str(dlog_work_dir) if dlog_work_dir else None,
-                    "dlog_work_dir_exists": bool(dlog_work_dir and Path(dlog_work_dir).is_dir()),
-                    "fallback_work_dir": str(fallback_work_dir) if fallback_work_dir else None,
-                    "fallback_work_dir_exists": bool(
-                        fallback_work_dir and Path(fallback_work_dir).is_dir()
-                    ),
-                    "selected_work_dir": str(work_dir) if work_dir else None,
-                    "selected_work_dir_exists": bool(work_dir and Path(work_dir).is_dir()),
-                    "covers_rendered": len(covers),
-                },
             },
         )
 
@@ -2183,6 +2186,29 @@ def create_app() -> FastAPI:
                 "reason": reason or "",
                 "score": score or "",
             }
+        # Fallback: recover decisions directly from posted decision_* keys
+        # if cover_items mapping missed user selections.
+        if not selected:
+            for key, val in form.multi_items():
+                if not isinstance(key, str) or not key.startswith("decision_"):
+                    continue
+                fn = key[len("decision_"):].strip()
+                if not fn:
+                    continue
+                d = (val or "").strip().lower()
+                row = per_cover.get(fn) or {
+                    "decision": "",
+                    "pen": "",
+                    "pos": "",
+                    "reason": "",
+                    "score": "",
+                }
+                row["decision"] = d or ""
+                per_cover[fn] = row
+                if d in {"keep", "maybe"}:
+                    selected.append(fn)
+                if d == "keep":
+                    kept_only.append(fn)
         if not selected:
             # Backward compatibility with older UI payloads.
             selected = form.getlist("cover")
