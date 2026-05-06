@@ -224,7 +224,10 @@ def _run_pipeline_in_thread(tracker: _JobTracker, job_id: str, video_path: Path)
     try:
         from amg.pipeline import process_scene  # imported here to keep startup cheap
 
-        result = process_scene(video_path)
+        def _on_progress(pct: int) -> None:
+            tracker.update(job_id, progress_pct=int(pct))
+
+        result = process_scene(video_path, on_progress=_on_progress)
         # Re-point the tracker's work_dir at the pipeline's actual output
         # folder before the controller pulls /jobs/{id}/zip. Initially it
         # points at the download dir (which holds the multi-GB source
@@ -389,18 +392,29 @@ def _run_cloud_job_in_thread(
 # ---------- zip streaming ----------
 
 
-def _stream_dir_as_zip(directory: Path):
-    """Yield a zip archive of ``directory`` (recursive). The zip is built
-    in a single pass into a BytesIO so the controller can stream-download
-    it without the worker holding the whole archive in memory longer than
-    the duration of the response."""
-    if not directory.exists() or not directory.is_dir():
-        raise HTTPException(status_code=404, detail=f"work dir not found: {directory}")
+def _stream_artifact_bundle(work_dir: Path, decision_log_path: Optional[Path]):
+    """Yield a zip archive containing the work_dir AND the decision log.
+
+    Layout inside the zip:
+      ``work_dir/<files...>``           — covers, contact sheet, insight.json, etc.
+      ``decision_log.json``             — pod-side decision log (if it exists)
+
+    The controller extracts ``work_dir/`` to its canonical
+    ``DATA_DIR/work_dirs/<scene_id>/`` and copies ``decision_log.json``
+    to ``DATA_DIR/decision_logs/<scene_id>.json``. Without the decision
+    log on the controller the scene doesn't show up in the library, the
+    review form silently fails to persist, and per-phase timings stay
+    blank (``_record_run_timing`` reads them from the decision log).
+    """
+    if not work_dir.exists() or not work_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"work dir not found: {work_dir}")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for p in sorted(directory.rglob("*")):
+        for p in sorted(work_dir.rglob("*")):
             if p.is_file():
-                zf.write(p, arcname=p.relative_to(directory))
+                zf.write(p, arcname=str(Path("work_dir") / p.relative_to(work_dir)))
+        if decision_log_path is not None and decision_log_path.is_file():
+            zf.write(decision_log_path, arcname="decision_log.json")
     buf.seek(0)
     yield from iter(lambda: buf.read(64 * 1024), b"")
 
@@ -569,8 +583,18 @@ def create_app(*, auth_token: Optional[str] = None, tracker: Optional[_JobTracke
         if j is None:
             raise HTTPException(status_code=404, detail=f"unknown job: {job_id}")
         work_dir = Path(j["work_dir"])
+        decision_log_path: Optional[Path] = None
+        result = j.get("result") or {}
+        dlp = result.get("decision_log_path") if isinstance(result, dict) else None
+        if dlp:
+            try:
+                p = Path(dlp)
+                if p.is_file():
+                    decision_log_path = p
+            except (TypeError, ValueError):
+                pass
         return StreamingResponse(
-            _stream_dir_as_zip(work_dir),
+            _stream_artifact_bundle(work_dir, decision_log_path),
             media_type="application/zip",
             headers={"Content-Disposition": f'attachment; filename="{job_id}.zip"'},
         )

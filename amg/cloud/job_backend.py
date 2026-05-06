@@ -377,7 +377,16 @@ class RunpodBackend(JobBackend):
             result = self._wait_for_job(pod_id, job_id, on_log, on_progress)
             on_log(f"[runpod] pipeline done; pulling artifacts")
             on_progress(90)
-            self._download_and_extract(pod_id, job_id, result.get("scene_id"))
+            controller_paths = self._download_and_extract(
+                pod_id, job_id, result.get("scene_id")
+            )
+            # Rewrite pod-side paths in the result to their controller-side
+            # equivalents so the UI (which reads from the local filesystem)
+            # finds covers, decision log, work_dir at the right place.
+            if controller_paths.get("work_dir"):
+                result["work_dir"] = str(controller_paths["work_dir"])
+            if controller_paths.get("decision_log_path"):
+                result["decision_log_path"] = str(controller_paths["decision_log_path"])
             on_progress(100)
             return result
         finally:
@@ -547,17 +556,43 @@ class RunpodBackend(JobBackend):
         pod_id: str,
         job_id: str,
         scene_id: Optional[str],
-    ) -> Path:
+    ) -> Dict[str, Optional[Path]]:
+        """Pull the artifact bundle and place pieces at controller-canonical paths.
+
+        Pod ships a zip with this layout:
+          ``work_dir/<files...>``  — covers, contact sheet, insight.json, etc.
+          ``decision_log.json``    — pod-side decision log (optional)
+
+        We extract:
+          ``work_dir/...``  -> ``DATA_DIR/work_dirs/<scene_id>/``
+          decision log     -> ``DATA_DIR/decision_logs/<safe_scene_id>.json``
+
+        Returns the controller-side paths the caller should overwrite into
+        the result dict so the UI reads from the right places. Older pods
+        that don't know about the new layout still work — if the zip is
+        flat (no ``work_dir/`` prefix and no ``decision_log.json``) we fall
+        back to extracting the whole archive into ``DATA_DIR/work_dirs/<scene>/``
+        like the v0 backend did.
+        """
+        from amg.config import DECISION_LOGS_DIR
+
         if not scene_id:
             scene_id = job_id  # fallback so we still land artifacts somewhere
+        # Match the safe-id rules in amg.ui.app._safe_scene_id so the UI
+        # finds extracted artifacts at the same path it computes for
+        # decision_logs / reviewed payloads. Previously we used the raw
+        # scene_id (with spaces and other punctuation) which silently
+        # broke _find_work_dir lookups for any scene whose id wasn't
+        # already a clean alphanumeric string.
+        safe_scene_id = "".join(
+            c if (c.isalnum() or c in "_-") else "_" for c in scene_id
+        )[:120] or job_id
         url = f"{self._pod_base_url(pod_id)}/jobs/{job_id}/zip"
         resp = self._session.get(url, headers=self._headers(), timeout=600.0, stream=True)
         if resp.status_code != 200:
             raise RuntimeError(
                 f"pod {pod_id} /jobs/{job_id}/zip returned HTTP {resp.status_code}"
             )
-        target = self._work_dirs_root / scene_id
-        target.parent.mkdir(parents=True, exist_ok=True)
         # Read into memory once so zipfile can seek; for typical scene-cover
         # output this is small (covers + JSON + contact sheet, well under
         # 50 MB). If we ever need to handle bigger payloads we can spool to a
@@ -567,18 +602,48 @@ class RunpodBackend(JobBackend):
             if chunk:
                 buf.write(chunk)
         buf.seek(0)
-        # Atomic-ish replace: extract into a sibling tmp dir, then swap.
+        target = self._work_dirs_root / safe_scene_id
+        target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".incoming")
         if tmp.exists():
             shutil.rmtree(tmp)
         tmp.mkdir(parents=True)
+
+        decision_log_dest: Optional[Path] = None
+        bundle_layout = False
+
         with zipfile.ZipFile(buf, "r") as zf:
-            zf.extractall(tmp)
+            names = zf.namelist()
+            bundle_layout = any(
+                n == "decision_log.json" or n.startswith("work_dir/")
+                for n in names
+            )
+            if bundle_layout:
+                for member in zf.infolist():
+                    name = member.filename
+                    if name.startswith("work_dir/") and not name.endswith("/"):
+                        rel = Path(name).relative_to("work_dir")
+                        out_path = tmp / rel
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(member) as src, open(out_path, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                if "decision_log.json" in names:
+                    DECISION_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+                    decision_log_dest = DECISION_LOGS_DIR / f"{safe_scene_id}.json"
+                    with zf.open("decision_log.json") as src, open(decision_log_dest, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+            else:
+                # v0 layout: flat work_dir contents at zip root.
+                zf.extractall(tmp)
+
         if target.exists():
             shutil.rmtree(target)
         tmp.rename(target)
-        log.info(f"Extracted pod result for scene {scene_id} -> {target}")
-        return target
+        log.info(
+            f"Extracted pod result for scene {scene_id}: work_dir={target}, "
+            f"decision_log={decision_log_dest}, layout={'bundle' if bundle_layout else 'v0_flat'}"
+        )
+        return {"work_dir": target, "decision_log_path": decision_log_dest}
 
 
 # ---------- factory ----------

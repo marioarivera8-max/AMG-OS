@@ -235,15 +235,20 @@ def test_runpod_backend_full_happy_path(runpod_backend, tmp_path, monkeypatch):
     progresses: List[int] = []
     result = backend.run_job(video, on_log=logs.append, on_progress=progresses.append)
 
-    assert result == final_result
+    assert result["success"] is True
+    assert result["scene_id"] == "scene-42"
+    assert result["covers_saved"] == 12
     assert client.provisioned, "should have provisioned a pod"
     assert client.terminated == ["pod_test"], "should have terminated the pod"
     # Pod env should include the auth token from RunpodBackend so the worker
     # accepts the controller's bearer requests.
     assert client.provisioned[0].env.get("AMG_POD_AUTH_TOKEN") == "x" * 48
-    # Artifacts extracted to work_dirs/<scene_id>/
+    # Artifacts extracted to work_dirs/<scene_id>/ (v0 layout: flat zip)
     extracted = work_root / "work_dirs" / "scene-42"
     assert (extracted / "out" / "cover_001.jpg").read_bytes() == b"jpg"
+    # Controller rewrites result["work_dir"] to its local extracted path so
+    # the UI can find covers without round-tripping back to the pod.
+    assert Path(result["work_dir"]) == extracted
     # Each pod log line surfaces through on_log.
     assert any("[pod] one" in line for line in logs)
     assert any("[pod] three" in line for line in logs)
@@ -330,6 +335,84 @@ def test_runpod_backend_run_timeout(runpod_backend, tmp_path, monkeypatch):
     video.write_bytes(b"x")
     with pytest.raises(RuntimeError, match="did not finish"):
         backend.run_job(video)
+
+
+def test_runpod_backend_bundle_layout_drops_decision_log_at_canonical_path(
+    tmp_path, monkeypatch
+):
+    """When the pod ships an artifact bundle (work_dir/ + decision_log.json),
+    the controller must extract work_dir to DATA_DIR/work_dirs/<scene>/ and
+    copy the decision log to DATA_DIR/decision_logs/<safe>.json. Without
+    the decision log on the controller, the scene won't show up in the
+    library and the operator's review feedback gets dropped silently."""
+    monkeypatch.setenv("AMG_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("AMG_RUNPOD_API_KEY", "rk_test")
+    monkeypatch.setenv("AMG_RUNPOD_IMAGE", "ghcr.io/test/amg:latest")
+    monkeypatch.setenv("AMG_POD_AUTH_TOKEN", "x" * 48)
+    monkeypatch.setenv("AMG_JOB_POLL_INTERVAL_SEC", "0")
+
+    import importlib
+    import amg.config as cfg
+    importlib.reload(cfg)
+    import amg.cloud.runpod as runpod_mod
+    importlib.reload(runpod_mod)
+    import amg.cloud.job_backend as jb
+    importlib.reload(jb)
+    from amg.cloud.job_backend import RunpodBackend
+    from amg.config import DECISION_LOGS_DIR
+
+    work_root = tmp_path
+    fake_client = _FakeRunpodClient()
+    session = _FakeHttpSession()
+    backend = RunpodBackend(
+        client=fake_client,
+        spec=runpod_mod.PodSpec.from_env(),
+        http_session=session,
+        work_dirs_root=work_root / "work_dirs",
+        run_timeout_sec=60.0,
+    )
+    monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+    final_result = {
+        "success": True,
+        "scene_id": "scene-bundle",
+        "covers_saved": 8,
+        "decision_log_path": "/data/decision_logs/scene-bundle.json",  # pod-side path
+    }
+    bundle_zip = _make_zip_bytes({
+        "work_dir/covers/cover_001.jpg": b"cover-bytes",
+        "work_dir/insight.json": b'{"i":1}',
+        "decision_log.json": b'{"scene_id": "scene-bundle", "execution": {"phases": {}}}',
+    })
+
+    session.queue(
+        _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),
+        _FakePodResponse(200, {
+            "status": "done",
+            "log_tail": ["done"],
+            "progress_pct": 100,
+            "result": final_result,
+        }),
+        _FakePodResponse(200, content=bundle_zip),
+    )
+
+    video_dir = tmp_path / "scene-bundle"
+    video_dir.mkdir()
+    video = video_dir / "v.mp4"
+    video.write_bytes(b"v")
+    result = backend.run_job(video)
+
+    extracted = work_root / "work_dirs" / "scene-bundle"
+    assert (extracted / "covers" / "cover_001.jpg").read_bytes() == b"cover-bytes"
+    assert (extracted / "insight.json").read_bytes() == b'{"i":1}'
+    # Decision log lands at DATA_DIR/decision_logs/<safe-id>.json so the
+    # UI's _load_decision_log finds it.
+    dlog_dest = DECISION_LOGS_DIR / "scene-bundle.json"
+    assert dlog_dest.is_file(), f"decision log not landed at {dlog_dest}"
+    assert "scene-bundle" in dlog_dest.read_text()
+    # Result paths point to the controller's local extracted artifacts.
+    assert Path(result["work_dir"]) == extracted
+    assert Path(result["decision_log_path"]) == dlog_dest
 
 
 def test_runpod_backend_waits_for_pod_worker_healthz(runpod_backend, tmp_path, monkeypatch):
@@ -560,7 +643,9 @@ class TestRunpodBackendCloud:
             CloudSource(remote="gdrive_amy", path="incoming/scene4.mp4", scene_id="scene-cloud"),
             on_log=logs.append,
         )
-        assert result == final_result
+        assert result["success"] is True
+        assert result["scene_id"] == "scene-cloud"
+        assert result["covers_saved"] == 5
         assert client.provisioned, "should have provisioned a pod"
         assert client.terminated == ["pod_test"], "should have terminated the pod"
 
@@ -571,6 +656,9 @@ class TestRunpodBackendCloud:
         # Artifacts extracted under work_dirs/<scene_id>/.
         extracted = work_root / "work_dirs" / "scene-cloud"
         assert (extracted / "out" / "cover_001.jpg").read_bytes() == b"jpg"
+        # Controller rewrote work_dir in the result so the UI finds covers
+        # at the local extracted path.
+        assert Path(result["work_dir"]) == extracted
 
     def test_runpod_cloud_job_unknown_remote_skips_provisioning(
         self, runpod_backend, populated_credential_store, monkeypatch

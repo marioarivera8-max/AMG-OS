@@ -41,7 +41,7 @@ def authed_client(pod_env, monkeypatch):
 
     fake_result = {"success": True, "covers_saved": 7, "scene_id": "stub"}
 
-    def _fake_process_scene(video_path):
+    def _fake_process_scene(video_path, **_kwargs):
         return fake_result
 
     # Stubbing via the runner thread's import path. The runner does
@@ -157,7 +157,7 @@ class TestJobs:
         client = TestClient(app)
         client.headers["Authorization"] = f"Bearer {pod_env['token']}"
 
-        def _explode(_video_path):
+        def _explode(_video_path, **_kwargs):
             raise RuntimeError("ollama unreachable")
 
         import amg.pipeline as pipeline
@@ -227,7 +227,7 @@ class TestJobs:
         pipeline_out.mkdir(parents=True)
         (pipeline_out / "cover_001.jpg").write_bytes(b"x")
 
-        def _fake_process_scene(_video_path):
+        def _fake_process_scene(_video_path, **_kwargs):
             return {
                 "success": True,
                 "covers_saved": 12,
@@ -262,7 +262,7 @@ class TestJobs:
         client = TestClient(app)
         client.headers["Authorization"] = f"Bearer {pod_env['token']}"
 
-        def _fake_process_scene(_video_path):
+        def _fake_process_scene(_video_path, **_kwargs):
             return {"success": True, "covers_saved": 3}  # no work_dir
 
         import amg.pipeline as pipeline
@@ -283,10 +283,12 @@ class TestJobs:
 
 
 class TestJobZip:
-    def test_zip_streams_work_dir_contents(self, authed_client, tmp_path):
+    def test_zip_streams_work_dir_contents_under_work_dir_prefix(self, authed_client, tmp_path):
+        """Pod ships an artifact bundle: ``work_dir/<files>`` plus an
+        optional top-level ``decision_log.json``. The controller's
+        extractor unpacks ``work_dir/...`` to its canonical local path
+        and copies the decision log to ``DATA_DIR/decision_logs/``."""
         client, pw = authed_client
-        # Create a job, wait for completion, drop a couple of fake artifacts
-        # into its work dir, then ask for the zip.
         r = client.post(
             "/jobs",
             files={"video": ("scene.mp4", b"x")},
@@ -298,7 +300,7 @@ class TestJobZip:
         work_dir = Path(client.get(f"/jobs/{job_id}").json()["work_dir"])
         (work_dir / "out").mkdir(parents=True, exist_ok=True)
         (work_dir / "out" / "cover_001.jpg").write_bytes(b"cover-bytes")
-        (work_dir / "out" / "decision_log.json").write_text('{"k":"v"}')
+        (work_dir / "out" / "insight.json").write_text('{"k":"v"}')
 
         r = client.get(f"/jobs/{job_id}/zip")
         assert r.status_code == 200
@@ -306,9 +308,50 @@ class TestJobZip:
         assert f"{job_id}.zip" in r.headers["content-disposition"]
         zf = zipfile.ZipFile(io.BytesIO(r.content))
         names = zf.namelist()
-        assert "out/cover_001.jpg" in names
-        assert "out/decision_log.json" in names
-        assert zf.read("out/cover_001.jpg") == b"cover-bytes"
+        assert "work_dir/out/cover_001.jpg" in names
+        assert "work_dir/out/insight.json" in names
+        assert zf.read("work_dir/out/cover_001.jpg") == b"cover-bytes"
+
+    def test_zip_includes_decision_log_when_pipeline_returns_path(
+        self, pod_env, monkeypatch, tmp_path
+    ):
+        """When the pipeline result carries a ``decision_log_path`` pointing
+        at an existing file, the zip ships it at the bundle root so the
+        controller can drop it into ``DATA_DIR/decision_logs/``."""
+        pw = pod_env["module"]
+        decision_log = tmp_path / "fake_dlog.json"
+        decision_log.write_text('{"scene_id": "stub", "execution": {"phases": {}}}')
+
+        def _fake_process_scene(_video_path, **_kwargs):
+            return {
+                "success": True,
+                "covers_saved": 5,
+                "scene_id": "stub",
+                "decision_log_path": str(decision_log),
+            }
+
+        import amg.pipeline as pipeline
+        monkeypatch.setattr(pipeline, "process_scene", _fake_process_scene)
+
+        app = pw.create_app(auth_token=pod_env["token"])
+        client = TestClient(app)
+        client.headers["Authorization"] = f"Bearer {pod_env['token']}"
+
+        r = client.post(
+            "/jobs",
+            files={"video": ("scene.mp4", b"x")},
+            data={"scene_id": "stub"},
+        )
+        job_id = r.json()["job_id"]
+        _wait_for_status(client, job_id, "done")
+
+        r = client.get(f"/jobs/{job_id}/zip")
+        assert r.status_code == 200
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        names = zf.namelist()
+        assert "decision_log.json" in names
+        body = zf.read("decision_log.json").decode()
+        assert "stub" in body
 
     def test_zip_unknown_job_404(self, authed_client):
         client, _ = authed_client
