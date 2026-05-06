@@ -31,6 +31,7 @@ on:
       # Only rebuild when something that ends up in the image changes.
       - "Dockerfile"
       - "Dockerfile.pod"
+      - ".dockerignore"
       - "scripts/pod_entrypoint.sh"
       - "pyproject.toml"
       - "amg/**"
