@@ -1948,6 +1948,31 @@ def create_app() -> FastAPI:
             },
         )
 
+    # Backward-compatibility aliases: older UI/deploys linked to
+    # /covers/review* before scene detail stabilized at /scene/{scene_id}.
+    # Keep these redirects so "Review covers" never hard-404s after upgrades.
+    @app.get("/covers/review")
+    @app.get("/review-covers")
+    @app.get("/library/review-covers")
+    async def review_covers_legacy(scene_id: str = Query(default=""), job_id: str = Query(default="")):
+        target_scene = _safe_scene_id((scene_id or "").strip())
+        if not target_scene and job_id:
+            with _jobs_lock:
+                job = _jobs.get(job_id.strip()) or {}
+            target_scene = _safe_scene_id(
+                str(job.get("scene_id") or (job.get("result") or {}).get("scene_id") or "").strip()
+            )
+        if not target_scene:
+            raise HTTPException(status_code=404, detail="scene_id not found for legacy review route")
+        return RedirectResponse(url=f"/scene/{target_scene}", status_code=307)
+
+    @app.get("/covers/review/{scene_id}")
+    async def review_covers_legacy_path(scene_id: str):
+        target_scene = _safe_scene_id((scene_id or "").strip())
+        if not target_scene:
+            raise HTTPException(status_code=404, detail="Invalid scene_id")
+        return RedirectResponse(url=f"/scene/{target_scene}", status_code=307)
+
     @app.get("/scene/{scene_id}", response_class=HTMLResponse)
     async def scene_detail(request: Request, scene_id: str, saved: int = 0):
         decision_log = _load_decision_log(scene_id)

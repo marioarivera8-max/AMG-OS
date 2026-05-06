@@ -121,3 +121,30 @@ def test_find_work_dir_resolves_cloud_extracted_layout(tmp_path, monkeypatch):
 
     resolved = app_mod._find_work_dir("muvie")
     assert resolved == cloud_extracted
+
+
+def test_legacy_review_route_redirects_to_scene_path():
+    from amg.ui.app import create_app
+
+    app = create_app()
+    client = TestClient(app, follow_redirects=False)
+    res = client.get("/covers/review/demo_scene_1")
+    assert res.status_code == 307
+    assert res.headers.get("location") == "/scene/demo_scene_1"
+
+
+def test_legacy_review_query_route_resolves_scene_from_job_id(monkeypatch):
+    import amg.ui.app as app_mod
+
+    with app_mod._jobs_lock:
+        app_mod._jobs["job_legacy_1"] = {"job_id": "job_legacy_1", "scene_id": "legacy_scene_1", "result": None}
+
+    try:
+        app = app_mod.create_app()
+        client = TestClient(app, follow_redirects=False)
+        res = client.get("/covers/review", params={"job_id": "job_legacy_1"})
+        assert res.status_code == 307
+        assert res.headers.get("location") == "/scene/legacy_scene_1"
+    finally:
+        with app_mod._jobs_lock:
+            app_mod._jobs.pop("job_legacy_1", None)
