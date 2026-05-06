@@ -100,3 +100,24 @@ def test_artifact_zip_downloads_directory_as_zip(tmp_path, monkeypatch):
     with zipfile.ZipFile(out_zip, "r") as zf:
         names = sorted(zf.namelist())
     assert names == ["01.jpg", "nested/meta.txt"]
+
+
+def test_find_work_dir_resolves_cloud_extracted_layout(tmp_path, monkeypatch):
+    """Cloud edition: RunpodBackend extracts pod artifacts to
+    DATA_DIR/work_dirs/<scene_id>/. The legacy lookup only checked the
+    INCOMING_ROOTS + UPLOADS_DIR for a *_amg_v11 suffix, so the scene
+    detail page rendered "No covers found in None" even when covers
+    were sitting on disk. Regression: 2026-05-06.
+    """
+    import amg.ui.app as app_mod
+
+    fake_data_dir = tmp_path / "data"
+    cloud_extracted = fake_data_dir / "work_dirs" / "muvie"
+    (cloud_extracted / "covers").mkdir(parents=True)
+    (cloud_extracted / "covers" / "01_test.jpg").write_bytes(b"jpg")
+
+    monkeypatch.setattr(app_mod, "DATA_DIR", fake_data_dir)
+    monkeypatch.setattr(app_mod, "UPLOADS_DIR", fake_data_dir / "ui_uploads")
+
+    resolved = app_mod._find_work_dir("muvie")
+    assert resolved == cloud_extracted

@@ -547,6 +547,16 @@ def _recent_scenes(limit: int = 20) -> list[dict]:
 
 def _find_work_dir(scene_id: str) -> Optional[Path]:
     from amg.config import INCOMING_ROOTS
+
+    # Cloud edition: RunpodBackend extracts pod artifacts to
+    # DATA_DIR/work_dirs/<scene_id>/ (covers/, contact sheet, insight.json
+    # all directly underneath). Check there before falling back to the
+    # legacy v11 layout.
+    sid = _safe_scene_id(scene_id)
+    cloud_extracted = DATA_DIR / "work_dirs" / sid
+    if cloud_extracted.is_dir():
+        return cloud_extracted
+
     roots = list(INCOMING_ROOTS) + [UPLOADS_DIR]
     pattern = f"{scene_id}_amg_v11"
     for root in roots:
