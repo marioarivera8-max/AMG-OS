@@ -1,4 +1,5 @@
 # Build & push the AMG cloud-edition Docker images to GHCR.
+# (re-trigger after 2026-05-06 GHA partial outage cancelled the prior run)
 #
 # Two images get built:
 #   - ghcr.io/<owner>/amg-controller:<tag>   (Hetzner VM, no GPU, no Ollama)
