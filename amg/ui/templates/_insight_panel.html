@@ -1,11 +1,11 @@
-<div id="insight-panel">
-  <div class="card">
+<div id="insight-panel" style="display: block;">
+  <div class="card" style="margin: 0;">
     <h3 class="card-section-title">Generated title options</h3>
     {% if insight and insight.ai_titles %}
       <div class="stack">
-        {% for t in insight.ai_titles %}
+        {% for t in insight.ai_titles[:8] %}
           <label class="row" style="gap: 10px; align-items: flex-start;">
-            <input type="radio" name="title" value="{{ t.text }}" form="review-form" />
+            <input type="radio" name="title" value="{{ t.text }}" form="review-form" {% if form_state and form_state.title == t.text %}checked{% endif %} />
             <div style="flex: 1;">
               <div style="font-size: 14px;">{{ t.text }}</div>
               <div class="muted" style="font-size: 11px;">
@@ -15,13 +15,16 @@
             </div>
           </label>
         {% endfor %}
+        {% if (insight.ai_titles | length) > 8 %}
+          <div class="muted" style="font-size: 12px;">Showing top 8 titles. Regenerate for alternatives.</div>
+        {% endif %}
       </div>
     {% else %}
       <div class="muted" style="font-size: 13px;">
         No generated titles yet.
       </div>
     {% endif %}
-    <textarea form="review-form" name="title" rows="2" placeholder="Or type your own title override here" style="margin-top: 10px; width: 100%;"></textarea>
+    <textarea form="review-form" name="title" rows="2" placeholder="Or type your own title override here" style="margin-top: 10px; width: 100%;">{{ form_state.title if form_state else "" }}</textarea>
   </div>
 
   <div class="card" style="margin-top: 12px;">
@@ -35,10 +38,10 @@
             hx-swap="outerHTML"
             style="display: inline-flex; align-items: center; gap: 8px;">
         <select name="title_tone" style="min-width: 150px;">
-          <option value="retail_safe" {% if insight and insight.title_tone == 'retail_safe' %}selected{% endif %}>Retail Safe</option>
-          <option value="edgy" {% if not insight or not insight.title_tone or insight.title_tone == 'edgy' %}selected{% endif %}>Edgy</option>
-          <option value="creative" {% if insight and insight.title_tone == 'creative' %}selected{% endif %}>Creative</option>
-          <option value="premium_story" {% if insight and insight.title_tone == 'premium_story' %}selected{% endif %}>Premium Story</option>
+          <option value="retail_safe" {% if form_state and form_state.title_tone == 'retail_safe' %}selected{% endif %}>Retail Safe</option>
+          <option value="edgy" {% if not form_state or not form_state.title_tone or form_state.title_tone == 'edgy' %}selected{% endif %}>Edgy</option>
+          <option value="creative" {% if form_state and form_state.title_tone == 'creative' %}selected{% endif %}>Creative</option>
+          <option value="premium_story" {% if form_state and form_state.title_tone == 'premium_story' %}selected{% endif %}>Premium Story</option>
         </select>
         <button class="btn btn-ghost" type="submit" hx-indicator="#insight-spinner">✨ Regenerate</button>
       </form>
@@ -46,41 +49,37 @@
     <span id="insight-spinner" class="muted htmx-indicator" style="font-size: 12px;">regenerating…</span>
     {% if insight and insight.long_description %}
       <div style="font-size: 13px; line-height: 1.55; margin-top: 8px;">{{ insight.long_description }}</div>
-      <input type="hidden" form="review-form" name="title_tone" value="{{ insight.title_tone or 'edgy' }}" />
-      <textarea form="review-form" name="long_description" rows="3" style="margin-top: 10px; width: 100%;">{{ insight.long_description }}</textarea>
+      <input type="hidden" form="review-form" name="title_tone" value="{{ (form_state.title_tone if form_state else (insight.title_tone or 'edgy')) }}" />
+      <textarea form="review-form" name="long_description" rows="3" style="margin-top: 10px; width: 100%;">{{ form_state.long_description if form_state else insight.long_description }}</textarea>
     {% else %}
       <div class="muted" style="font-size: 13px; margin-top: 8px;">Generate to produce a stronger long description.</div>
-      <input type="hidden" form="review-form" name="title_tone" value="{{ insight.title_tone if insight else 'edgy' }}" />
-      <textarea form="review-form" name="long_description" rows="3" style="margin-top: 10px; width: 100%;"></textarea>
+      <input type="hidden" form="review-form" name="title_tone" value="{{ (form_state.title_tone if form_state else (insight.title_tone if insight else 'edgy')) }}" />
+      <textarea form="review-form" name="long_description" rows="3" style="margin-top: 10px; width: 100%;">{{ form_state.long_description if form_state else "" }}</textarea>
     {% endif %}
   </div>
 
-  {% if insight and insight.ai_tags %}
-    <div class="card" style="margin-top: 12px;">
-      <h3 class="card-section-title">Tags (best first)</h3>
+  <div class="card" style="margin-top: 12px;">
+      <h3 class="card-section-title">Tags</h3>
       <div style="margin-top: 6px;">
-        {% for t in insight.ai_tags[:30] %}
+        {% for t in (insight.ai_tags[:30] if insight and insight.ai_tags else []) %}
           <span class="chip">{{ t }}</span>
         {% endfor %}
       </div>
-      <textarea form="review-form" name="tags_csv" rows="3" style="margin-top: 10px; width: 100%;">{{ insight.ai_tags | join(", ") }}</textarea>
-    </div>
-  {% endif %}
+      <textarea form="review-form" name="tags_csv" rows="3" style="margin-top: 10px; width: 100%;">{{ form_state.tags_csv if form_state else ((insight.ai_tags | join(", ")) if insight and insight.ai_tags else "") }}</textarea>
+  </div>
 
-  {% if insight and insight.ai_categories %}
-    <div class="card" style="margin-top: 12px;">
-      <h3 class="card-section-title">Categories (best first)</h3>
+  <div class="card" style="margin-top: 12px;">
+      <h3 class="card-section-title">Categories</h3>
       <div style="margin-top: 6px;">
-        {% for c in insight.ai_categories %}
+        {% for c in (insight.ai_categories if insight and insight.ai_categories else []) %}
           <span class="chip">{{ c }}</span>
         {% endfor %}
       </div>
-      <textarea form="review-form" name="categories_csv" rows="2" style="margin-top: 10px; width: 100%;">{{ insight.ai_categories | join(", ") }}</textarea>
-    </div>
-  {% endif %}
+      <textarea form="review-form" name="categories_csv" rows="2" style="margin-top: 10px; width: 100%;">{{ form_state.categories_csv if form_state else ((insight.ai_categories | join(", ")) if insight and insight.ai_categories else "") }}</textarea>
+  </div>
 
   {% if insight and insight.insight %}
-    <details style="margin-top: 10px;">
+    <details style="grid-column: 1 / -1;">
       <summary class="muted" style="cursor: pointer; font-size: 12px;">Advanced: scene insight details</summary>
       <div class="card card-tight" style="margin-top: 8px;">
         {% set ins = insight.insight %}
