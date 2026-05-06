@@ -121,24 +121,46 @@ dir is created on the volume itself on first boot.
 
 ~~The network volume Mario created is in `US-NE-1`...~~
 
-**RESOLVED 2026-05-06 PM.** Old volume `higomno9lt` (US-NE-1) deleted;
-new 20 GB volume `ibrfa4p6o1` (`amg-ollama-cache`) created in
-**US-CA-2** — region with consistent 4090 capacity. Env var
-`AMG_RUNPOD_NETWORK_VOLUME_ID=ibrfa4p6o1` is live in
+**RESOLVED 2026-05-06 PM.** Volume now in EU-RO-1 after two iterations.
+
+Iteration history:
+- `higomno9lt` (US-NE-1) — deleted, no 4090 capacity.
+- `ibrfa4p6o1` (US-CA-2) — deleted, also no 4090 capacity (first real
+  pod-creation attempt failed with `HTTP 500 create pod: could not find
+  any pods with required specifications`).
+- `8cjir4q7lb` (EU-RO-1) — **current**. 4090 capacity confirmed via a
+  throwaway probe pod that successfully provisioned and was terminated.
+
+Env var `AMG_RUNPOD_NETWORK_VOLUME_ID=8cjir4q7lb` is live in
 `/etc/amg/controller.env`; controller restart confirmed via
 `docker exec amg-controller printenv`.
 
-The next pipeline run is the first cold boot against the empty
-new volume — it will still pay the ~5 GB / 3-5 min model pull, but
-the pull writes to the volume. Subsequent runs skip it (cold boot
-~2-3 min, just the docker image pull).
+**Important correction to "How to recover the volume situation" below:**
+The previously-listed common winners `US-GA-1` and `US-OR-1` are NOT
+viable — Runpod's REST API now reports `US-GA-1` has no storage
+clusters and `US-OR-1` doesn't support network volumes at all.
+Available DCs as of 2026-05-06: `CA-MTL-3, CA-MTL-4, EU-CZ-1, EU-NL-1,
+EU-RO-1, EUR-IS-3, EUR-NO-1, US-CA-2, US-IL-1, US-KS-2, US-MO-1,
+US-MO-2, US-NC-2, US-NE-1, US-TX-3, US-WA-1`. The runbook should
+iterate through these, not the stale list, and probe with a real pod
+create before assuming GPU capacity exists.
+
+The next pipeline run is the first cold boot against the empty new
+volume — it will still pay the ~5 GB / 3-5 min model pull, but the
+pull writes to the volume. Subsequent runs skip it.
 
 **Volume info (current):**
-- Volume ID: `ibrfa4p6o1`
+- Volume ID: `8cjir4q7lb`
 - Name: `amg-ollama-cache`
 - Size: 20 GB
-- DC: US-CA-2
+- DC: EU-RO-1
 - Cost: ~$1.40/mo
+
+**Latency note:** Hetzner controller is in Ashburn VA, pods now run in
+Romania. Controller↔pod traffic is small (job dispatch, status polls,
+final zip pull). The big traffic is pod↔gdrive for the source video,
+which is independent of pod region. Expect modest steady-state overhead
+but nothing that'll dominate cold-boot time.
 
 ---
 
@@ -227,7 +249,7 @@ the pull writes to the volume. Subsequent runs skip it (cold boot
 | `AMG_RUNPOD_API_KEY` | Runpod REST API key | https://runpod.io/console/user/settings → API Keys |
 | `AMG_RUNPOD_IMAGE` | `ghcr.io/marioarivera8-max/amg-pod:latest` | hardcoded |
 | `AMG_RUNPOD_GPU_TYPE` | `NVIDIA GeForce RTX 4090` | hardcoded |
-| `AMG_RUNPOD_NETWORK_VOLUME_ID` | `ibrfa4p6o1` — `amg-ollama-cache` 20 GB in US-CA-2 (set 2026-05-06 PM) | see "Volume info" above |
+| `AMG_RUNPOD_NETWORK_VOLUME_ID` | `8cjir4q7lb` — `amg-ollama-cache` 20 GB in EU-RO-1 (set 2026-05-06 PM, after US-CA-2 had no 4090 capacity either) | see "Volume info" above |
 | `AMG_DATA_DIR` | `/data` (mounted from `/var/lib/amg/data` on host) | runbook |
 | `AMG_JOB_BACKEND` | `runpod` | runbook |
 

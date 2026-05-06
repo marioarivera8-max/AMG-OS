@@ -48,22 +48,43 @@ Procedure:
 
 ## Resolved: network volume DC swap (2026-05-06 PM)
 
-Old volume `higomno9lt` in **US-NE-1** deleted; new 20 GB volume
-`ibrfa4p6o1` (`amg-ollama-cache`) created in **US-CA-2**. Env var
-`AMG_RUNPOD_NETWORK_VOLUME_ID=ibrfa4p6o1` is live in
+History:
+- `higomno9lt` (US-NE-1) — deleted (old, no 4090 capacity).
+- `ibrfa4p6o1` (US-CA-2) — created, **then deleted** when the first real
+  smoke-test attempt failed with `HTTP 500 create pod: could not find
+  any pods with required specifications`. US-CA-2 had no 4090 capacity.
+- `8cjir4q7lb` (EU-RO-1) — **current**. 4090 capacity confirmed via a
+  throwaway probe pod that successfully provisioned and was immediately
+  terminated.
+
+Env var `AMG_RUNPOD_NETWORK_VOLUME_ID=8cjir4q7lb` is live in
 `/etc/amg/controller.env`; controller restarted and confirmed picking up
-the new value (`docker exec amg-controller printenv | grep
-AMG_RUNPOD_NETWORK_VOLUME_ID`).
+the new value.
+
+The handoff doc's previously-suggested DCs (`US-GA-1`, `US-OR-1`) were
+stale: Runpod's REST API now reports `US-GA-1` has no storage clusters
+and `US-OR-1` doesn't support network volumes at all. Available DCs as
+of 2026-05-06: `CA-MTL-3, CA-MTL-4, EU-CZ-1, EU-NL-1, EU-RO-1, EUR-IS-3,
+EUR-NO-1, US-CA-2, US-IL-1, US-KS-2, US-MO-1, US-MO-2, US-NC-2, US-NE-1,
+US-TX-3, US-WA-1`. If `EU-RO-1` ever loses 4090 capacity, the swap
+script (`/tmp/swap2.sh` history in this commit's session, also
+documented in `AGENT_CONTEXT_2026-05-06_CLOUD_EDITION.md`) iterates
+through them.
 
 Effect on next runs:
-- **First pipeline run after the swap** still pays the model pull
+- **First pipeline run after this swap** still pays the model pull
   (~5 GB / 3–5 min) because the volume is empty — but the pull writes
   to the volume this time.
 - **Every run after that** skips the model pull. Cold boot drops to
   ~2–3 min (just the docker image pull).
+- **Latency note:** Hetzner controller is in Ashburn VA, pods now run
+  in Romania. The controller↔pod traffic is small (job dispatch, status
+  polls, final zip pull). The big traffic is pod↔gdrive for the source
+  video, which is independent of pod region. Expect a small steady-state
+  overhead but nothing that'll dominate cold-boot time.
 
 Validation step (do once on the next smoke test): after a successful
-run, SSH into the running pod via Runpod's web terminal and
+run, look at the pod via Runpod's web terminal and
 `ls /workspace/ollama/manifests/registry.ollama.ai/library/qwen2.5vl/`
 — if you see a manifest there, the volume is being used.
 
