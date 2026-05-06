@@ -367,7 +367,10 @@ class RunpodBackend(JobBackend):
         )
         pod_id = pod["id"]
         try:
-            on_log(f"[runpod] pod {pod_id} RUNNING; submitting job")
+            on_log(f"[runpod] pod {pod_id} RUNNING; waiting for pod-worker /healthz")
+            on_progress(12)
+            self._wait_for_pod_worker_ready(pod_id, on_log=on_log)
+            on_log(f"[runpod] pod-worker ready; submitting job")
             on_progress(15)
             job_id = submit(pod_id)
             on_log(f"[runpod] pod accepted job {job_id}; waiting for pipeline")
@@ -399,6 +402,54 @@ class RunpodBackend(JobBackend):
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self._auth_token}"}
+
+    def _wait_for_pod_worker_ready(
+        self,
+        pod_id: str,
+        *,
+        on_log: LogHook,
+        timeout_sec: float = 600.0,
+        poll_interval_sec: float = 5.0,
+    ) -> None:
+        """Poll the pod's /healthz until it returns 200.
+
+        Runpod marks a pod RUNNING the moment its container starts, but our
+        pod entrypoint then has to (a) start ollama, (b) wait for it to be
+        ready, (c) pre-pull qwen2.5vl on first boot (~5 min cold), then
+        (d) exec amg pod-worker. Until step (d), POSTs to /jobs fail with
+        connection refused. This method blocks the controller until the
+        pod-worker is actually serving requests.
+
+        Phase 4 will distinguish "boot in progress" from "boot stuck"
+        based on /healthz body details. For now: a 200 = ready, anything
+        else = keep waiting.
+        """
+        url = f"{self._pod_base_url(pod_id)}/healthz"
+        deadline = time.monotonic() + float(timeout_sec)
+        last_log_at = 0.0
+        attempts = 0
+        while time.monotonic() < deadline:
+            attempts += 1
+            try:
+                resp = self._session.get(url, timeout=10.0)
+                if resp.status_code == 200:
+                    on_log(f"[runpod] /healthz OK after {attempts} attempt(s)")
+                    return
+            except requests.RequestException:
+                # Pod-worker not yet listening — expected during cold boot.
+                pass
+            now = time.monotonic()
+            # Throttle progress logs so a 5-minute model pull doesn't spam.
+            if now - last_log_at >= 30.0:
+                on_log(f"[runpod] pod-worker not ready yet (attempt {attempts}); still waiting...")
+                last_log_at = now
+            time.sleep(poll_interval_sec)
+        raise RuntimeError(
+            f"pod {pod_id} did not become ready within {timeout_sec:.0f}s "
+            f"(after {attempts} /healthz checks). Likely Ollama failed to start "
+            "or the model pull stalled — check the pod's container logs in the "
+            "Runpod console."
+        )
 
     def _submit_job(self, pod_id: str, video_path: Path) -> str:
         url = f"{self._pod_base_url(pod_id)}/jobs"

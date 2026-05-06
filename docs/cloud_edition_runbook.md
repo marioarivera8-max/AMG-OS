@@ -1,29 +1,38 @@
 # AMG Cloud-Hosted Edition — Deployment Runbook
 
-> Status: Phase 1 code complete (commits 70e810a → 95fc9b7). This runbook
-> walks the operator through provisioning the infrastructure and wiring
-> the components together for the first end-to-end smoke test.
+> Status: Phase 1 + Phase 2 code complete. This runbook walks the operator
+> through provisioning the infrastructure and wiring the components together
+> for the first end-to-end smoke test.
 >
-> Architecture (Phase 1):
+> Architecture (Phase 1 + 2):
 >
 > ```
 > Browser (you, anywhere)
 >      ↓ HTTPS
 >      ↓
-> Caddy on Hetzner CX21  ←── auto-TLS via Let's Encrypt
+> Caddy on Hetzner CX21  ←── auto-TLS via Let's Encrypt + Cloudflare DNS
 >      ↓ localhost:8000
 >      ↓
 > AMG controller (Docker container running `amg ui --auth`)
->   - SQLite user store     (data/auth.sqlite)
->   - Job dispatcher        (AMG_JOB_BACKEND=runpod)
->   - Work-dir artifacts    (data/work_dirs/<scene_id>/)
->      ↓ HTTPS
->      ↓
-> Runpod GPU pod (RTX 4090)  ←── on-demand, terminated after each job
->   - amg pod-worker (FastAPI)
->   - amg.pipeline.process_scene
->   - Ollama + qwen2.5vl:7b
+>   - SQLite user store      (data/auth.sqlite)
+>   - Encrypted cred store   (data/credentials.sqlite, Fernet/AMG_CREDENTIALS_KEY)
+>   - Job dispatcher         (AMG_JOB_BACKEND=runpod)
+>   - Work-dir artifacts     (data/work_dirs/<scene_id>/)
+>      ↓ HTTPS                            ↓ HTTPS
+>      ↓                                  ↓
+> Runpod GPU pod (RTX 4090)          Google Drive / Dropbox / Mega
+>   - amg pod-worker (FastAPI)         (videos live here, never touch
+>   - amg.pipeline.process_scene        controller VM)
+>   - Ollama + qwen2.5vl:7b              ↑
+>   - rclone (cloud-source pulls) ───────┘
 > ```
+>
+> Two Docker images get built:
+>
+> | Image                | Used by      | Built from        | Has Ollama? |
+> |----------------------|--------------|-------------------|-------------|
+> | `amg-controller:0.1` | Hetzner VM   | `Dockerfile`      | No (no GPU) |
+> | `amg-pod:0.1`        | Runpod pod   | `Dockerfile.pod`  | Yes (CUDA)  |
 
 ---
 
@@ -54,36 +63,80 @@ save them somewhere safe (1Password, etc.); they should never enter git.
 ```bash
 python -c 'import secrets; print("AMG_SESSION_SECRET=" + secrets.token_urlsafe(48))'
 python -c 'import secrets; print("AMG_POD_AUTH_TOKEN=" + secrets.token_urlsafe(48))'
+python -c 'from cryptography.fernet import Fernet; print("AMG_CREDENTIALS_KEY=" + Fernet.generate_key().decode())'
 ```
 
-`AMG_SESSION_SECRET` — signs the cookie sessions for the UI login.
-`AMG_POD_AUTH_TOKEN` — bearer token between controller and pod-worker.
+| Secret                  | Purpose                                                  | Lose it = ?                                          |
+|-------------------------|----------------------------------------------------------|------------------------------------------------------|
+| `AMG_SESSION_SECRET`    | Signs cookie sessions for the UI login                   | All logged-in sessions invalidated; users sign in again |
+| `AMG_POD_AUTH_TOKEN`    | Bearer token controller ↔ pod-worker                     | Re-deploy controller; old pods reject new requests   |
+| `AMG_CREDENTIALS_KEY`   | Fernet key for the encrypted rclone credential store     | **Stored cloud-storage tokens unrecoverable** — re-run `rclone config` for each remote |
 
 You'll also need:
 - A long, random password for your operator account (`amg user add`).
 - Your Runpod API key from https://www.runpod.io/console/user/settings.
 
-### Step 2. Publish the AMG container image
+### Step 2. Publish the AMG container images (controller + pod) via GitHub Actions
 
-The Dockerfile at the repo root is what Runpod pulls into each provisioned
-pod. From the repo on your Mac:
+Two images get built — one for the always-on controller (no GPU, no Ollama),
+one for the on-demand Runpod pods (with Ollama + CUDA libs bundled).
+
+You don't need Docker installed on your Mac. The workflow at
+`.github/workflows/build-images.yml` builds both images on GitHub's
+linux/amd64 runners and pushes them to GHCR using the built-in
+`GITHUB_TOKEN`. No PAT, no docker login, no local install.
+
+**One-time repo setup** (only needed if your repo is brand new):
+
+1. Push this branch / repo to GitHub if it isn't already:
+   `git push origin main`
+2. Open https://github.com/&lt;owner&gt;/AMG-OS/settings/actions and confirm
+   "Workflow permissions" is set to **Read and write permissions** (default
+   for new repos created after Feb 2023; older repos may need this flipped
+   manually so the workflow can publish to GHCR).
+
+**Trigger the build:**
 
 ```bash
-# Pick a registry. GHCR example (replace <username>):
-export REGISTRY=ghcr.io/<username>
-export IMAGE=$REGISTRY/amg-os:0.1
-
-# Log in (one-time; for GHCR you need a PAT with write:packages)
-echo $GITHUB_TOKEN | docker login ghcr.io -u <username> --password-stdin
-
-# Build for amd64 since Runpod GPUs are x86. Apple Silicon needs --platform.
-docker buildx build --platform linux/amd64 -t $IMAGE --push .
-
-# Verify
-docker pull $IMAGE && echo "image is reachable"
+# After committing the Dockerfiles + workflow:
+git push origin main
 ```
 
-Save `$IMAGE` — you'll set it as `AMG_RUNPOD_IMAGE` later.
+Or run it manually from the GitHub UI:
+**Actions tab → "build-images" workflow → Run workflow**.
+
+The first run takes ~10 min (controller image ~ 4 min, pod image ~ 6 min
+because it includes the 1.2 GB Ollama tarball). Subsequent runs are faster
+thanks to the GHA cache (`type=gha`).
+
+When it finishes you'll see two new packages on your profile at
+https://github.com/&lt;owner&gt;?tab=packages :
+
+- `amg-controller`
+- `amg-pod`
+
+**Make both packages public** (otherwise Runpod / Hetzner can't pull
+without a registry secret — and these only contain application code, not
+data or credentials):
+
+For each package:
+
+1. Click the package → **Package settings** (right rail)
+2. Scroll to "Danger Zone" → **Change package visibility** → **Public**
+3. Confirm.
+
+Save these tags for later:
+
+```text
+ghcr.io/<owner>/amg-controller:latest    # used by Hetzner controller
+ghcr.io/<owner>/amg-pod:latest           # used by Runpod pods (AMG_RUNPOD_IMAGE)
+```
+
+> **Already have Docker installed locally and prefer manual builds?** See the
+> commented-out commands at the bottom of `Dockerfile.pod` — `docker buildx
+> build --platform linux/amd64 -f Dockerfile.pod --push -t ghcr.io/...`
+> works the same way. The GHA workflow is just the recommended path because
+> it avoids local install + builds 5–10× faster on native amd64 hardware.
 
 ### Step 3. Provision the Hetzner CX21 controller
 
@@ -102,10 +155,23 @@ Note the IPv4 address.
 
 ### Step 4. Point your domain
 
-In your DNS provider, create:
-- `A`  record:  `amg.yourdomain.com`  →  `<controller IPv4>`
+In Cloudflare (https://dash.cloudflare.com → your domain → DNS → Records):
 
-Wait for propagation (`dig amg.yourdomain.com` should return your IP).
+- Click **Add record**
+- Type: **A**
+- Name: **amg** (creates `amg.yourdomain.com`)
+- IPv4 address: **<controller IPv4>**
+- Proxy status: **DNS only (grey cloud)** — important: leave Cloudflare proxy
+  OFF for now. Caddy needs to terminate TLS itself for Let's Encrypt to work
+  via HTTP-01 challenge. (You can switch to "Proxied" later for DDoS
+  protection once Caddy has a cert; that's a Phase 4 item.)
+- TTL: Auto
+
+Wait ~30s, then verify from your Mac:
+
+```bash
+dig +short amg.yourdomain.com    # should print the controller IPv4
+```
 
 ### Step 5. Set up the controller VM
 
@@ -130,13 +196,21 @@ ufw allow 80/tcp
 ufw allow 443/tcp
 ufw --force enable
 
-# 3. Pull the AMG image you published in step 2
-docker pull <your-image-from-step-2>
+# 3. Log in to GHCR so the controller VM can pull a private package.
+#    Skip this if you made the package public in step 2 (recommended for the
+#    controller image too — it's just app code).
+echo $GHCR_PAT | docker login ghcr.io -u $GH_USER --password-stdin
 
-# 4. Persistent data directory for the controller
+# 4. Pull the controller image you published in step 2
+docker pull $CONTROLLER_IMAGE
+
+# 5. Persistent data directory for the controller (survives container recycles).
+#    Holds: data/auth.sqlite (users), data/credentials.sqlite (encrypted
+#    rclone configs), data/work_dirs/* (per-scene outputs).
 mkdir -p /var/lib/amg/data
+chown -R 1000:1000 /var/lib/amg/data    # non-root amg user inside container
 
-# 5. Caddyfile (replace amg.yourdomain.com)
+# 6. Caddyfile (replace amg.yourdomain.com)
 cat > /etc/caddy/Caddyfile <<'EOF'
 amg.yourdomain.com {
     reverse_proxy 127.0.0.1:8000
@@ -168,7 +242,7 @@ ExecStart=/usr/bin/docker run --rm --name amg-controller \
     --env-file /etc/amg/controller.env \
     -p 127.0.0.1:8000:8000 \
     -v /var/lib/amg/data:/data \
-    <YOUR-IMAGE> \
+    ghcr.io/<GH_USER>/amg-controller:0.1 \
     amg ui --auth --host 0.0.0.0 --port 8000
 ExecStop=/usr/bin/docker stop amg-controller
 
@@ -177,34 +251,43 @@ WantedBy=multi-user.target
 EOF
 ```
 
-Replace `<YOUR-IMAGE>` with the one from step 2.
+Replace `<GH_USER>` with your GitHub username.
 
 ### Step 7. Drop the controller env file
 
 ```bash
 mkdir -p /etc/amg
 cat > /etc/amg/controller.env <<'EOF'
-# UI auth (fail-open is impossible without these)
-AMG_SESSION_SECRET=<value from step 1>
+# --- UI auth (fail-open is impossible without these) ---
+AMG_SESSION_SECRET=<from step 1>
 AMG_AUTH_DISABLED=0
 
-# Pod handshake (controller talks to pod with this token; pod requires it)
-AMG_POD_AUTH_TOKEN=<value from step 1>
+# --- Pod handshake (controller ↔ pod-worker bearer token) ---
+AMG_POD_AUTH_TOKEN=<from step 1>
 
-# Backend dispatch
+# --- Encrypted credential store (Phase 2 cloud-source picker) ---
+# Without this set, the Cloud picker page errors out telling you to set it.
+# Without this preserved across redeploys, the encrypted rclone tokens in
+# data/credentials.sqlite become unrecoverable.
+AMG_CREDENTIALS_KEY=<from step 1>
+
+# --- Backend dispatch ---
 AMG_JOB_BACKEND=runpod
 
-# Runpod
-AMG_RUNPOD_API_KEY=<your runpod api key>
-AMG_RUNPOD_IMAGE=<image from step 2>
+# --- Runpod ---
+AMG_RUNPOD_API_KEY=<paste from runpod.io console>
+AMG_RUNPOD_IMAGE=ghcr.io/<GH_USER>/amg-pod:0.1
 AMG_RUNPOD_GPU_TYPE=NVIDIA GeForce RTX 4090
-# Optional: persistent volume so model weights survive between pods
+# Optional but RECOMMENDED: persistent network volume so the 5 GB qwen2.5vl
+# model weights are cached between pods. Without it, every pod boot pulls
+# the model again (~5 min cold-start tax per job).
+# Create a 25 GB volume in the Runpod console first, then paste its ID here.
 # AMG_RUNPOD_NETWORK_VOLUME_ID=
 
-# Storage paths inside the container map to the host volume
+# --- Storage paths inside the container map to the host volume ---
 AMG_DATA_DIR=/data
 
-# Job timing
+# --- Job timing ---
 AMG_JOB_PROVISION_TIMEOUT_SEC=600
 AMG_JOB_RUN_TIMEOUT_SEC=14400
 EOF
@@ -255,6 +338,65 @@ If all four are green, **Phase 1 is operational**.
 
 ---
 
+## Phase 2 — Wire the cloud-source picker
+
+After the Phase 1 upload smoke test passes, switch from "upload from Mac" to
+"pull directly from Drive/Dropbox/Mega" so videos go datacenter-to-datacenter
+instead of through your home internet.
+
+### Step 11. OAuth your cloud-storage providers (one-time, on your Mac)
+
+The OAuth dance opens a browser, so it has to happen on a machine with a
+browser — not the headless Hetzner VM. On your **Mac**:
+
+```bash
+# Install rclone if you don't have it
+brew install rclone
+
+# Walk through the interactive setup — pick "drive" / "dropbox" / "mega"
+# (and "Yes" to "Use web browser to autoauthenticate").
+rclone config
+```
+
+Repeat `rclone config` once per provider you want to add. Output lands in
+`~/.config/rclone/rclone.conf`.
+
+> **Drive "Shared with me" gotcha**: rclone's default Drive remote sees only
+> *My Drive*, not *Shared with me*. If your videos live in a shared folder,
+> open Google Drive in the browser, right-click the shared folder → **Add
+> shortcut to Drive** → put it under *My Drive*. The shortcut makes the
+> content visible through the standard remote.
+
+### Step 12. Import the rclone configs into the controller
+
+SSH to the controller and run:
+
+```bash
+docker exec -it amg-controller amg cloud-remote add
+# Paste the relevant [section] from your local ~/.config/rclone/rclone.conf
+# Hit Ctrl-D on a blank line.
+docker exec amg-controller amg cloud-remote list
+```
+
+(Repeat per provider.)
+
+### Step 13. Verify and use the picker
+
+1. Refresh the controller UI in your browser. You should see a new **Cloud**
+   nav link.
+2. Click **Cloud** → your remotes appear in the left column.
+3. Click **Browse** on a remote → drill into folders → click **Process** on
+   any video.
+4. Watch the job card. Status flow: `queued → downloading → running → done`.
+5. The downloaded video lives only on the GPU pod's ephemeral disk and is
+   wiped when the pod terminates.
+
+If `amg cloud-remote list` shows your remote but the Cloud page says
+"AMG_CREDENTIALS_KEY not set", you forgot to add it to `controller.env`
+or the systemd unit isn't reading the env file. Re-check Step 7.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Check |
@@ -268,17 +410,18 @@ If all four are green, **Phase 1 is operational**.
 
 ---
 
-## What's next (Phase 2 — fast cloud-storage transfers)
+## What's next (Phase 3+)
 
-Right now the smoke test pushes the whole video file from your browser →
-controller → pod. That's slow over residential internet for 4GB+ scenes.
+Phases 1 and 2 give you a working cloud-hosted single-operator deployment.
+Phases 3+ add multi-user safety, observability, and cost controls before
+this is shared beyond Mario.
 
-Phase 2 adds rclone-driven downloads on the pod side: pick a video from
-your Google Drive / Dropbox / Mega in the UI, the pod downloads it
-directly from the cloud-storage provider's CDN at datacenter-to-datacenter
-speeds (typically 10×–50× faster than your home upload).
-
-That's a separate code drop; it builds on Phase 1, not into it.
+- **Phase 3**: per-user accounts (Amy, contractors), per-user job history,
+  audit log of significant actions.
+- **Phase 5** (deferred): cloud-target output — push the generated covers
+  back to the same Drive/Dropbox folder the source video came from, so your
+  distribution workflow doesn't need a separate "download from controller"
+  step.
 
 ---
 

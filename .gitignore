@@ -64,6 +64,14 @@ data/auth.sqlite
 data/auth.sqlite-journal
 data/auth.sqlite-wal
 data/auth.sqlite-shm
+# Cloud edition: encrypted rclone credential store + the Fernet key file
+# that decrypts it. Both are catastrophic to leak.
+data/credentials.sqlite
+data/credentials.sqlite-journal
+data/credentials.sqlite-wal
+data/credentials.sqlite-shm
+data/test_env
+data/cloud_downloads/
 # Training exports / local datasets (operator-machine specific)
 data/training/
 

@@ -1,0 +1,106 @@
+# Build & push the AMG cloud-edition Docker images to GHCR.
+#
+# Two images get built:
+#   - ghcr.io/<owner>/amg-controller:<tag>   (Hetzner VM, no GPU, no Ollama)
+#   - ghcr.io/<owner>/amg-pod:<tag>          (Runpod GPU pod, Ollama bundled)
+#
+# Tagging strategy:
+#   - Every push to `main` → tagged `latest` and `main-<short-sha>`.
+#   - Every git tag `v*`   → tagged with the version (e.g. `v0.1.0`).
+#   - Manual trigger       → tagged `manual-<run-id>`.
+#
+# How to use after the first run:
+#   1. Make both packages public at:
+#        https://github.com/<owner>?tab=packages
+#      (visibility → Public; safe — they only contain application code).
+#   2. Pull on Hetzner: `docker pull ghcr.io/<owner>/amg-controller:latest`
+#   3. Reference in Runpod: `AMG_RUNPOD_IMAGE=ghcr.io/<owner>/amg-pod:latest`
+#
+# This workflow uses the built-in GITHUB_TOKEN to push to GHCR (granted via
+# `permissions.packages: write` below) — no PAT needed.
+
+name: build-images
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      # Only rebuild when something that ends up in the image changes.
+      - "Dockerfile"
+      - "Dockerfile.pod"
+      - "scripts/pod_entrypoint.sh"
+      - "pyproject.toml"
+      - "amg/**"
+      - ".github/workflows/build-images.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: amg-controller
+            dockerfile: Dockerfile
+          - image: amg-pod
+            dockerfile: Dockerfile.pod
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build tags:
+      #   - latest             (only on main)
+      #   - main-<sha7>        (on main, useful for pinning a known-good build)
+      #   - <semver>           (when a v* tag is pushed)
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=main-,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=raw,value=manual-${{ github.run_id }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: Build & push (${{ matrix.image }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          # linux/amd64 only — Runpod GPUs are x86, Hetzner CX21 is x86.
+          # Building arm64 too would double CI time and we don't need it.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+      - name: Image digests
+        run: |
+          echo "Built ${{ matrix.image }} with tags:"
+          echo "${{ steps.meta.outputs.tags }}"

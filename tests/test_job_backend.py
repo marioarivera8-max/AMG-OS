@@ -98,9 +98,10 @@ class _FakePodResponse:
 
 
 class _FakeHttpSession:
-    def __init__(self) -> None:
+    def __init__(self, auto_healthz_ok: bool = True) -> None:
         self.calls: List[Dict[str, Any]] = []
         self.responses: List[_FakePodResponse] = []
+        self._auto_healthz_ok = auto_healthz_ok
 
     def queue(self, *responses: _FakePodResponse) -> None:
         self.responses.extend(responses)
@@ -122,6 +123,13 @@ class _FakeHttpSession:
 
     def get(self, url, *, headers=None, timeout=None, stream=False):
         self.calls.append({"method": "GET", "url": url, "stream": stream})
+        # /healthz is the readiness probe the controller polls between
+        # provision and submit. Auto-respond OK so existing tests don't
+        # have to queue an extra response per call. Tests that want to
+        # exercise the readiness timeout pre-queue a non-200 + use
+        # auto_healthz_ok=False.
+        if self._auto_healthz_ok and url.endswith("/healthz"):
+            return _FakePodResponse(200, {"status": "ok"})
         return self._next()
 
     def close(self):
@@ -322,6 +330,63 @@ def test_runpod_backend_run_timeout(runpod_backend, tmp_path, monkeypatch):
     video.write_bytes(b"x")
     with pytest.raises(RuntimeError, match="did not finish"):
         backend.run_job(video)
+
+
+def test_runpod_backend_waits_for_pod_worker_healthz(runpod_backend, tmp_path, monkeypatch):
+    """The lifecycle should poll /healthz until 200 before submitting."""
+    backend, _client, session, _ = runpod_backend
+    import amg.cloud.job_backend as jb
+    monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+    # Disable the auto /healthz so we control the responses.
+    session._auto_healthz_ok = False
+    session.queue(
+        _FakePodResponse(503, {}),                                     # /healthz - not ready
+        _FakePodResponse(503, {}),                                     # /healthz - still not ready
+        _FakePodResponse(200, {"status": "ok"}),                       # /healthz - ready!
+        _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),   # POST /jobs
+        _FakePodResponse(200, {"status": "done", "result": {"success": True, "scene_id": "s"},
+                               "log_tail": [], "progress_pct": 100}),  # GET /jobs/j1
+        _FakePodResponse(200, content=_make_zip_bytes({"out/x.txt": b"x"})),  # GET /jobs/j1/zip
+    )
+
+    video_dir = tmp_path / "s"
+    video_dir.mkdir()
+    video = video_dir / "v.mp4"
+    video.write_bytes(b"v")
+    backend.run_job(video)
+
+    healthz_calls = [c for c in session.calls if c["url"].endswith("/healthz")]
+    assert len(healthz_calls) == 3, f"expected 3 /healthz polls, got {len(healthz_calls)}: {healthz_calls}"
+
+
+def test_runpod_backend_pod_worker_readiness_timeout(runpod_backend, tmp_path, monkeypatch):
+    """If /healthz never returns 200, the lifecycle should fail with a clear message."""
+    backend, client, session, _ = runpod_backend
+    import amg.cloud.job_backend as jb
+    monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+    # 0-second timeout forces the loop to exit on the first iteration with no
+    # successful /healthz seen.
+    monkeypatch.setattr(
+        backend,
+        "_wait_for_pod_worker_ready",
+        lambda pid, **kw: backend.__class__._wait_for_pod_worker_ready(
+            backend, pid, on_log=kw.get("on_log", lambda _m: None), timeout_sec=0.0,
+        ),
+    )
+    session._auto_healthz_ok = False
+    # Queue a non-200 response so the (single) probe attempt sees it.
+    session.queue(_FakePodResponse(503, {}))
+
+    video_dir = tmp_path / "stuck"
+    video_dir.mkdir()
+    video = video_dir / "v.mp4"
+    video.write_bytes(b"v")
+    with pytest.raises(RuntimeError, match="did not become ready"):
+        backend.run_job(video)
+    # Pod must still be terminated even though we failed before submit.
+    assert client.terminated == ["pod_test"], "pod should be terminated even on readiness timeout"
 
 
 # --- cloud-source jobs ------------------------------------------------------

@@ -1,0 +1,142 @@
+# AMG OS — Pod-side image (Runpod GPU container).
+#
+# This is the image Runpod pulls when the controller provisions a GPU pod.
+# It bundles BOTH:
+#   1. Ollama (vision model server) — pinned binary, GPU-aware (auto-detects CUDA)
+#   2. AMG (pipeline + pod-worker FastAPI app)
+# and runs them side-by-side via scripts/pod_entrypoint.sh.
+#
+# Why bundle Ollama instead of running it as a sidecar?
+# Runpod gives one image per pod. There's no docker-compose / no sidecar
+# pattern. So either we ship one image with both processes, or we accept
+# a slow startup that pulls the Ollama image as a separate step. Bundling
+# is simpler and faster.
+#
+# Differences vs the controller Dockerfile:
+#   * Includes the Ollama static binary (~400 MB layer).
+#   * Includes pod_entrypoint.sh (starts ollama, waits, pre-pulls model,
+#     execs amg pod-worker).
+#   * Default CMD is amg pod-worker (same as controller image — but here
+#     it's wrapped by the entrypoint script, not invoked directly).
+#   * Stays as root (Runpod's network-volume mounts get root-owned and
+#     a non-root user inside the container can't write to them; Runpod
+#     officially recommends running as root).
+#
+# Build (from the repo root):
+#   docker buildx build --platform linux/amd64 \
+#     -t ghcr.io/<owner>/amg-pod:0.1 \
+#     -f Dockerfile.pod \
+#     --push .
+#
+# Smoke test the entrypoint locally (CPU-only — Ollama will work but slow):
+#   docker run --rm -p 8000:8000 -p 11434:11434 \
+#     -e AMG_POD_AUTH_TOKEN=$(python -c 'import secrets; print(secrets.token_urlsafe(48))') \
+#     -e AMG_VISION_MODEL=qwen2.5vl:3b \
+#     ghcr.io/<owner>/amg-pod:0.1
+#
+# On Runpod, the network-volume mount path (typically /workspace) should be
+# bound to /root/.ollama so the qwen2.5vl model is cached between pods.
+# Set AMG_RUNPOD_NETWORK_VOLUME_ID in the controller env to wire that up.
+
+FROM python:3.12-slim-bookworm
+
+# Same runtime deps as controller, plus what the pod image needs:
+#   bash    -> pod_entrypoint.sh shebang
+#   procps  -> ps/kill for clean shutdown of background ollama
+#   zstd    -> Ollama ships its release tarballs as .tar.zst (not .tgz)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libgl1 \
+        libglib2.0-0 \
+        curl \
+        ca-certificates \
+        unzip \
+        tini \
+        bash \
+        procps \
+        zstd \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# rclone (cloud-storage transfers — Phase 2 cloud-source jobs). Keep this
+# in sync with the controller Dockerfile so version drift doesn't surprise
+# us in production.
+ARG RCLONE_VERSION=1.74.0
+ARG RCLONE_SHA256=61de0a78d8776fe3e080f8385ebe96d817f2ee6a6003fe36b2d9f3b49d3e36ea
+RUN curl -fsSL "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip" \
+        -o /tmp/rclone.zip \
+    && echo "${RCLONE_SHA256}  /tmp/rclone.zip" | sha256sum -c - \
+    && cd /tmp \
+    && unzip -q rclone.zip \
+    && mv rclone-v${RCLONE_VERSION}-linux-amd64/rclone /usr/local/bin/rclone \
+    && chmod +x /usr/local/bin/rclone \
+    && rm -rf /tmp/rclone* \
+    && rclone version | head -1
+
+# Ollama static binary (linux/amd64) with bundled CUDA libs. Pinned by
+# version + sha256 from the release's official sha256sum.txt. We download
+# the tarball directly instead of running install.sh because the script
+# tries to set up systemd, which doesn't exist in containers.
+#
+# Bumping version: pull the new SHA256 from the release page:
+#   curl -fsSL https://github.com/ollama/ollama/releases/download/v<VERSION>/sha256sum.txt
+# and grep for ollama-linux-amd64.tar.zst (the entry without -mlx / -rocm).
+#
+# Tarball layout: bin/ollama + lib/ollama/*.so. Extracting to /usr/local
+# preserves the layout ollama expects (`/usr/local/bin/ollama` looks up libs
+# at `/usr/local/lib/ollama/`).
+ARG OLLAMA_VERSION=0.23.1
+ARG OLLAMA_SHA256=1079dad63e0e0f2d3279280ce6d8a93f3af53e79afb14f74813e0b35d9b96d54
+RUN curl -fsSL "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
+        -o /tmp/ollama.tar.zst \
+    && echo "${OLLAMA_SHA256}  /tmp/ollama.tar.zst" | sha256sum -c - \
+    && tar -I zstd -xf /tmp/ollama.tar.zst -C /usr/local/ \
+    && rm -f /tmp/ollama.tar.zst \
+    && /usr/local/bin/ollama --version
+
+WORKDIR /app
+
+# AMG dependencies — same install layout as the controller image.
+COPY pyproject.toml ./
+RUN mkdir -p amg && touch amg/__init__.py \
+    && pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -e .
+
+# Real source replaces the stub.
+COPY amg/ ./amg/
+
+# Pod entrypoint script: starts ollama in background, waits for ready,
+# pre-pulls the vision model (cached if the network volume is attached),
+# then execs `amg pod-worker`.
+COPY scripts/pod_entrypoint.sh /usr/local/bin/pod-entrypoint
+RUN chmod +x /usr/local/bin/pod-entrypoint
+
+# Defaults. AMG_DATA_DIR maps to the network-volume mount on Runpod.
+# OLLAMA_HOST is local because we run Ollama in the same container.
+# OLLAMA_MODELS points at the data dir so the model survives pod recycles
+# (provided AMG_RUNPOD_NETWORK_VOLUME_ID is set in the controller env).
+ENV AMG_DATA_DIR=/data \
+    OLLAMA_HOST=127.0.0.1:11434 \
+    OLLAMA_MODELS=/data/ollama \
+    OLLAMA_KEEP_ALIVE=24h \
+    OLLAMA_NUM_PARALLEL=4 \
+    OLLAMA_FLASH_ATTENTION=1 \
+    OLLAMA_KV_CACHE_TYPE=q8_0 \
+    OLLAMA_CONTEXT_LENGTH=2560 \
+    OLLAMA_MAX_LOADED_MODELS=1 \
+    AMG_VISION_MODEL=qwen2.5vl:7b \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN mkdir -p /data /data/ollama
+
+# pod-worker port (controller talks to it via the Runpod proxy URL).
+EXPOSE 8000
+# Ollama port (NOT exposed via Runpod ports — internal-only).
+EXPOSE 11434
+
+# tini gives the entrypoint a proper PID 1 so SIGTERM from Runpod gracefully
+# stops both ollama (background) and amg pod-worker (foreground).
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/pod-entrypoint"]
+# CMD is the command the entrypoint execs after Ollama is ready.
+CMD ["amg", "pod-worker", "--host", "0.0.0.0", "--port", "8000"]
