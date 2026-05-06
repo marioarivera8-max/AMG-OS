@@ -225,13 +225,27 @@ def _run_pipeline_in_thread(tracker: _JobTracker, job_id: str, video_path: Path)
         from amg.pipeline import process_scene  # imported here to keep startup cheap
 
         result = process_scene(video_path)
-        tracker.update(
-            job_id,
+        # Re-point the tracker's work_dir at the pipeline's actual output
+        # folder before the controller pulls /jobs/{id}/zip. Initially it
+        # points at the download dir (which holds the multi-GB source
+        # video), and zipping that into a BytesIO blocks the streaming
+        # response by minutes — long enough to time out the controller's
+        # artifact-pull. The pipeline's result["work_dir"] is the much
+        # smaller out/... folder containing only the covers, contact
+        # sheet, and decision log, which is exactly what the operator
+        # needs back.
+        update_kwargs: Dict[str, Any] = dict(
             status="done" if result.get("success") else "error",
             finished_at=_utcnow_iso(),
             result=result,
             progress_pct=100,
         )
+        pipeline_work_dir = result.get("work_dir")
+        if pipeline_work_dir:
+            wd = Path(pipeline_work_dir)
+            if wd.is_dir():
+                update_kwargs["work_dir"] = str(wd)
+        tracker.update(job_id, **update_kwargs)
         tracker.append_log(
             job_id,
             f"[pod-worker] process_scene finished: success={result.get('success')} "
@@ -495,9 +509,15 @@ def create_app(*, auth_token: Optional[str] = None, tracker: Optional[_JobTracke
             )
         job_id = uuid.uuid4().hex[:12]
         scene_folder = (req.scene_id or Path(req.path).stem).strip() or job_id
-        # Match the upload path's job_dir layout so /jobs/{id}/zip works the
-        # same way: the pipeline runs against `download_dir`, and we ship
-        # back the contents of `download_dir` (videos + outputs) as the zip.
+        # download_dir is where rclone deposits the source video, and where
+        # the pipeline writes its out/... folder. The tracker's work_dir is
+        # initially set to download_dir, then narrowed in
+        # _run_pipeline_in_thread to the pipeline's actual output dir
+        # (result["work_dir"]) once process_scene returns. That way the
+        # /jobs/{id}/zip endpoint ships back only the covers + contact
+        # sheet + decision log — not the multi-GB source video, which
+        # would block the streaming response while zipfile builds the
+        # whole archive into BytesIO before yielding the first chunk.
         download_dir = POD_UPLOADS_DIR / job_id / scene_folder
         download_dir.mkdir(parents=True, exist_ok=True)
 

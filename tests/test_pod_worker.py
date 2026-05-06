@@ -205,6 +205,79 @@ class TestJobs:
         # the point is the request is rejected.
         assert r.status_code in (400, 422)
 
+    def test_work_dir_repointed_to_pipeline_output_after_success(
+        self, pod_env, monkeypatch, tmp_path
+    ):
+        """Regression: zipping the entire download dir (which holds the
+        multi-GB source video) makes /jobs/{id}/zip block its streaming
+        response by minutes while zipfile builds the archive into BytesIO.
+
+        After process_scene returns, the tracker's work_dir must be
+        narrowed to result["work_dir"] (the small out/ folder containing
+        only covers + contact sheet + decision log)."""
+        pw = pod_env["module"]
+        app = pw.create_app(auth_token=pod_env["token"])
+        client = TestClient(app)
+        client.headers["Authorization"] = f"Bearer {pod_env['token']}"
+
+        # Stand up a fake "pipeline output dir" that the pipeline result
+        # will point to. It must exist on disk for the work_dir update
+        # to take effect (the pod-worker validates is_dir()).
+        pipeline_out = tmp_path / "fake_out" / "scene_amg_v11"
+        pipeline_out.mkdir(parents=True)
+        (pipeline_out / "cover_001.jpg").write_bytes(b"x")
+
+        def _fake_process_scene(_video_path):
+            return {
+                "success": True,
+                "covers_saved": 12,
+                "scene_id": "stub",
+                "work_dir": str(pipeline_out),
+            }
+
+        import amg.pipeline as pipeline
+        monkeypatch.setattr(pipeline, "process_scene", _fake_process_scene)
+
+        r = client.post(
+            "/jobs",
+            files={"video": ("muvie.mp4", b"x")},
+            data={"scene_id": "muvie"},
+        )
+        job_id = r.json()["job_id"]
+        final = _wait_for_status(client, job_id, "done")
+        assert final is not None
+        assert final["work_dir"] == str(pipeline_out), (
+            "tracker.work_dir must be re-pointed at the pipeline's output "
+            "dir; otherwise /jobs/{id}/zip will try to zip the entire "
+            "download folder including the multi-GB source video"
+        )
+
+    def test_work_dir_unchanged_if_pipeline_omits_work_dir(
+        self, pod_env, monkeypatch
+    ):
+        """If the pipeline result lacks a work_dir field, leave the tracker
+        as-is. Better to ship a slightly larger zip than to crash."""
+        pw = pod_env["module"]
+        app = pw.create_app(auth_token=pod_env["token"])
+        client = TestClient(app)
+        client.headers["Authorization"] = f"Bearer {pod_env['token']}"
+
+        def _fake_process_scene(_video_path):
+            return {"success": True, "covers_saved": 3}  # no work_dir
+
+        import amg.pipeline as pipeline
+        monkeypatch.setattr(pipeline, "process_scene", _fake_process_scene)
+
+        r = client.post(
+            "/jobs",
+            files={"video": ("scene.mp4", b"x")},
+            data={"scene_id": "scene"},
+        )
+        job_id = r.json()["job_id"]
+        final = _wait_for_status(client, job_id, "done")
+        assert final is not None
+        assert "scene" in final["work_dir"]  # original download dir kept
+
 
 # --- /jobs/{id}/zip ---------------------------------------------------------
 
