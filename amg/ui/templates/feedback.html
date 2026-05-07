@@ -11,7 +11,7 @@
   </div>
 </div>
 
-<form method="get" action="/feedback" class="card card-tight" style="margin-bottom: 16px;">
+<form method="get" action="/feedback" class="card card-tight feedback-filters" style="margin-bottom: 16px;">
   <div class="row">
     <input type="text" name="scene" value="{{ feedback_filter.scene }}" placeholder="Scene id" style="min-width: 200px;" />
     <input type="text" name="studio" value="{{ feedback_filter.studio }}" placeholder="Studio" />
@@ -72,7 +72,7 @@
 </div>
 
 <div class="grid grid-2">
-  <div class="card">
+  <div class="card feedback-activity-card">
     <div class="muted" style="font-size: 12px;">Recent activity</div>
     {% if trend_rows %}
       <div class="stack" style="margin-top: 8px;">
@@ -87,36 +87,36 @@
       <div class="muted" style="font-size: 12px; margin-top: 8px;">No recent timestamped rows.</div>
     {% endif %}
   </div>
-  <div class="card">
+  <div class="card feedback-table-card">
     <h3 class="card-section-title">
       {% if feedback_filter.view == 'all' %}Recent comparisons{% else %}Disagreements{% endif %}
       <span class="muted">last {{ recent_rows | length }} rows</span>
     </h3>
     {% if recent_rows %}
-      <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+      <table class="feedback-table">
         <thead>
-          <tr style="text-align: left; color: var(--muted); border-bottom: 1px solid var(--line-soft);">
-            <th style="padding: 6px 4px;">Scene</th>
-            <th style="padding: 6px 4px;">Cover</th>
-            <th style="padding: 6px 4px;">t(s)</th>
-            <th style="padding: 6px 4px;">Saved at</th>
-            <th style="padding: 6px 4px;">Field</th>
-            <th style="padding: 6px 4px;">Model</th>
-            <th style="padding: 6px 4px;">Operator</th>
+          <tr>
+            <th>Scene</th>
+            <th>Cover</th>
+            <th>t(s)</th>
+            <th>Saved at</th>
+            <th>Field</th>
+            <th>Model</th>
+            <th>Operator</th>
           </tr>
         </thead>
         <tbody>
           {% for r in recent_rows %}
-            <tr style="border-bottom: 1px solid var(--line-soft);">
-              <td style="padding: 6px 4px; max-width: 240px;">
+            <tr>
+              <td style="max-width: 240px;">
                 <a href="/scene/{{ r.scene_id }}" title="{{ r.scene_id }}" style="display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ r.scene_id }}</a>
               </td>
-              <td class="mono" style="padding: 6px 4px; color: var(--muted); max-width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ r.filename }}</td>
-              <td class="mono" style="padding: 6px 4px; color: var(--muted);">{{ r.cover_time or "—" }}</td>
-              <td class="mono" style="padding: 6px 4px; color: var(--muted);">{{ r.saved_at }}</td>
-              <td style="padding: 6px 4px;">{{ r.field }}</td>
-              <td style="padding: 6px 4px;"><span class="pill">{{ r.model_value }}</span></td>
-              <td style="padding: 6px 4px;"><span class="pill {{ r.match_cls }}">{{ r.operator_value }}</span></td>
+              <td class="mono muted" style="max-width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ r.filename }}</td>
+              <td class="mono muted">{{ r.cover_time or "—" }}</td>
+              <td class="mono muted">{{ r.saved_at }}</td>
+              <td>{{ r.field }}</td>
+              <td><span class="pill">{{ r.model_value }}</span></td>
+              <td><span class="pill {{ r.match_cls }}">{{ r.operator_value }}</span></td>
             </tr>
           {% endfor %}
         </tbody>
@@ -126,7 +126,7 @@
     {% endif %}
   </div>
 
-  <div class="card">
+  <div class="card feedback-breakdown-card">
     <h3 class="card-section-title">Top scenes by feedback</h3>
     {% if scenes_by_count %}
       <div class="stack">

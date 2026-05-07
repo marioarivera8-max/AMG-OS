@@ -6,22 +6,30 @@
     <title>Sign in · AMG OS</title>
     <style>
       :root {
-        --bg-0: #0F1115;
-        --bg-1: #11151D;
-        --bg-2: #171A21;
-        --bg-3: #1C2230;
-        --line: #2A3040;
-        --line-soft: #232938;
-        --text: #E7E7E7;
-        --muted: #9AA3B2;
-        --muted-2: #6E7689;
-        --accent: #5B8DEF;
-        --accent-soft: rgba(91, 141, 239, 0.12);
-        --err: #F29A9A;
-        --err-soft: rgba(242, 154, 154, 0.12);
-        --warn: #F6CF75;
-        --warn-soft: rgba(246, 207, 117, 0.12);
+        --paper: #1d2128;
+        --paper-2: #262b34;
+        --paper-3: #2f3540;
+        --ink: #f4f1e8;
+        --ink-2: #b9b6ad;
+        --ink-3: #7a7c83;
+        --line: #f4f1e8;
+        --line-soft: #44474f;
+        --accent: oklch(0.78 0.16 70);
+        --accent-soft: oklch(0.34 0.06 70);
+        --accent-ink: oklch(0.82 0.16 75);
+        --err: oklch(0.68 0.18 25);
+        --err-soft: color-mix(in oklab, var(--err) 16%, transparent);
+        --warn: oklch(0.80 0.14 80);
+        --warn-soft: color-mix(in oklab, var(--warn) 16%, transparent);
         --radius: 10px;
+
+        --bg-0: var(--paper);
+        --bg-1: var(--paper);
+        --bg-2: var(--paper-2);
+        --bg-3: var(--paper-3);
+        --text: var(--ink);
+        --muted: var(--ink-2);
+        --muted-2: var(--ink-3);
       }
       * { box-sizing: border-box; }
       html, body { margin: 0; padding: 0; height: 100%; }
@@ -39,11 +47,11 @@
       }
       .login-card {
         width: 100%;
-        max-width: 380px;
+        max-width: 420px;
         background: var(--bg-2);
-        border: 1px solid var(--line);
+        border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
         border-radius: 14px;
-        padding: 28px 26px;
+        padding: 26px 24px;
       }
       .brand {
         display: flex;
@@ -55,7 +63,7 @@
       }
       .brand-glyph {
         width: 22px; height: 22px;
-        background: linear-gradient(135deg, #5B8DEF, #7E5BE3);
+        background: linear-gradient(135deg, var(--accent), var(--accent-ink));
         clip-path: polygon(50% 0, 100% 100%, 0 100%);
       }
       h1 {
@@ -80,7 +88,7 @@
       input[type="text"], input[type="password"] {
         background: var(--bg-1);
         color: var(--text);
-        border: 1px solid var(--line);
+        border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
         border-radius: 8px;
         padding: 10px 12px;
         font-size: 14px;
@@ -88,13 +96,13 @@
         outline: none;
       }
       input:focus {
-        border-color: var(--accent);
-        box-shadow: 0 0 0 3px var(--accent-soft);
+        border-color: color-mix(in oklab, var(--accent) 78%, var(--line) 22%);
+        box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 36%, transparent);
       }
       button.primary {
         width: 100%;
         background: var(--accent);
-        color: #0a1024;
+        color: #1f1710;
         border: 1px solid var(--accent);
         border-radius: 8px;
         padding: 11px 14px;
@@ -104,7 +112,10 @@
         font-family: inherit;
         margin-top: 4px;
       }
-      button.primary:hover { background: #6fa0f7; border-color: #6fa0f7; }
+      button.primary:hover {
+        background: color-mix(in oklab, var(--accent) 88%, white 12%);
+        border-color: color-mix(in oklab, var(--accent) 88%, white 12%);
+      }
       .alert {
         font-size: 13px;
         padding: 10px 12px;
@@ -123,9 +134,9 @@
         border-color: rgba(246, 207, 117, 0.3);
       }
       .alert.info {
-        color: var(--accent);
+        color: var(--accent-ink);
         background: var(--accent-soft);
-        border-color: rgba(91, 141, 239, 0.3);
+        border-color: color-mix(in oklab, var(--accent) 40%, transparent);
       }
       .alert code {
         font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -140,6 +151,23 @@
         color: var(--muted-2);
         text-align: center;
         letter-spacing: 0.02em;
+      }
+      .login-splash {
+        margin: 0 0 16px;
+        border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: color-mix(in oklab, var(--bg-3) 55%, transparent);
+      }
+      .login-splash h2 {
+        margin: 0;
+        font-size: 12px;
+        letter-spacing: 0.02em;
+      }
+      .login-splash p {
+        margin: 6px 0 0;
+        font-size: 12px;
+        color: var(--muted);
       }
     </style>
   </head>
@@ -160,6 +188,10 @@
       {% else %}
         <h1>Sign in</h1>
         <div class="sub">AMG OS is gated behind a login. Use the credentials your operator created.</div>
+        <div class="login-splash">
+          <h2>Single-operator secure access</h2>
+          <p>This workspace runs in manual-review mode and saves corrections locally for model improvement.</p>
+        </div>
 
         {% if no_users %}
           <div class="alert warn">

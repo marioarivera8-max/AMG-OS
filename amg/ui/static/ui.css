@@ -142,6 +142,56 @@
   padding-top: 8px;
 }
 
+/* PR4: feedback + login consistency */
+.metric-card {
+  border: 1.5px solid color-mix(in oklab, var(--line) 18%, transparent);
+}
+
+.metric-card-label {
+  font-size: 12px;
+}
+
+.metric-card-value {
+  font-size: 26px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.metric-card-sub {
+  font-size: 11px;
+}
+
+.feedback-filters {
+  border: 1.5px solid color-mix(in oklab, var(--line) 18%, transparent);
+}
+
+.feedback-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.feedback-table thead tr {
+  text-align: left;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.feedback-table th,
+.feedback-table td {
+  padding: 6px 4px;
+}
+
+.feedback-table tbody tr {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.feedback-table-card,
+.feedback-activity-card,
+.feedback-breakdown-card {
+  border: 1.5px solid color-mix(in oklab, var(--line) 18%, transparent);
+}
+
 @media (max-width: 1100px) {
   .scene-head-row {
     gap: 14px;

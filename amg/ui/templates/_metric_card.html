@@ -1,11 +1,11 @@
-<div class="card">
-  <div class="muted" style="font-size: 12px;">{{ metric_title }}</div>
-  <div style="font-size: 26px; font-weight: 600; margin-top: 4px;">
+<div class="card metric-card">
+  <div class="muted metric-card-label">{{ metric_title }}</div>
+  <div class="metric-card-value">
     {% if metric_value is not none and metric_value != '' %}
       {% if metric_value_class %}<span class="{{ metric_value_class }}">{{ metric_value }}</span>{% else %}{{ metric_value }}{% endif %}
     {% else %}
       <span class="muted">—</span>
     {% endif %}
   </div>
-  <div class="muted" style="font-size: 11px;">{{ metric_subtext }}</div>
+  <div class="muted metric-card-sub">{{ metric_subtext }}</div>
 </div>
