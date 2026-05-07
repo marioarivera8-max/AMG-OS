@@ -92,6 +92,56 @@
   margin-bottom: 8px;
 }
 
+/* PR3: library + process polish */
+.library-attention-card {
+  border: 1.5px solid color-mix(in oklab, var(--warn) 28%, var(--line-soft) 72%);
+}
+
+.library-sort-tabs .pill {
+  text-decoration: none;
+}
+
+.library-scene-card {
+  transition: transform 120ms ease, border-color 120ms ease;
+}
+
+.library-scene-card:hover {
+  transform: translateY(-1px);
+}
+
+.process-panel-head {
+  margin-bottom: 10px;
+}
+
+.process-recent-scene {
+  border-color: color-mix(in oklab, var(--line) 16%, transparent);
+}
+
+.process-recent-scene:hover {
+  border-color: color-mix(in oklab, var(--accent) 28%, transparent);
+}
+
+.process-timings-card {
+  border-color: color-mix(in oklab, var(--line) 18%, transparent);
+}
+
+.process-jobs-stack .process-job-card {
+  border: 1.5px solid color-mix(in oklab, var(--line) 18%, transparent);
+}
+
+.process-job-path {
+  opacity: 0.95;
+}
+
+.process-job-message {
+  line-height: 1.4;
+}
+
+.process-job-meta {
+  border-top: 1px dashed color-mix(in oklab, var(--line) 12%, transparent);
+  padding-top: 8px;
+}
+
 @media (max-width: 1100px) {
   .scene-head-row {
     gap: 14px;

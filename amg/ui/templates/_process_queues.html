@@ -1,5 +1,5 @@
 {# Active + completed job stacks for Process page. Swapped by HTMX (POST /jobs + polling). #}
-<div class="between" style="margin-bottom: 10px;">
+<div class="between process-queue-head" style="margin-bottom: 10px;">
   <h3 class="card-section-title" style="margin: 0;">
     Queue &amp; active
     <span class="muted">
@@ -10,7 +10,7 @@
   </h3>
   <span class="muted" style="font-size: 12px;">Runs one job at a time · FIFO · auto-refresh</span>
 </div>
-<div id="active-jobs-stack" class="stack">
+<div id="active-jobs-stack" class="stack process-jobs-stack">
   {% for job in active_jobs %}
     {% include "_job_card.html" %}
   {% else %}
@@ -18,13 +18,13 @@
   {% endfor %}
 </div>
 
-<div class="between" style="margin: 16px 0 10px;">
+<div class="between process-queue-head" style="margin: 16px 0 10px;">
   <h3 class="card-section-title" style="margin: 0;">
     Recent completed <span class="muted">{% if completed_jobs %}· {{ completed_jobs | length }}{% endif %}</span>
   </h3>
-  <span class="muted" style="font-size: 12px;">Latest finished (this session)</span>
+  <span class="muted" style="font-size: 12px;">Latest finished in this session</span>
 </div>
-<div id="completed-jobs-stack" class="stack">
+<div id="completed-jobs-stack" class="stack process-jobs-stack">
   {% for job in completed_jobs %}
     {% include "_job_card.html" %}
   {% else %}

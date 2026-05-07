@@ -42,6 +42,25 @@
   </aside>
 
   <div>
+    {% if stats.review > 0 %}
+      {% set ns = namespace(review_target='/library?status=review&sort=action_queue', found=false) %}
+      {% for s in scenes %}
+        {% if (not ns.found) and ((s.status or '')|lower == 'review') %}
+          {% set ns.review_target = '/scene/' ~ s.scene_id %}
+          {% set ns.found = true %}
+        {% endif %}
+      {% endfor %}
+      <div class="card library-attention-card" style="margin-bottom: 12px;">
+        <div class="between">
+          <div>
+            <h3 class="card-section-title" style="margin: 0;">{{ stats.review }} scenes need review</h3>
+            <div class="muted" style="font-size: 12px; margin-top: 4px;">Start with the next queued scene and move straight through the stack.</div>
+          </div>
+          <a href="{{ ns.review_target }}" class="btn-primary">Start reviewing →</a>
+        </div>
+      </div>
+    {% endif %}
+
     <form method="get" action="/library" class="card card-tight" style="margin-bottom: 16px;">
       <div class="row">
         <input type="search" name="q" value="{{ filter.q or '' }}" placeholder="Search scene, studio, performers, title, tags…" style="flex: 1; min-width: 240px;" />
@@ -73,6 +92,13 @@
       </div>
     </form>
 
+    <div class="row library-sort-tabs" style="margin-bottom: 10px;">
+      <a class="pill {% if filter.sort == 'action_queue' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&min_score={{ filter.min_score or '' }}&sort=action_queue&limit={{ filter.limit or '24' }}">Action queue</a>
+      <a class="pill {% if filter.sort == 'newest' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&min_score={{ filter.min_score or '' }}&sort=newest&limit={{ filter.limit or '24' }}">Newest</a>
+      <a class="pill {% if filter.sort == 'highest_score' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&min_score={{ filter.min_score or '' }}&sort=highest_score&limit={{ filter.limit or '24' }}">Highest score</a>
+      <a class="pill {% if filter.sort == 'lowest_score' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&min_score={{ filter.min_score or '' }}&sort=lowest_score&limit={{ filter.limit or '24' }}">Lowest score</a>
+    </div>
+
     <div class="muted" style="font-size: 12px; margin-bottom: 10px;">
       Showing {{ scenes | length }} of {{ total_filtered }} matches
     </div>
@@ -80,7 +106,7 @@
     {% if scenes %}
       <div class="cover-grid">
         {% for s in scenes %}
-          <a class="cover-card" href="/scene/{{ s.scene_id }}" style="text-decoration: none; color: inherit;">
+          <a class="cover-card library-scene-card" href="/scene/{{ s.scene_id }}" style="text-decoration: none; color: inherit;">
             <div class="cover-thumb grad-{{ s.grad_idx }}">
               {% if s.preview_path %}
                 <img src="/artifact?path={{ s.preview_path | urlencode }}" alt="{{ s.scene_id }} preview" loading="lazy" />
@@ -104,6 +130,8 @@
               </div>
               {% if s.title %}
                 <div class="muted ellipsis" style="font-size: 11px;" title="{{ s.title }}">{{ s.title }}</div>
+              {% else %}
+                <div class="muted ellipsis" style="font-size: 11px; font-style: italic;">(no title yet)</div>
               {% endif %}
               {% if s.tags %}
                 <div style="margin-top: 4px;">

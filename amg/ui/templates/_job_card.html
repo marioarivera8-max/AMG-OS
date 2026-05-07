@@ -1,9 +1,9 @@
-<div id="job-{{ job.job_id }}" class="card">
+<div id="job-{{ job.job_id }}" class="card process-job-card">
   <div class="between">
     <div style="display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1;">
       <strong class="ellipsis">{{ job.scene_id or "(resolving…)" }}</strong>
       <span class="pill" title="job id">{{ job.job_id }}</span>
-      {% if job.queue_pos %}<span class="pill">#{{ job.queue_pos }}</span>{% endif %}
+      {% if job.queue_pos %}<span class="pill">queue #{{ job.queue_pos }}</span>{% endif %}
       {% if job.source_mode %}<span class="pill">src: {{ job.source_mode }}</span>{% endif %}
     </div>
     <div>
@@ -21,7 +21,7 @@
     </div>
   </div>
 
-  <div class="muted mono ellipsis" style="margin-top: 6px; font-size: 11px;">{{ job.video_path }}</div>
+  <div class="muted mono ellipsis process-job-path" style="margin-top: 6px; font-size: 11px;">{{ job.video_path }}</div>
 
   {% if job.progress_pct is defined and job.status in ["running", "done"] %}
     <div class="progress" style="margin-top: 12px;">
@@ -37,14 +37,14 @@
     </div>
   {% endif %}
 
-  <div style="margin-top: 10px; font-size: 13px;">{{ job.message }}</div>
+  <div class="process-job-message" style="margin-top: 10px; font-size: 13px;">{{ job.message }}</div>
 
   {% if job.log_tail %}
     <pre class="log" style="margin-top: 10px;">{% for ln in job.log_tail %}{{ ln }}
 {% endfor %}</pre>
   {% endif %}
 
-  <div class="between" style="margin-top: 10px; font-size: 11px; color: var(--muted-2);">
+  <div class="between process-job-meta" style="margin-top: 10px; font-size: 11px; color: var(--muted-2);">
     <div>
       {% if job.elapsed_str %}elapsed {{ job.elapsed_str }}{% endif %}
       {% if job.eta_str %} · ETA {{ job.eta_str }}{% endif %}

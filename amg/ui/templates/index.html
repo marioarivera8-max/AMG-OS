@@ -52,6 +52,10 @@
 
 <div class="grid grid-2 mt-24">
   <div>
+    <div class="between process-panel-head">
+      <h3 class="card-section-title" style="margin: 0;">Live queue</h3>
+      <span class="muted" style="font-size: 12px;">One at a time, FIFO order</span>
+    </div>
     <div
       id="process-jobs-panel"
       hx-get="/partials/process-jobs"
@@ -63,13 +67,13 @@
   </div>
 
   <div>
-    <div class="between" style="margin-bottom: 10px;">
+    <div class="between process-panel-head" style="margin-bottom: 10px;">
       <h3 class="card-section-title" style="margin: 0;">Recent Scenes</h3>
       <a href="/library" style="font-size: 12px;">All scenes →</a>
     </div>
     <div class="stack">
       {% for s in recent_scenes[:8] %}
-        <a href="/scene/{{ s.scene_id }}" class="card card-tight" style="display: flex; gap: 10px; align-items: center; text-decoration: none; color: inherit;">
+        <a href="/scene/{{ s.scene_id }}" class="card card-tight process-recent-scene" style="display: flex; gap: 10px; align-items: center; text-decoration: none; color: inherit;">
           <div class="cover-thumb grad-{{ s.grad_idx }}" style="width: 64px; height: 36px; border-radius: 6px; flex: 0 0 64px;">
             {% if s.preview_path %}
               <img src="/artifact?path={{ s.preview_path | urlencode }}" alt="" />
@@ -86,7 +90,7 @@
       {% endfor %}
     </div>
 
-    <div class="card" style="margin-top: 12px;">
+    <div class="card process-timings-card" style="margin-top: 12px;">
       <div class="between" style="margin-bottom: 8px;">
         <h3 class="card-section-title" style="margin: 0;">Run Timing History</h3>
         <span class="muted" style="font-size: 12px;">last {{ recent_runs | length }} runs</span>
