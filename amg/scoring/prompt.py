@@ -378,6 +378,8 @@ REQUIREMENTS:
   - Vary the patterns across the {n_suggestions} suggestions.
   - Prefer concrete details (setting, performer name, position, mood) over generic adjectives.
   - Avoid clichéd words: "wild", "crazy", "naughty".
+  - Do not repeat near-identical title phrasing across TITLE_1..TITLE_5.
+  - Keep punctuation clean: no emoji, no all-caps shouting, no repeated exclamation marks.
   - If a lead performer is provided, include that performer name in EVERY title.
   - The long description must mention the lead performer by name at least once.
   - Write with commercial energy (confident, explicit, sellable), not bland catalog prose.
@@ -389,9 +391,12 @@ REQUIREMENTS:
       * creative: novel phrasing and less repetitive structure
   - Long description: 2-4 sentences, factual, suitable for a store listing. Mention performers,
     setting, and one or two notable details. Do NOT use the words listed above.
+  - Long description must be 140-500 characters.
   - Also return category and tag suggestions tailored to this scene.
   - Categories should be platform-style labels (Title Case).
   - Tags should be lowercase, short, and search-friendly.
+  - CATEGORY_SUGGESTIONS should be 8-15 unique entries.
+  - TAG_SUGGESTIONS should be 15-30 unique entries.
 
 {market_note}
 {tone_note}

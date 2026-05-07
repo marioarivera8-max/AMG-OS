@@ -63,6 +63,32 @@ MARKET_TERMS_TO_AVOID: List[str] = [
     "naughty",
 ]
 
+# Soft global ranges used by the enriched metadata normalizer.
+CATEGORY_COUNT_MIN = 8
+CATEGORY_COUNT_MAX = 15
+TAG_COUNT_MIN = 15
+TAG_COUNT_MAX = 30
+
+# Common synonym cleanup so generated outputs collapse to one canonical token.
+CATEGORY_ALIASES: Dict[str, str] = {
+    "pov porn": "POV",
+    "cumshot": "Cumshot",
+    "cream pie": "Cumshot",
+    "deep throat": "Deepthroat",
+    "solo": "Solo Female",
+    "toys": "Toys",
+}
+
+TAG_ALIASES: Dict[str, str] = {
+    "bj": "blowjob",
+    "deep throat": "deepthroat",
+    "doggystyle": "doggy style",
+    "doggy": "doggy style",
+    "cumshot": "cum in mouth",
+    "creampie": "creampie",
+    "eye-contact": "eye contact",
+}
+
 
 def build_market_profile_note() -> str:
     """Render compact prompt text for generation guidance."""

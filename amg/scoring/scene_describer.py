@@ -37,6 +37,13 @@ from amg.scoring.market_profile import (
     build_seed_taxonomy,
     MARKET_CATEGORY_PRIORITIES,
     MARKET_TAG_PRIORITIES,
+    MARKET_TERMS_TO_AVOID,
+    CATEGORY_COUNT_MIN,
+    CATEGORY_COUNT_MAX,
+    TAG_COUNT_MIN,
+    TAG_COUNT_MAX,
+    CATEGORY_ALIASES,
+    TAG_ALIASES,
 )
 from amg.scoring.title_generator import _fallback_titles, _check_platform_fit, _check_warnings
 from amg.utils.logging import get_logger
@@ -141,11 +148,19 @@ def generate_titles_with_insight(
         log.warn("AI offline — using template title fallback")
         titles = _annotate(_fallback_titles(studio, performers, scene_type, genres, n_suggestions))
         seed = build_seed_taxonomy(genres, position_summary)
-        cats = _prioritize_tokens(seed.get("categories", []), MARKET_CATEGORY_PRIORITIES)
-        tags = _prioritize_tokens(seed.get("tags", []), MARKET_TAG_PRIORITIES)
+        cats = _normalize_categories([], seed.get("categories", []))
+        tags = _normalize_tags([], seed.get("tags", []))
+        long_desc = _normalize_long_description(
+            "",
+            performers=performers,
+            studio=studio,
+            scene_type=scene_type,
+            genres=genres,
+            insight=insight_dict,
+        )
         return {
             "titles": titles,
-            "long_description": "",
+            "long_description": long_desc,
             "categories": cats,
             "tags": tags,
             "title_tone": title_tone,
@@ -171,11 +186,19 @@ def generate_titles_with_insight(
     if not response.success:
         log.warn("Enriched title call failed — using fallback", extra={"err": response.error_code})
         titles = _annotate(_fallback_titles(studio, performers, scene_type, genres, n_suggestions))
-        cats = _prioritize_tokens(seed_taxonomy.get("categories", []), MARKET_CATEGORY_PRIORITIES)
-        tags = _prioritize_tokens(seed_taxonomy.get("tags", []), MARKET_TAG_PRIORITIES)
+        cats = _normalize_categories([], seed_taxonomy.get("categories", []))
+        tags = _normalize_tags([], seed_taxonomy.get("tags", []))
+        long_desc = _normalize_long_description(
+            "",
+            performers=performers,
+            studio=studio,
+            scene_type=scene_type,
+            genres=genres,
+            insight=insight_dict,
+        )
         return {
             "titles": titles,
-            "long_description": "",
+            "long_description": long_desc,
             "categories": cats,
             "tags": tags,
             "title_tone": title_tone,
@@ -195,16 +218,18 @@ def generate_titles_with_insight(
     titles = _sanitize_title_candidates(titles)
     if not titles:
         titles = _fallback_titles(studio, performers, scene_type, genres, n_suggestions)
-    long_desc = _enforce_lead_performer_in_description(parsed.get("long_description", ""), lead)
+    long_desc = _normalize_long_description(
+        parsed.get("long_description", ""),
+        performers=performers,
+        studio=studio,
+        scene_type=scene_type,
+        genres=genres,
+        insight=insight_dict,
+    )
+    long_desc = _enforce_lead_performer_in_description(long_desc, lead)
     titles = _annotate(titles)
-    categories = _prioritize_tokens(
-        parsed.get("categories", []) or seed_taxonomy.get("categories", []),
-        MARKET_CATEGORY_PRIORITIES,
-    )
-    tags = _prioritize_tokens(
-        parsed.get("tags", []) or seed_taxonomy.get("tags", []),
-        MARKET_TAG_PRIORITIES,
-    )
+    categories = _normalize_categories(parsed.get("categories", []), seed_taxonomy.get("categories", []))
+    tags = _normalize_tags(parsed.get("tags", []), seed_taxonomy.get("tags", []))
     return {
         "titles": titles[:n_suggestions],
         "long_description": long_desc,
@@ -367,11 +392,97 @@ def _parse_csv_field(match: Optional[re.Match]) -> List[str]:
     if not raw or raw.upper() == "NONE":
         return []
     out = []
-    for token in raw.split(","):
+    for token in re.split(r"[,;\n|]", raw):
         t = token.strip()
         if t:
             out.append(t)
     return list(dict.fromkeys(out))
+
+
+def _normalize_categories(values: List[str], seed_values: List[str]) -> List[str]:
+    merged = list(values or []) + list(seed_values or [])
+    cleaned: List[str] = []
+    for token in merged:
+        t = re.sub(r"\s+", " ", str(token or "").strip())
+        if not t:
+            continue
+        t = re.sub(r"[^\w\s&+\-]", "", t)
+        if not t:
+            continue
+        alias = CATEGORY_ALIASES.get(t.lower())
+        if alias:
+            t = alias
+        if t.lower() == "pov":
+            t = "POV"
+        else:
+            t = " ".join(part.capitalize() for part in t.split())
+        cleaned.append(t)
+    prioritized = _prioritize_tokens(cleaned, MARKET_CATEGORY_PRIORITIES)
+    if len(prioritized) < CATEGORY_COUNT_MIN:
+        for c in MARKET_CATEGORY_PRIORITIES:
+            if c not in prioritized:
+                prioritized.append(c)
+            if len(prioritized) >= CATEGORY_COUNT_MIN:
+                break
+    return prioritized[:CATEGORY_COUNT_MAX]
+
+
+def _normalize_tags(values: List[str], seed_values: List[str]) -> List[str]:
+    merged = list(values or []) + list(seed_values or [])
+    cleaned: List[str] = []
+    avoid = {t.lower() for t in MARKET_TERMS_TO_AVOID}
+    for token in merged:
+        t = re.sub(r"\s+", " ", str(token or "").strip().lower())
+        if not t:
+            continue
+        t = t.replace("_", " ").replace("-", " ")
+        t = re.sub(r"[^\w\s]", "", t)
+        t = re.sub(r"\s+", " ", t).strip()
+        if not t or t in avoid:
+            continue
+        t = TAG_ALIASES.get(t, t)
+        if len(t) < 3 or len(t) > 32:
+            continue
+        cleaned.append(t)
+    prioritized = _prioritize_tokens(cleaned, MARKET_TAG_PRIORITIES)
+    if len(prioritized) < TAG_COUNT_MIN:
+        for t in MARKET_TAG_PRIORITIES:
+            if t not in prioritized:
+                prioritized.append(t)
+            if len(prioritized) >= TAG_COUNT_MIN:
+                break
+    return prioritized[:TAG_COUNT_MAX]
+
+
+def _normalize_long_description(
+    raw: str,
+    *,
+    performers: List[str],
+    studio: str,
+    scene_type: str,
+    genres: List[str],
+    insight: Dict[str, Any],
+) -> str:
+    text = re.sub(r"\s+", " ", (raw or "").strip())
+    if text:
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        if len(sentences) > 4:
+            text = " ".join(sentences[:4])
+        elif len(sentences) < 2:
+            text = text.rstrip(".!?") + "."
+    if not text:
+        lead = (performers[0] if performers else "The lead performer").strip() or "The lead performer"
+        setting = (insight.get("setting") or "a private setting").strip()
+        mood = (insight.get("mood") or "intense").strip()
+        action = (insight.get("action_summary") or "").strip()
+        genre_hint = ", ".join(genres[:3]) if genres else scene_type.lower()
+        text = (
+            f"{lead} headlines this {studio} scene set in {setting}. "
+            f"The tone stays {mood}, with {genre_hint} action throughout."
+        )
+        if action:
+            text += f" {action}"
+    return text[:520].strip()
 
 
 def _lead_performer_name(performers: List[str]) -> str:
