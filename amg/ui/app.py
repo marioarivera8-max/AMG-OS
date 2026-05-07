@@ -52,6 +52,7 @@ templates.env.globals["auth_enabled"] = is_auth_enabled
 UPLOADS_DIR = DATA_DIR / "ui_uploads"
 RUN_LOGS_DIR = DATA_DIR / "logs" / "runs"
 RUN_TIMINGS_PATH = DATA_DIR / "logs" / "run_timings.jsonl"
+RERUN_SOURCES_PATH = DATA_DIR / "rerun_sources.json"
 
 # Canonical pipeline phases (used to render phase pills + progress %).
 PHASES: List[str] = [
@@ -1254,6 +1255,10 @@ def _run_job(job_id: str) -> None:
                 else f"Failed · {','.join(result.get('error_codes', [])) or 'unknown'}"
             )
         _record_run_timing(job, result)
+        if cloud_source is not None:
+            resolved_scene = str((result or {}).get("scene_id") or job.get("scene_id") or "").strip()
+            if resolved_scene:
+                _persist_rerun_cloud_source(resolved_scene, cloud_source)
     except Exception as e:
         with _jobs_lock:
             job = _jobs[job_id]
@@ -1277,7 +1282,69 @@ def _latest_cloud_source_for_scene(scene_id: str) -> Optional[dict]:
         cloud_source = job.get("cloud_source")
         if isinstance(cloud_source, dict) and cloud_source.get("remote") and cloud_source.get("path"):
             return cloud_source
+    persisted = _load_persisted_rerun_cloud_source(target)
+    if persisted:
+        # #region agent log
+        _debug_log_dbg_mode(
+            "post-fix-rerun",
+            "H8",
+            "amg/ui/app.py:_latest_cloud_source_for_scene:persisted_hit",
+            "using persisted cloud source",
+            {"scene_id": target, "remote": persisted.get("remote"), "path": persisted.get("path")},
+        )
+        # #endregion
+        return persisted
     return None
+
+
+def _load_persisted_rerun_cloud_source(scene_id: str) -> Optional[dict]:
+    try:
+        if not RERUN_SOURCES_PATH.exists():
+            return None
+        with open(RERUN_SOURCES_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        row = (payload or {}).get(_safe_scene_id(scene_id))
+        if isinstance(row, dict) and row.get("remote") and row.get("path"):
+            return row
+    except Exception:
+        return None
+    return None
+
+
+def _persist_rerun_cloud_source(scene_id: str, cloud_source: dict) -> None:
+    sid = _safe_scene_id(scene_id)
+    if not sid:
+        return
+    row = {
+        "remote": str(cloud_source.get("remote") or "").strip(),
+        "path": str(cloud_source.get("path") or "").strip(),
+        "download_root": str(cloud_source.get("download_root") or "").strip() or None,
+        "relative_path": str(cloud_source.get("relative_path") or "").strip() or None,
+    }
+    if not row["remote"] or not row["path"]:
+        return
+    try:
+        data = {}
+        if RERUN_SOURCES_PATH.exists():
+            with open(RERUN_SOURCES_PATH, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        data[sid] = row
+        RERUN_SOURCES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(RERUN_SOURCES_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        # #region agent log
+        _debug_log_dbg_mode(
+            "post-fix-rerun",
+            "H8",
+            "amg/ui/app.py:_persist_rerun_cloud_source:write",
+            "persisted cloud rerun source",
+            {"scene_id": sid, "remote": row["remote"], "path": row["path"]},
+        )
+        # #endregion
+    except Exception:
+        return
 
 
 def _record_run_timing(job: dict, result: Optional[dict]) -> None:

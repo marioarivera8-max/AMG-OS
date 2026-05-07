@@ -237,3 +237,25 @@ def test_scene_rerun_falls_back_to_cloud_source_when_local_path_missing(monkeypa
     q = queued[-1]
     assert q["source_mode"] == "cloud"
     assert q["cloud_source"]["remote"] == "gdrive_amy"
+
+
+def test_latest_cloud_source_falls_back_to_persisted_registry(tmp_path, monkeypatch):
+    import json
+    import amg.ui.app as app_mod
+
+    with app_mod._jobs_lock:
+        app_mod._jobs.clear()
+
+    monkeypatch.setattr(app_mod, "RERUN_SOURCES_PATH", tmp_path / "rerun_sources.json")
+    payload = {
+        "demo_scene": {
+            "remote": "gdrive_amy",
+            "path": "incoming/demo.mp4",
+            "download_root": "incoming",
+            "relative_path": "demo.mp4",
+        }
+    }
+    (tmp_path / "rerun_sources.json").write_text(json.dumps(payload), encoding="utf-8")
+    got = app_mod._latest_cloud_source_for_scene("demo_scene")
+    assert isinstance(got, dict)
+    assert got.get("remote") == "gdrive_amy"
