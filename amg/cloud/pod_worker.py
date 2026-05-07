@@ -302,6 +302,20 @@ def _locate_downloaded_video(download_dir: Path, expected_basename: str) -> Opti
     return candidates[0] if candidates else None
 
 
+def _locate_downloaded_video_with_relative(
+    download_dir: Path,
+    *,
+    expected_basename: str,
+    relative_path: Optional[str] = None,
+) -> Optional[Path]:
+    if relative_path:
+        rel = Path(relative_path.strip().strip("/"))
+        candidate = download_dir / rel
+        if candidate.is_file():
+            return candidate
+    return _locate_downloaded_video(download_dir, expected_basename)
+
+
 def _run_cloud_job_in_thread(
     tracker: _JobTracker,
     job_id: str,
@@ -310,6 +324,8 @@ def _run_cloud_job_in_thread(
     remote_path: str,
     rclone_config: str,
     download_dir: Path,
+    download_root: Optional[str] = None,
+    relative_path: Optional[str] = None,
 ) -> None:
     """rclone-copy the source then hand off to the pipeline runner.
 
@@ -320,10 +336,11 @@ def _run_cloud_job_in_thread(
     download phase."""
     from amg.cloud.rclone import Rclone, RcloneError
 
+    copy_source = (download_root or remote_path).strip()
     tracker.update(job_id, status="downloading", started_at=_utcnow_iso())
     tracker.append_log(
         job_id,
-        f"[pod-worker] downloading {remote}:{remote_path} -> {download_dir}",
+        f"[pod-worker] downloading {remote}:{copy_source} -> {download_dir}",
     )
 
     creds_dir = download_dir.parent / "_creds"
@@ -338,7 +355,7 @@ def _run_cloud_job_in_thread(
             tracker.append_log(job_id, f"[rclone] {line}")
 
         Rclone(config_path=cfg_path).copy(
-            f"{remote}:{remote_path.lstrip('/')}",
+            f"{remote}:{copy_source.lstrip('/')}",
             download_dir,
             on_progress=_on_progress,
             on_log=_on_log,
@@ -376,7 +393,11 @@ def _run_cloud_job_in_thread(
 
     tracker.update(job_id, download_pct=100)
     expected = Path(remote_path).name
-    video_path = _locate_downloaded_video(download_dir, expected)
+    video_path = _locate_downloaded_video_with_relative(
+        download_dir,
+        expected_basename=expected,
+        relative_path=relative_path,
+    )
     if video_path is None:
         tracker.update(
             job_id,
@@ -437,6 +458,14 @@ class CloudJobRequest(BaseModel):
     path: str = Field(..., min_length=1, description="path within the remote, e.g. 'incoming/scene4.mp4'")
     rclone_config: str = Field(..., min_length=1, description="full rclone config section text")
     scene_id: Optional[str] = Field(None, description="optional friendly id; defaults to filename stem")
+    download_root: Optional[str] = Field(
+        None,
+        description="optional folder path to copy instead of `path` (for folder-select context)",
+    )
+    relative_path: Optional[str] = Field(
+        None,
+        description="optional relative video path within `download_root`",
+    )
 
 
 # ---------- app factory ----------
@@ -508,6 +537,8 @@ def create_app(*, auth_token: Optional[str] = None, tracker: Optional[_JobTracke
                 "remote_path": req.path,
                 "rclone_config": req.rclone_config,
                 "download_dir": download_dir,
+                "download_root": req.download_root,
+                "relative_path": req.relative_path,
             },
             daemon=True,
             name=f"pod-cloud-job-{job_id}",

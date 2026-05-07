@@ -995,6 +995,17 @@ def _join_cloud_path(base: str, rel: str) -> str:
     return f"{base_clean}/{rel_clean}"
 
 
+def _relative_cloud_path(full_path: str, root_path: str) -> str:
+    full_clean = full_path.strip().strip("/")
+    root_clean = root_path.strip().strip("/")
+    if not root_clean:
+        return full_clean
+    prefix = root_clean + "/"
+    if full_clean.startswith(prefix):
+        return full_clean[len(prefix):]
+    return Path(full_clean).name
+
+
 def _expand_cloud_selection_to_videos(
     remote: str,
     selected_items: List[dict],
@@ -1004,7 +1015,11 @@ def _expand_cloud_selection_to_videos(
 
     Supports direct file picks plus "folder picks" (recursive listing via
     rclone lsjson). Returns rows shaped like:
-      {"path": "folder/video.mp4", "source_folder": "folder" | None}
+      {
+        "path": "folder/video.mp4",
+        "download_root": "folder" | None,
+        "relative_path": "sub/video.mp4" | None
+      }
     """
     from amg.cloud.credentials import CredentialStore
     from amg.cloud.rclone import Rclone, RcloneError, RcloneNotFoundError
@@ -1022,7 +1037,7 @@ def _expand_cloud_selection_to_videos(
             is_dir = bool(item.get("is_dir"))
             if not is_dir:
                 if _is_video_cloud_path(p) and p not in seen:
-                    expanded.append({"path": p, "source_folder": None})
+                    expanded.append({"path": p, "download_root": None, "relative_path": None})
                     seen.add(p)
                 continue
             try:
@@ -1048,7 +1063,13 @@ def _expand_cloud_selection_to_videos(
                     continue
                 if full_path in seen:
                     continue
-                expanded.append({"path": full_path, "source_folder": p})
+                expanded.append(
+                    {
+                        "path": full_path,
+                        "download_root": p,
+                        "relative_path": _relative_cloud_path(full_path, p),
+                    }
+                )
                 seen.add(full_path)
     return expanded
 
@@ -1104,6 +1125,8 @@ def _run_job(job_id: str) -> None:
                     remote=cloud_source["remote"],
                     path=cloud_source["path"],
                     scene_id=cloud_source.get("scene_id"),
+                    download_root=cloud_source.get("download_root"),
+                    relative_path=cloud_source.get("relative_path"),
                 ),
                 on_log=_on_log,
                 on_progress=_on_progress,
@@ -2039,13 +2062,14 @@ def create_app() -> FastAPI:
         total = len(expanded_items)
         for idx, item in enumerate(expanded_items):
             one_path = item["path"]
-            source_folder = item.get("source_folder")
+            download_root = item.get("download_root")
+            relative_path = item.get("relative_path")
             job_id = uuid.uuid4().hex[:10]
             if not first_job_id:
                 first_job_id = job_id
             scene_folder = (
                 scene_id.strip()
-                or (Path(source_folder).name if source_folder else "")
+                or (Path(download_root).name if download_root else "")
                 or Path(one_path).parent.name
                 or Path(one_path).stem
                 or job_id
@@ -2058,7 +2082,13 @@ def create_app() -> FastAPI:
                     "status": "queued",
                     "scene_id": scene_folder,
                     "video_path": "",  # populated by the backend after rclone copy
-                    "cloud_source": {"remote": remote, "path": one_path, "scene_id": scene_folder},
+                    "cloud_source": {
+                        "remote": remote,
+                        "path": one_path,
+                        "scene_id": scene_folder,
+                        "download_root": download_root,
+                        "relative_path": relative_path,
+                    },
                     "created_at": datetime.now().isoformat(),
                     "message": (
                         f"Queued · cloud {idx + 1}/{total} · {remote}:{one_path} · priority #{queue_seq}"

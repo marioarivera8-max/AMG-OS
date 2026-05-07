@@ -74,6 +74,11 @@ class CloudSource:
     remote: str
     path: str
     scene_id: Optional[str] = None
+    # Optional folder context for cloud folder-select flows:
+    # - download_root: copy this remote folder instead of just `path`
+    # - relative_path: locate the intended video inside the copied folder
+    download_root: Optional[str] = None
+    relative_path: Optional[str] = None
 
 
 # ---------- interface ----------
@@ -143,6 +148,26 @@ class LocalBackend(JobBackend):
 
     name = "local"
 
+    @staticmethod
+    def _locate_downloaded_video(
+        download_dir: Path,
+        *,
+        expected_name: str,
+        relative_path: Optional[str] = None,
+    ) -> Optional[Path]:
+        if relative_path:
+            rel = Path(relative_path.strip().strip("/"))
+            candidate = download_dir / rel
+            if candidate.is_file():
+                return candidate
+        expected = download_dir / expected_name
+        if expected.is_file():
+            return expected
+        return next(
+            (p for p in download_dir.rglob("*") if p.is_file() and not p.name.startswith(".")),
+            None,
+        )
+
     def run_job(
         self,
         video_path: Path,
@@ -180,15 +205,16 @@ class LocalBackend(JobBackend):
         download_dir = DATA_DIR / "cloud_downloads" / scene_folder
         download_dir.mkdir(parents=True, exist_ok=True)
 
+        copy_source = cloud_source.download_root or cloud_source.path
         store = CredentialStore()
         on_log(
-            f"[local-cloud] rclone copy {cloud_source.remote}:{cloud_source.path} "
+            f"[local-cloud] rclone copy {cloud_source.remote}:{copy_source} "
             f"-> {download_dir}"
         )
         with store.materialize_config(names=[cloud_source.remote]) as cfg_path:
             try:
                 Rclone(config_path=cfg_path).copy(
-                    f"{cloud_source.remote}:{cloud_source.path.lstrip('/')}",
+                    f"{cloud_source.remote}:{copy_source.lstrip('/')}",
                     download_dir,
                     on_progress=lambda stats: on_progress(int(0.5 * stats.get("pct", 0))),
                     on_log=lambda line: on_log(f"[rclone] {line}"),
@@ -200,10 +226,10 @@ class LocalBackend(JobBackend):
             except RcloneError as exc:
                 raise RuntimeError(f"rclone copy failed: {exc}") from exc
 
-        expected = download_dir / Path(cloud_source.path).name
-        video_path = expected if expected.is_file() else next(
-            (p for p in download_dir.iterdir() if p.is_file() and not p.name.startswith(".")),
-            None,
+        video_path = self._locate_downloaded_video(
+            download_dir,
+            expected_name=Path(cloud_source.path).name,
+            relative_path=cloud_source.relative_path,
         )
         if video_path is None:
             raise RuntimeError(
@@ -341,6 +367,8 @@ class RunpodBackend(JobBackend):
                     path=cloud_source.path,
                     rclone_config=rclone_config,
                     scene_id=cloud_source.scene_id,
+                    download_root=cloud_source.download_root,
+                    relative_path=cloud_source.relative_path,
                 )
             except RuntimeError as exc:
                 msg = str(exc)
@@ -546,6 +574,8 @@ class RunpodBackend(JobBackend):
         path: str,
         rclone_config: str,
         scene_id: Optional[str],
+        download_root: Optional[str] = None,
+        relative_path: Optional[str] = None,
     ) -> str:
         base = self._pod_base_url(pod_id)
         body = {
@@ -555,6 +585,10 @@ class RunpodBackend(JobBackend):
         }
         if scene_id:
             body["scene_id"] = scene_id
+        if download_root:
+            body["download_root"] = download_root
+        if relative_path:
+            body["relative_path"] = relative_path
         hdrs = {**self._headers(), "Content-Type": "application/json"}
         last_txt = ""
         for path_suffix in ("/jobs/cloud", "/jobs-cloud"):
@@ -595,6 +629,7 @@ class RunpodBackend(JobBackend):
         download_dir = root / scene_folder
         download_dir.mkdir(parents=True, exist_ok=True)
 
+        copy_source = cloud_source.download_root or cloud_source.path
         cfg_fd, cfg_path = tempfile.mkstemp(prefix="amg-rclone-", suffix=".conf")
         try:
             with os.fdopen(cfg_fd, "w") as fh:
@@ -604,12 +639,12 @@ class RunpodBackend(JobBackend):
             except OSError:
                 pass
             on_log(
-                f"[runpod] fallback download {cloud_source.remote}:{cloud_source.path} "
+                f"[runpod] fallback download {cloud_source.remote}:{copy_source} "
                 f"-> {download_dir}"
             )
             try:
                 Rclone(config_path=Path(cfg_path)).copy(
-                    f"{cloud_source.remote}:{cloud_source.path.lstrip('/')}",
+                    f"{cloud_source.remote}:{copy_source.lstrip('/')}",
                     download_dir,
                     on_progress=lambda stats: on_progress(min(25, int(0.25 * stats.get("pct", 0)))),
                     on_log=lambda line: on_log(f"[rclone-fallback] {line}"),
@@ -622,10 +657,10 @@ class RunpodBackend(JobBackend):
             except OSError:
                 pass
 
-        expected = download_dir / Path(cloud_source.path).name
-        video_path = expected if expected.is_file() else next(
-            (p for p in download_dir.iterdir() if p.is_file() and not p.name.startswith(".")),
-            None,
+        video_path = LocalBackend._locate_downloaded_video(
+            download_dir,
+            expected_name=Path(cloud_source.path).name,
+            relative_path=cloud_source.relative_path,
         )
         if video_path is None:
             raise RuntimeError(
