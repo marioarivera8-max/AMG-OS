@@ -100,7 +100,7 @@ def _debug_log_dbg_mode(run_id: str, hypothesis_id: str, location: str, message:
             "data": data,
             "timestamp": int(time.time() * 1000),
         }
-        with open("debug-a40662.log", "a", encoding="utf-8") as f:
+        with open("/data/debug-a40662.log", "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=True) + "\n")
     except Exception:
         pass
@@ -1262,6 +1262,22 @@ def _run_job(job_id: str) -> None:
             job["finished_at_ts"] = time.time()
             job["message"] = str(e)
         _record_run_timing(job, {"success": False, "error_codes": [str(e)]})
+
+
+def _latest_cloud_source_for_scene(scene_id: str) -> Optional[dict]:
+    target = _safe_scene_id((scene_id or "").strip())
+    if not target:
+        return None
+    with _jobs_lock:
+        candidates = list(_jobs.values())
+    for job in reversed(candidates):
+        raw_scene = str(job.get("scene_id") or (job.get("result") or {}).get("scene_id") or "").strip()
+        if _safe_scene_id(raw_scene) != target:
+            continue
+        cloud_source = job.get("cloud_source")
+        if isinstance(cloud_source, dict) and cloud_source.get("remote") and cloud_source.get("path"):
+            return cloud_source
+    return None
 
 
 def _record_run_timing(job: dict, result: Optional[dict]) -> None:
@@ -2818,13 +2834,67 @@ def create_app() -> FastAPI:
         )
         # #endregion
         if resolved_video is None:
-            return RedirectResponse(
-                url=f"/scene/{target_scene}?rerun_error={quote_plus('source path is missing or inaccessible')}",
-                status_code=303,
+            cloud_source = _latest_cloud_source_for_scene(target_scene)
+            # #region agent log
+            _debug_log_dbg_mode(
+                "post-fix-rerun",
+                "H5",
+                "amg/ui/app.py:rerun_scene:cloud_fallback_lookup",
+                "local path missing; cloud fallback lookup",
+                {
+                    "scene_id": target_scene,
+                    "scene_path": scene_path,
+                    "cloud_source_found": bool(cloud_source),
+                    "cloud_remote": (cloud_source or {}).get("remote") if isinstance(cloud_source, dict) else None,
+                },
             )
+            # #endregion
+            if not cloud_source:
+                return RedirectResponse(
+                    url=f"/scene/{target_scene}?rerun_error={quote_plus('source path is missing or inaccessible')}",
+                    status_code=303,
+                )
+
+            job_id = uuid.uuid4().hex[:10]
+            global _job_seq_counter
+            with _jobs_lock:
+                _job_seq_counter += 1
+                queue_seq = _job_seq_counter
+                _jobs[job_id] = {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "scene_id": target_scene,
+                    "video_path": "",
+                    "cloud_source": {
+                        "remote": cloud_source.get("remote"),
+                        "path": cloud_source.get("path"),
+                        "scene_id": target_scene,
+                        "download_root": cloud_source.get("download_root"),
+                        "relative_path": cloud_source.get("relative_path"),
+                    },
+                    "created_at": datetime.now().isoformat(),
+                    "message": f"Queued · rerun(cloud) · {target_scene} · priority #{queue_seq}",
+                    "result": None,
+                    "source_mode": "cloud",
+                    "log_tail": [],
+                    "current_phase": None,
+                    "progress_pct": 0,
+                    "queue_seq": queue_seq,
+                }
+                _job_fifo.append(job_id)
+            # #region agent log
+            _debug_log_dbg_mode(
+                "post-fix-rerun",
+                "H7",
+                "amg/ui/app.py:rerun_scene:queued_cloud",
+                "rerun queued using cloud source fallback",
+                {"job_id": job_id, "scene_id": target_scene, "queue_seq": queue_seq},
+            )
+            # #endregion
+            _start_dispatcher_if_needed()
+            return RedirectResponse(url=f"/?job_id={job_id}", status_code=303)
 
         job_id = uuid.uuid4().hex[:10]
-        global _job_seq_counter
         with _jobs_lock:
             _job_seq_counter += 1
             queue_seq = _job_seq_counter

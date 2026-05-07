@@ -194,3 +194,46 @@ def test_scene_rerun_redirects_with_error_when_source_missing(monkeypatch):
     res = client.post("/scene/demo_scene/rerun")
     assert res.status_code == 303
     assert "/scene/demo_scene?rerun_error=" in (res.headers.get("location") or "")
+
+
+def test_scene_rerun_falls_back_to_cloud_source_when_local_path_missing(monkeypatch):
+    import amg.ui.app as app_mod
+
+    with app_mod._jobs_lock:
+        app_mod._jobs.clear()
+        app_mod._job_fifo.clear()
+        app_mod._job_seq_counter = 0
+        app_mod._jobs["j_done"] = {
+            "job_id": "j_done",
+            "status": "done",
+            "scene_id": "demo_scene",
+            "cloud_source": {
+                "remote": "gdrive_amy",
+                "path": "incoming/demo_scene.mp4",
+                "scene_id": "demo_scene",
+                "download_root": "incoming",
+                "relative_path": "demo_scene.mp4",
+            },
+            "result": {"scene_id": "demo_scene"},
+        }
+
+    monkeypatch.setattr(
+        app_mod,
+        "_load_decision_log",
+        lambda _sid: {"scene_id": "demo_scene", "scene_path": "/missing/path.mp4"},
+    )
+    monkeypatch.setattr(app_mod, "_resolve_video_path", lambda _p: None)
+    monkeypatch.setattr(app_mod, "_start_dispatcher_if_needed", lambda: None)
+
+    app = app_mod.create_app()
+    client = TestClient(app, follow_redirects=False)
+    res = client.post("/scene/demo_scene/rerun")
+    assert res.status_code == 303
+    assert res.headers.get("location", "").startswith("/?job_id=")
+
+    with app_mod._jobs_lock:
+        queued = [j for j in app_mod._jobs.values() if j.get("status") == "queued"]
+    assert queued, "expected queued rerun job"
+    q = queued[-1]
+    assert q["source_mode"] == "cloud"
+    assert q["cloud_source"]["remote"] == "gdrive_amy"
