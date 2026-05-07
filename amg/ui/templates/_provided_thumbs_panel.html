@@ -1,9 +1,12 @@
 {% if provided_thumb_report %}
-  <div class="card">
+  <div class="card scene-side-card">
     <h3 class="card-section-title">
       Creator-provided thumbnails
       <span class="muted">AI graded</span>
     </h3>
+    <div class="muted" style="font-size: 12px; margin-bottom: 8px;">
+      Imported thumbnails are scored and merged only when quality gates pass.
+    </div>
     <div class="row" style="margin-bottom: 8px;">
       <span class="chip">discovered {{ provided_thumb_report.discovered or 0 }}</span>
       <span class="chip">scanned {{ provided_thumb_report.scanned or 0 }}</span>

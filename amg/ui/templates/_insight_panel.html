@@ -1,5 +1,5 @@
-<div id="insight-panel" style="display: block;">
-  <div class="card" style="margin: 0;">
+<div id="insight-panel" class="scene-insight-panel">
+  <div class="card stage-section" style="margin: 0;">
     <h3 class="card-section-title">Generated title options</h3>
     {% if insight and insight.ai_titles %}
       <div class="stack">
@@ -27,7 +27,7 @@
     <textarea form="review-form" name="title" rows="2" placeholder="Or type your own title override here" style="margin-top: 10px; width: 100%;">{{ form_state.title if form_state else "" }}</textarea>
   </div>
 
-  <div class="card" style="margin-top: 12px;">
+  <div class="card stage-section" style="margin-top: 12px;">
     <div class="between">
       <h3 class="card-section-title" style="margin: 0;">
         AI generated description
@@ -58,7 +58,7 @@
     {% endif %}
   </div>
 
-  <div class="card" style="margin-top: 12px;">
+  <div class="card stage-section" style="margin-top: 12px;">
       <h3 class="card-section-title">Tags</h3>
       <div style="margin-top: 6px;">
         {% for t in (insight.ai_tags[:30] if insight and insight.ai_tags else []) %}
@@ -68,7 +68,7 @@
       <textarea form="review-form" name="tags_csv" rows="3" style="margin-top: 10px; width: 100%;">{{ form_state.tags_csv if form_state else ((insight.ai_tags | join(", ")) if insight and insight.ai_tags else "") }}</textarea>
   </div>
 
-  <div class="card" style="margin-top: 12px;">
+  <div class="card stage-section" style="margin-top: 12px;">
       <h3 class="card-section-title">Categories</h3>
       <div style="margin-top: 6px;">
         {% for c in (insight.ai_categories if insight and insight.ai_categories else []) %}
@@ -79,7 +79,7 @@
   </div>
 
   {% if insight and insight.insight %}
-    <details style="grid-column: 1 / -1;">
+    <details>
       <summary class="muted" style="cursor: pointer; font-size: 12px;">Advanced: scene insight details</summary>
       <div class="card card-tight" style="margin-top: 8px;">
         {% set ins = insight.insight %}

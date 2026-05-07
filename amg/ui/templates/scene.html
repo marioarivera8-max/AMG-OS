@@ -1,14 +1,14 @@
 {% extends "base.html" %}
 {% block content %}
 
-<div class="page-head">
+<div class="page-head scene-head">
   <div class="breadcrumb">
     <a href="/">Process</a> /
     <a href="/library">Library</a> /
     <span class="crumb-now">{{ scene_id }}</span>
     {% if saved %}<span class="pill ok" style="margin-left: 8px;">REVIEW SAVED</span>{% endif %}
   </div>
-  <div class="between">
+  <div class="between scene-head-row">
     <div>
       <h1 style="margin-bottom: 4px;">{{ scene_id }}</h1>
       {% if scene_source_name %}
@@ -25,12 +25,19 @@
           (no decision log)
         {% endif %}
       </div>
+      <div class="row scene-status-row">
+        <span class="pill {{ 'ok' if finalized_items and finalized_items|length > 0 else 'warn' }}">
+          {{ '✓ ready set' if finalized_items and finalized_items|length > 0 else '~ pending finalize' }}
+        </span>
+        <span class="pill info">generated {{ covers | length if covers else 0 }}</span>
+        <span class="pill {{ 'ok' if finalized_items and finalized_items|length > 0 else 'neutral' }}">finalized {{ finalized_items | length if finalized_items else 0 }}</span>
+      </div>
     </div>
-    <div class="row">
+    <div class="row scene-head-actions">
       <button form="review-form" type="submit" class="btn-primary">Save Review</button>
       <button form="review-form" type="submit" class="btn btn-ghost" name="review_action" value="finalize">Finalize Thumbnails</button>
       {% if kept_zip_path %}
-        <a class="btn btn-ghost" href="/artifact?path={{ kept_zip_path | urlencode }}" download>Download kept ({{ kept_count }})</a>
+        <a class="btn btn-ghost" href="/artifact?path={{ kept_zip_path | urlencode }}" download>Download finalized zip ({{ kept_count }})</a>
       {% endif %}
       {% if work_dir %}<a class="btn btn-ghost" href="/artifact-zip?path={{ (work_dir / 'covers') | urlencode }}">Download covers folder</a>{% endif %}
       <a class="btn btn-ghost" href="/">Re-run</a>
@@ -47,7 +54,7 @@
   {% endif %}
 </div>
 
-<div class="grid grid-2">
+<div class="grid grid-2 scene-layout">
   <div class="col">
     <form id="review-form" method="post" action="/scene/{{ scene_id }}/review">
       <div class="card card-tight review-toolbar">
@@ -64,14 +71,17 @@
           </div>
         </div>
         <div class="hint" style="margin-top: 6px;">
-          Keyboard: 1 keep, 2 maybe, 3 reject, 0 clear, j/k or [/] move between covers.
+          Keyboard: 1 keep, 2 maybe, 3 reject, 0 clear, j/k or [/] move between covers. Finalized picks are shown above the generated list.
         </div>
       </div>
 
       {% if finalized_items and finalized_items|length > 0 %}
-      <div class="card" style="margin-top: 12px;">
+      <div class="card stage-section stage-finalized" style="margin-top: 12px;">
         <div class="between" style="align-items: center;">
-          <h3 class="card-section-title" style="margin: 0;">Finalized Thumbnails <span class="muted">{{ finalized_items | length }}</span></h3>
+          <h3 class="card-section-title" style="margin: 0;">
+            <span class="pill ok" style="margin-right: 8px;">✓ finalized</span>
+            Finalized Thumbnails <span class="muted">{{ finalized_items | length }}</span>
+          </h3>
           {% if kept_zip_path %}
             <a class="btn btn-ghost" href="/artifact?path={{ kept_zip_path | urlencode }}" download>Download finalized zip</a>
           {% endif %}
@@ -98,19 +108,22 @@
       </div>
       {% endif %}
       {% if finalized_thumbnails and (not finalized_items or finalized_items|length == 0) %}
-      <div class="card" style="margin-top: 12px;">
+      <div class="card stage-section stage-finalized" style="margin-top: 12px;">
         <h3 class="card-section-title" style="margin: 0;">Finalized Thumbnails</h3>
         <div class="empty" style="margin-top: 10px;">
           Finalize was saved, but no covers are marked as Keep yet. Set Keep on at least one thumbnail and save/finalize again.
         </div>
       </div>
       {% endif %}
-      <details {% if not finalized_thumbnails %}open{% endif %} class="card" style="margin-top: 12px;">
+      <details {% if not finalized_thumbnails %}open{% endif %} class="card stage-section stage-generated" style="margin-top: 12px;">
         <summary class="between" style="cursor: pointer; list-style: none;">
-          <h3 class="card-section-title" style="margin: 0;">Generated Thumbnails <span class="muted">{{ covers | length }}</span></h3>
+          <h3 class="card-section-title" style="margin: 0;">
+            <span class="pill info" style="margin-right: 8px;">~ generated</span>
+            Generated Thumbnails <span class="muted">{{ covers | length }}</span>
+          </h3>
           <span class="muted" style="font-size: 12px;">▼</span>
         </summary>
-        <div style="margin-top: 10px;">
+        <div class="stage-generated-body" style="margin-top: 10px;">
         {% if covers %}
         <div class="cover-grid">
           {% for c in covers %}
@@ -208,7 +221,7 @@
       </div>
 
       {% if soft_thumbnail %}
-        <div class="card" style="margin-top: 12px;">
+        <div class="card stage-section" style="margin-top: 12px;">
           <h3 class="card-section-title">Soft Thumbnail (Non-Nude)</h3>
           <img src="/artifact?path={{ soft_thumbnail.path | urlencode }}" alt="soft thumbnail" style="width: 100%; border-radius: 8px; border: 1px solid var(--line-soft);" />
           <div class="row" style="margin-top: 6px; gap: 8px;">
@@ -242,7 +255,7 @@
       {% endif %}
 
       {% if contact_sheet %}
-        <div class="card" style="margin-top: 12px;">
+        <div class="card stage-section" style="margin-top: 12px;">
           <h3 class="card-section-title">Contact Sheet</h3>
           <img src="/artifact?path={{ contact_sheet | urlencode }}" alt="contact sheet" style="width: 100%; border-radius: 8px; border: 1px solid var(--line-soft);" />
           <div class="muted" style="font-size: 11px; margin-top: 6px;">{{ contact_sheet.name }}</div>
@@ -250,14 +263,16 @@
       {% endif %}
       </details>
     </form>
-    {% include "_insight_panel.html" %}
+    <div class="scene-insight-block">
+      {% include "_insight_panel.html" %}
+    </div>
   </div>
 
-  <div class="col">
+  <div class="col scene-side-rail">
     {% include "_provided_thumbs_panel.html" %}
 
     {% if decision_log %}
-      <div class="card">
+      <div class="card scene-side-card">
         <h3 class="card-section-title">Studio · Performers · 2257</h3>
         <div class="stack">
           <div><span class="muted">Studio:</span> {{ decision_log.input.studio or "—" }}</div>
@@ -266,7 +281,7 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card scene-side-card">
         <h3 class="card-section-title">Tags</h3>
         <div>
           {% for g in decision_log.input.genres or [] %}<span class="chip">{{ g }}</span>{% endfor %}
@@ -274,29 +289,29 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card scene-side-card">
         <h3 class="card-section-title">Notes</h3>
-        <textarea form="review-form" name="notes" rows="4" placeholder="What was good, what was wrong with the AI picks…">{{ form_state.notes if form_state else "" }}</textarea>
+        <textarea form="review-form" name="notes" rows="4" placeholder="Capture quick QA notes: what worked, what to adjust, and any publish concerns.">{{ form_state.notes if form_state else "" }}</textarea>
       </div>
 
-      <div class="card">
+      <div class="card scene-side-card">
         <h3 class="card-section-title">Distribution Readiness</h3>
         <div class="stack">
           <div><span class="pill {{ 'ok' if decision_log.outcomes.covers_delivered >= 12 else 'warn' }}">
             {{ '✓' if decision_log.outcomes.covers_delivered >= 12 else '⚠' }}
-          </span> {{ decision_log.outcomes.covers_delivered }} covers (target 12)</div>
-          <div><span class="pill warn">☐</span> Title set</div>
-          <div><span class="pill ok">✓</span> 2257 on file</div>
+          </span> {{ decision_log.outcomes.covers_delivered }} covers selected (target 12)</div>
+          <div><span class="pill warn">☐</span> Title reviewed</div>
+          <div><span class="pill ok">✓</span> 2257 tracked</div>
           <div><span class="pill {{ 'ok' if decision_log.input.genres else 'warn' }}">
             {{ '✓' if decision_log.input.genres else '⚠' }}
-          </span> Tags ({{ (decision_log.input.genres or []) | length }})</div>
-          <div><span class="pill">☐</span> Manual approval to publish</div>
+          </span> Tags ready ({{ (decision_log.input.genres or []) | length }})</div>
+          <div><span class="pill">☐</span> Manual publish approval</div>
         </div>
         <button class="btn" disabled style="width: 100%; margin-top: 12px;">Mark Ready (coming soon)</button>
       </div>
     {% endif %}
 
-    <div class="card" style="font-size: 12px;">
+    <div class="card scene-side-card" style="font-size: 12px;">
       <span class="muted">Operator corrections are saved locally and feed the model improvement loop. See <a href="/feedback">Feedback</a>.</span>
     </div>
   </div>
