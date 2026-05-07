@@ -374,6 +374,70 @@ def test_runpod_backend_tolerates_transient_404_while_polling(runpod_backend, tm
     assert (extracted / "out" / "x.jpg").read_bytes() == b"x"
 
 
+def test_runpod_backend_reuses_warm_pod_across_jobs(tmp_path, monkeypatch):
+    monkeypatch.setenv("AMG_RUNPOD_API_KEY", "rk_test")
+    monkeypatch.setenv("AMG_RUNPOD_IMAGE", "ghcr.io/test/amg:latest")
+    monkeypatch.setenv("AMG_POD_AUTH_TOKEN", "x" * 48)
+    monkeypatch.setenv("AMG_JOB_POLL_INTERVAL_SEC", "0")
+
+    import importlib
+    import amg.cloud.runpod as runpod_mod
+    importlib.reload(runpod_mod)
+    import amg.cloud.job_backend as jb_mod
+    importlib.reload(jb_mod)
+    from amg.cloud.job_backend import RunpodBackend
+
+    fake_client = _FakeRunpodClient()
+    session = _FakeHttpSession()
+    backend = RunpodBackend(
+        client=fake_client,
+        spec=runpod_mod.PodSpec.from_env(),
+        http_session=session,
+        work_dirs_root=tmp_path / "work_dirs",
+        run_timeout_sec=60.0,
+        idle_terminate_sec=120.0,
+    )
+    monkeypatch.setattr(jb_mod.time, "sleep", lambda _s: None)
+
+    session.queue(
+        _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),
+        _FakePodResponse(200, {
+            "status": "done",
+            "log_tail": [],
+            "progress_pct": 100,
+            "result": {"success": True, "scene_id": "scene-a", "covers_saved": 2},
+        }),
+        _FakePodResponse(200, content=_make_zip_bytes({"out/a.jpg": b"a"})),
+        _FakePodResponse(200, {"job_id": "j2", "status": "queued"}),
+        _FakePodResponse(200, {
+            "status": "done",
+            "log_tail": [],
+            "progress_pct": 100,
+            "result": {"success": True, "scene_id": "scene-b", "covers_saved": 3},
+        }),
+        _FakePodResponse(200, content=_make_zip_bytes({"out/b.jpg": b"b"})),
+    )
+
+    scene_a = tmp_path / "scene-a"
+    scene_a.mkdir()
+    v1 = scene_a / "a.mp4"
+    v1.write_bytes(b"a")
+    scene_b = tmp_path / "scene-b"
+    scene_b.mkdir()
+    v2 = scene_b / "b.mp4"
+    v2.write_bytes(b"b")
+
+    r1 = backend.run_job(v1)
+    r2 = backend.run_job(v2)
+    assert r1["success"] is True
+    assert r2["success"] is True
+    assert len(fake_client.provisioned) == 1, "second job should reuse warm pod"
+    # Idle timer has not fired in test; terminate happens on shutdown.
+    assert fake_client.terminated == []
+    backend.shutdown()
+    assert fake_client.terminated == ["pod_test"]
+
+
 def test_runpod_backend_bundle_layout_drops_decision_log_at_canonical_path(
     tmp_path, monkeypatch
 ):

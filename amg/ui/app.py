@@ -71,6 +71,8 @@ _jobs: Dict[str, dict] = {}
 _job_fifo: List[str] = []
 _job_seq_counter: int = 0
 _dispatcher_thread: Optional[threading.Thread] = None
+_backend_lock = threading.Lock()
+_backend_instance = None
 
 # Cached health snapshot (refreshed lazily; cheap probes).
 _health_lock = threading.Lock()
@@ -931,6 +933,19 @@ def _start_dispatcher_if_needed() -> None:
         _dispatcher_thread.start()
 
 
+def _get_backend_instance():
+    """Return a process-wide backend instance.
+
+    Runpod warm-pod reuse depends on backend state surviving across queued
+    jobs. Constructing a fresh backend per job defeats that optimization.
+    """
+    global _backend_instance
+    with _backend_lock:
+        if _backend_instance is None:
+            _backend_instance = get_backend()
+        return _backend_instance
+
+
 def _dispatcher_loop() -> None:
     """
     FIFO dispatcher: run one queued job at a time in submission order.
@@ -1089,7 +1104,7 @@ def _run_job(job_id: str) -> None:
         cloud_source = job.get("cloud_source")
 
     try:
-        backend = get_backend()
+        backend = _get_backend_instance()
         # Only the local backend writes a run-log file on this host. The
         # remote backend already streams pod-side log lines through
         # on_log, and starting the disk-tail watcher would just clobber
@@ -1862,6 +1877,17 @@ def create_app() -> FastAPI:
     # AMG_AUTH_DISABLED is not set). Local Mac use sets that env var via
     # cmd_ui() in cli.py, so the existing single-user workflow keeps working.
     install_auth(app)
+
+    @app.on_event("shutdown")
+    async def _shutdown_backend() -> None:
+        backend = None
+        with _backend_lock:
+            backend = _backend_instance
+        if backend and hasattr(backend, "shutdown"):
+            try:
+                backend.shutdown()
+            except Exception as exc:  # noqa: BLE001
+                log.warn("Backend shutdown failed", error=str(exc))
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):

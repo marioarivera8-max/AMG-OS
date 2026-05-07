@@ -36,6 +36,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
 import zipfile
 from abc import ABC, abstractmethod
@@ -262,9 +263,10 @@ class RunpodBackend(JobBackend):
          + decision log from the local filesystem unchanged.
       5. Terminate the pod (always — even on failure).
 
-    A single warm-pod-reuse layer is intentionally NOT in this class. That's
-    a Phase 4 cost optimization and would couple this class to a longer-
-    running orchestrator. Keep this simple and correct first.
+    Warm-pod reuse is optional and controlled by ``AMG_RUNPOD_IDLE_TERMINATE_SEC``.
+    With a positive value, the backend keeps one pod warm between queued jobs
+    and only terminates after idle timeout. With 0, behavior stays strict
+    per-job provision/terminate.
 
     Configuration (env, in addition to AMG_RUNPOD_*):
 
@@ -277,6 +279,9 @@ class RunpodBackend(JobBackend):
       (default 5).
     * ``AMG_JOB_RUN_TIMEOUT_SEC`` — hard ceiling for one job (default
       4 hours). Past this we abandon the job and tear down the pod.
+    * ``AMG_RUNPOD_IDLE_TERMINATE_SEC`` — keep a warm pod alive for this
+      many idle seconds between jobs so queued work doesn't pay cold-boot
+      repeatedly (default 0 = terminate immediately after each job).
     """
 
     name = "runpod"
@@ -293,6 +298,7 @@ class RunpodBackend(JobBackend):
         work_dirs_root: Optional[Path] = None,
         http_session: Optional[requests.Session] = None,
         auth_token: Optional[str] = None,
+        idle_terminate_sec: Optional[float] = None,
     ) -> None:
         # Lazy imports keep amg.cloud.runpod from being required when
         # AMG_JOB_BACKEND=local (the common case).
@@ -317,6 +323,14 @@ class RunpodBackend(JobBackend):
         self._work_dirs_root = Path(work_dirs_root) if work_dirs_root else DATA_DIR / "work_dirs"
         self._session = http_session or requests.Session()
         self._auth_token = (auth_token or os.environ.get("AMG_POD_AUTH_TOKEN", "")).strip()
+        self._idle_terminate_sec = float(
+            idle_terminate_sec if idle_terminate_sec is not None
+            else os.environ.get("AMG_RUNPOD_IDLE_TERMINATE_SEC", "0")
+        )
+        self._lifecycle_lock = threading.RLock()
+        self._active_jobs = 0
+        self._warm_pod_id: Optional[str] = None
+        self._idle_timer: Optional[threading.Timer] = None
         if not self._auth_token:
             raise RuntimeError(
                 "RunpodBackend requires AMG_POD_AUTH_TOKEN (the bearer token the "
@@ -411,18 +425,8 @@ class RunpodBackend(JobBackend):
         ``submit`` is called once the pod is RUNNING and must return the
         pod-side job_id. Splitting this out avoids duplicating the
         provision/wait/download/teardown sequence between the two paths."""
-        on_log(f"[runpod] provisioning GPU pod (gpu={self._spec.gpu_type})")
-        spec = self._spec
-        # Pass the same shared secret into the pod's env so the worker on the
-        # other end accepts our requests. Without this the pod would refuse
-        # to start (commit 18eb475).
-        spec.env = {**spec.env, "AMG_POD_AUTH_TOKEN": self._auth_token}
-        pod = self._client.provision_pod(
-            spec,
-            ready_timeout=self._provision_timeout_sec,
-            poll_interval=self._poll_interval_sec,
-        )
-        pod_id = pod["id"]
+        pod_id = self._acquire_pod(on_log=on_log)
+        success = False
         try:
             on_log(f"[runpod] pod {pod_id} RUNNING; waiting for pod-worker /healthz")
             on_progress(12)
@@ -445,16 +449,25 @@ class RunpodBackend(JobBackend):
             if controller_paths.get("decision_log_path"):
                 result["decision_log_path"] = str(controller_paths["decision_log_path"])
             on_progress(100)
+            success = True
             return result
+        except Exception:
+            # On any failure, do not keep a warm pod around in unknown state.
+            self._terminate_pod_now(pod_id, on_log=on_log)
+            raise
         finally:
-            on_log(f"[runpod] terminating pod {pod_id}")
-            try:
-                self._client.terminate_pod(pod_id)
-            except Exception as exc:  # noqa: BLE001 - cleanup must not mask the real result
-                on_log(f"[runpod] terminate failed (pod will idle until Runpod auto-stop): {exc}")
-                log.error(f"terminate_pod({pod_id}) failed: {exc}")
+            self._release_pod(pod_id, success=success, on_log=on_log)
 
     def shutdown(self) -> None:
+        self._cancel_idle_timer()
+        with self._lifecycle_lock:
+            pod_id = self._warm_pod_id
+            self._warm_pod_id = None
+        if pod_id:
+            try:
+                self._client.terminate_pod(pod_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                log.error(f"terminate_pod({pod_id}) during shutdown failed: {exc}")
         try:
             self._session.close()
         except Exception:  # noqa: BLE001 - best-effort
@@ -468,6 +481,89 @@ class RunpodBackend(JobBackend):
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self._auth_token}"}
+
+    def _acquire_pod(self, *, on_log: LogHook) -> str:
+        with self._lifecycle_lock:
+            self._cancel_idle_timer()
+            self._active_jobs += 1
+            pod_id = self._warm_pod_id
+        if pod_id:
+            return pod_id
+        on_log(f"[runpod] provisioning GPU pod (gpu={self._spec.gpu_type})")
+        spec = self._spec
+        # Pass the shared secret into pod env so worker accepts controller requests.
+        spec.env = {**spec.env, "AMG_POD_AUTH_TOKEN": self._auth_token}
+        pod = self._client.provision_pod(
+            spec,
+            ready_timeout=self._provision_timeout_sec,
+            poll_interval=self._poll_interval_sec,
+        )
+        new_pod_id = pod["id"]
+        with self._lifecycle_lock:
+            # If another thread won the race, keep the existing warm pod and
+            # terminate the extra one to avoid accidental double billing.
+            if self._warm_pod_id and self._warm_pod_id != new_pod_id:
+                self._terminate_pod_now(new_pod_id, on_log=on_log)
+                return self._warm_pod_id
+            self._warm_pod_id = new_pod_id
+        return new_pod_id
+
+    def _release_pod(self, pod_id: str, *, success: bool, on_log: LogHook) -> None:
+        with self._lifecycle_lock:
+            self._active_jobs = max(0, self._active_jobs - 1)
+            has_active = self._active_jobs > 0
+        if has_active:
+            return
+        if not success:
+            return
+        if self._idle_terminate_sec <= 0:
+            self._terminate_pod_now(pod_id, on_log=on_log)
+            return
+        self._schedule_idle_termination(pod_id, on_log=on_log)
+
+    def _schedule_idle_termination(self, pod_id: str, *, on_log: LogHook) -> None:
+        self._cancel_idle_timer()
+        on_log(
+            f"[runpod] keeping pod warm for queued jobs "
+            f"(idle timeout {int(self._idle_terminate_sec)}s)"
+        )
+
+        def _on_idle() -> None:
+            with self._lifecycle_lock:
+                if self._active_jobs > 0:
+                    return
+                if self._warm_pod_id != pod_id:
+                    return
+            self._terminate_pod_now(pod_id, on_log=on_log)
+
+        timer = threading.Timer(self._idle_terminate_sec, _on_idle)
+        timer.daemon = True
+        with self._lifecycle_lock:
+            self._idle_timer = timer
+        timer.start()
+
+    def _cancel_idle_timer(self) -> None:
+        timer: Optional[threading.Timer] = None
+        with self._lifecycle_lock:
+            timer = self._idle_timer
+            self._idle_timer = None
+        if timer:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
+    def _terminate_pod_now(self, pod_id: str, *, on_log: LogHook) -> None:
+        self._cancel_idle_timer()
+        with self._lifecycle_lock:
+            if self._warm_pod_id == pod_id:
+                self._warm_pod_id = None
+        on_log(f"[runpod] terminating pod {pod_id}")
+        try:
+            self._client.terminate_pod(pod_id)
+        except Exception as exc:  # noqa: BLE001 - cleanup must not mask real result
+            on_log(f"[runpod] terminate failed (pod may keep billing): {exc}")
+            log.error(f"terminate_pod({pod_id}) failed: {exc}")
 
     def _wait_for_pod_worker_ready(
         self,
