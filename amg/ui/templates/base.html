@@ -9,26 +9,37 @@
     <style>
       /* === Design tokens === */
       :root {
-        --bg-0: #0F1115;
-        --bg-1: #11151D;
-        --bg-2: #171A21;
-        --bg-3: #1C2230;
-        --line: #2A3040;
-        --line-soft: #232938;
-        --text: #E7E7E7;
-        --muted: #9AA3B2;
-        --muted-2: #6E7689;
-        --accent: #5B8DEF;
-        --accent-soft: rgba(91, 141, 239, 0.12);
-        --ok: #84E39F;
-        --ok-soft: rgba(132, 227, 159, 0.12);
-        --warn: #F6CF75;
-        --warn-soft: rgba(246, 207, 117, 0.12);
-        --err: #F29A9A;
-        --err-soft: rgba(242, 154, 154, 0.12);
-        --radius: 10px;
-        --radius-lg: 14px;
+        /* Core slate direction */
+        --paper: #1d2128;
+        --paper-2: #262b34;
+        --paper-3: #2f3540;
+        --ink: #f4f1e8;
+        --ink-2: #b9b6ad;
+        --ink-3: #7a7c83;
+        --line: #f4f1e8;
+        --line-soft: #44474f;
+        --accent: oklch(0.78 0.16 70);
+        --accent-soft: oklch(0.34 0.06 70);
+        --accent-ink: oklch(0.82 0.16 75);
+        --ok: oklch(0.72 0.16 145);
+        --warn: oklch(0.80 0.14 80);
+        --err: oklch(0.68 0.18 25);
+        --radius-sm: 4px;
+        --radius: 7px;
+        --radius-lg: 12px;
         --pad: 18px;
+
+        /* Compatibility aliases for existing templates/components */
+        --bg-0: var(--paper);
+        --bg-1: var(--paper);
+        --bg-2: var(--paper-2);
+        --bg-3: var(--paper-3);
+        --text: var(--ink);
+        --muted: var(--ink-2);
+        --muted-2: var(--ink-3);
+        --ok-soft: color-mix(in oklab, var(--ok) 16%, transparent);
+        --warn-soft: color-mix(in oklab, var(--warn) 16%, transparent);
+        --err-soft: color-mix(in oklab, var(--err) 16%, transparent);
       }
 
       * { box-sizing: border-box; }
@@ -38,12 +49,12 @@
         background: var(--bg-0);
         color: var(--text);
         font-size: 14px;
-        line-height: 1.45;
+        line-height: 1.35;
         -webkit-font-smoothing: antialiased;
       }
 
       /* === Layout === */
-      .wrap { max-width: 1400px; margin: 0 auto; padding: 0 24px 80px; }
+      .wrap { max-width: 1440px; margin: 0 auto; padding: 0 24px 84px; }
       .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
       .col { display: flex; flex-direction: column; gap: 12px; }
       .grid { display: grid; gap: 14px; }
@@ -64,19 +75,17 @@
       /* === Header === */
       .topbar {
         position: sticky; top: 0; z-index: 50;
-        background: rgba(15, 17, 21, 0.85);
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
+        background: var(--paper);
         border-bottom: 1px solid var(--line-soft);
       }
       .topbar-inner {
-        max-width: 1400px; margin: 0 auto; padding: 12px 24px;
+        max-width: 1440px; margin: 0 auto; padding: 12px 24px;
         display: flex; align-items: center; gap: 24px;
       }
       .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; }
       .brand-glyph {
         width: 22px; height: 22px;
-        background: linear-gradient(135deg, #5B8DEF, #7E5BE3);
+        background: linear-gradient(135deg, var(--accent), var(--accent-ink));
         clip-path: polygon(50% 0, 100% 100%, 0 100%);
       }
       .nav { display: flex; gap: 4px; }
@@ -91,7 +100,7 @@
       .nav a.active { color: var(--text); position: relative; }
       .nav a.active::after {
         content: ""; position: absolute; left: 12px; right: 12px; bottom: 2px;
-        height: 2px; background: var(--accent); border-radius: 2px;
+        height: 2px; background: var(--accent); border-radius: var(--radius-sm);
       }
       .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
       .avatar {
@@ -104,21 +113,21 @@
       /* === Footer health bar === */
       .footbar {
         position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
-        background: var(--bg-0);
+        background: var(--paper);
         border-top: 1px solid var(--line-soft);
         font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
         font-size: 11px;
         color: var(--muted);
       }
       .footbar-inner {
-        max-width: 1400px; margin: 0 auto; padding: 8px 24px;
+        max-width: 1440px; margin: 0 auto; padding: 8px 24px;
         display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
       }
       .dot {
         display: inline-block; width: 8px; height: 8px; border-radius: 50%;
         background: var(--muted-2);
       }
-      .dot.ok { background: var(--ok); box-shadow: 0 0 6px rgba(132, 227, 159, 0.5); }
+      .dot.ok { background: var(--ok); }
       .dot.warn { background: var(--warn); }
       .dot.err { background: var(--err); }
 
@@ -134,7 +143,7 @@
       /* === Cards === */
       .card {
         background: var(--bg-2);
-        border: 1px solid var(--line);
+        border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
         border-radius: var(--radius);
         padding: var(--pad);
       }
@@ -153,7 +162,7 @@
       input[type="text"], input[type="search"], input[type="number"], input[type="file"], textarea, select {
         background: var(--bg-1);
         color: var(--text);
-        border: 1px solid var(--line);
+        border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
         border-radius: 8px;
         padding: 9px 11px;
         font-size: 13px;
@@ -161,8 +170,8 @@
         outline: none;
       }
       input:focus, textarea:focus, select:focus {
-        border-color: var(--accent);
-        box-shadow: 0 0 0 3px var(--accent-soft);
+        border-color: color-mix(in oklab, var(--accent) 78%, var(--line) 22%);
+        box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 36%, transparent);
       }
       input[type="file"] { padding: 6px; }
       textarea { resize: vertical; min-height: 64px; }
@@ -171,7 +180,7 @@
       button, .btn {
         background: var(--bg-3);
         color: var(--text);
-        border: 1px solid var(--line);
+        border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
         border-radius: 8px;
         padding: 9px 14px;
         font-size: 13px;
@@ -183,10 +192,13 @@
       button:hover, .btn:hover { background: #232a3c; }
       .btn-primary, button.primary {
         background: var(--accent);
-        color: #0a1024;
+        color: #1f1710;
         border-color: var(--accent);
       }
-      .btn-primary:hover, button.primary:hover { background: #6fa0f7; border-color: #6fa0f7; }
+      .btn-primary:hover, button.primary:hover {
+        background: color-mix(in oklab, var(--accent) 88%, white 12%);
+        border-color: color-mix(in oklab, var(--accent) 88%, white 12%);
+      }
       .btn-ghost {
         background: transparent;
       }
@@ -199,14 +211,18 @@
         display: inline-flex; align-items: center; gap: 6px;
         font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
         padding: 3px 9px; border-radius: 999px;
-        border: 1px solid var(--line);
+        border: 1.2px solid color-mix(in oklab, var(--line) 18%, transparent);
         background: var(--bg-3);
         color: var(--muted);
       }
       .pill.ok { color: var(--ok); border-color: rgba(132, 227, 159, 0.3); background: var(--ok-soft); }
       .pill.warn { color: var(--warn); border-color: rgba(246, 207, 117, 0.3); background: var(--warn-soft); }
       .pill.err { color: var(--err); border-color: rgba(242, 154, 154, 0.3); background: var(--err-soft); }
-      .pill.info { color: var(--accent); border-color: rgba(91, 141, 239, 0.3); background: var(--accent-soft); }
+      .pill.info {
+        color: var(--accent-ink);
+        border-color: color-mix(in oklab, var(--accent) 44%, transparent);
+        background: var(--accent-soft);
+      }
       .pill.neutral { color: var(--text); }
 
       .chip {
@@ -252,7 +268,6 @@
         color: var(--accent);
         border-color: var(--accent);
         background: var(--accent-soft);
-        box-shadow: 0 0 8px rgba(91, 141, 239, 0.35);
         animation: pulse 1.6s ease-in-out infinite;
       }
       @keyframes pulse {
@@ -268,15 +283,23 @@
       }
       .progress > .bar {
         height: 100%;
-        background: linear-gradient(90deg, #5B8DEF, #84E39F);
+        background: linear-gradient(
+          90deg,
+          color-mix(in oklab, var(--accent) 75%, var(--accent-ink) 25%),
+          color-mix(in oklab, var(--ok) 65%, var(--accent) 35%)
+        );
         transition: width 0.5s ease;
       }
 
       /* === Drop zone === */
       .dropzone {
-        border: 2px dashed rgba(91, 141, 239, 0.5);
+        border: 1.5px dashed color-mix(in oklab, var(--accent) 42%, transparent);
         border-radius: var(--radius-lg);
-        background: linear-gradient(180deg, rgba(91, 141, 239, 0.06), rgba(91, 141, 239, 0.02));
+        background: linear-gradient(
+          180deg,
+          color-mix(in oklab, var(--accent-soft) 52%, transparent),
+          color-mix(in oklab, var(--accent-soft) 20%, transparent)
+        );
         padding: 36px 28px;
         text-align: center;
         cursor: pointer;
@@ -284,17 +307,16 @@
       }
       .dropzone:hover {
         border-color: var(--accent);
-        background: rgba(91, 141, 239, 0.08);
+        background: color-mix(in oklab, var(--accent-soft) 70%, transparent);
       }
       .dropzone.is-drag {
         border-color: var(--accent);
-        background: rgba(91, 141, 239, 0.14);
-        box-shadow: 0 0 0 4px var(--accent-soft);
+        background: color-mix(in oklab, var(--accent-soft) 84%, transparent);
       }
       .dropzone .glyph {
         width: 56px; height: 56px; border-radius: 14px;
-        background: rgba(91, 141, 239, 0.12);
-        border: 1px solid rgba(91, 141, 239, 0.4);
+        background: color-mix(in oklab, var(--accent-soft) 55%, transparent);
+        border: 1px solid color-mix(in oklab, var(--accent) 38%, transparent);
         margin: 0 auto 14px;
         display: flex; align-items: center; justify-content: center;
         color: var(--accent); font-size: 24px;
@@ -328,7 +350,7 @@
         display: flex; flex-direction: column;
       }
       .cover-card:hover {
-        border-color: rgba(91, 141, 239, 0.4);
+        border-color: color-mix(in oklab, var(--accent) 34%, transparent);
       }
       .cover-thumb {
         position: relative;
@@ -499,8 +521,8 @@
         color: var(--muted);
       }
       .active-review-card {
-        border-color: rgba(91, 141, 239, 0.75) !important;
-        box-shadow: 0 0 0 2px rgba(91, 141, 239, 0.2);
+        border-color: color-mix(in oklab, var(--accent) 62%, transparent) !important;
+        box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 30%, transparent);
       }
 
       /* === Image preview modal === */

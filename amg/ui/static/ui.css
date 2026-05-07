@@ -2,6 +2,36 @@
   margin-bottom: 10px;
 }
 
+.content-max {
+  max-width: 1440px;
+  margin: 0 auto;
+}
+
+.stack-sm > * + * {
+  margin-top: 8px;
+}
+
+.stack-md > * + * {
+  margin-top: 14px;
+}
+
+.stack-lg > * + * {
+  margin-top: 20px;
+}
+
+.surface {
+  background: var(--bg-2);
+  border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
+  border-radius: var(--radius);
+}
+
+.shell-card {
+  background: var(--bg-2);
+  border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+
 .section-subtle {
   font-size: 12px;
 }
