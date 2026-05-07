@@ -53,3 +53,13 @@ def test_scene_summary_normalizes_top_score_to_100_scale():
 
     assert summary["top_score"] == 87.0
 
+
+def test_parse_csv_tokens_dedupes_and_normalizes():
+    from amg.ui.app import _parse_csv_tokens
+
+    tags = _parse_csv_tokens("POV, pov ; Deepthroat\n deepthroat", lowercase=True)
+    cats = _parse_csv_tokens("hd porn, HD Porn, blow job", title_case=True)
+
+    assert tags == ["pov", "deepthroat"]
+    assert cats == ["Hd Porn", "Blow Job"]
+

@@ -33,6 +33,74 @@ from amg.utils.logging import get_logger
 log = get_logger("review.distribution_gate")
 
 
+def get_platform_metadata_rules(platform: str) -> Dict[str, Any]:
+    reqs = PLATFORM_REQUIREMENTS.get(platform, {}) if isinstance(PLATFORM_REQUIREMENTS, dict) else {}
+    reqs = reqs if isinstance(reqs, dict) else {}
+    md = reqs.get("metadata") if isinstance(reqs.get("metadata"), dict) else {}
+    return {
+        "title_min_chars": int(md.get("title_min_chars", 1)),
+        "title_max_chars": int(reqs.get("title_max_chars", md.get("title_max_chars", 100))),
+        "description_min_chars": int(md.get("description_min_chars", 0)),
+        "description_max_chars": int(md.get("description_max_chars", 9999)),
+        "min_tags": int(md.get("min_tags", 0)),
+        "max_tags": int(md.get("max_tags", 9999)),
+        "min_categories": int(md.get("min_categories", 0)),
+        "max_categories": int(md.get("max_categories", 9999)),
+        "banned_terms": reqs.get("banned_terms", []),
+        "requires_2257": bool(reqs.get("requires_2257", True)),
+        "requires_individual_releases": bool(reqs.get("requires_individual_releases", False)),
+        "preferred_resolution_min": reqs.get("preferred_resolution_min"),
+    }
+
+
+def validate_metadata_for_platforms(
+    *,
+    title_text: str,
+    long_description: str,
+    tags: List[str],
+    categories: List[str],
+    target_platforms: List[str],
+    performers: Optional[List[str]] = None,
+    decision_log: Optional[dict] = None,
+) -> Dict[str, Any]:
+    targets = [str(p).upper().strip() for p in (target_platforms or []) if str(p).strip()]
+    per_platform: Dict[str, dict] = {}
+    flat_blockers: List[str] = []
+    flat_warnings: List[str] = []
+
+    for platform in PLATFORM_REQUIREMENTS.keys():
+        if platform not in targets:
+            per_platform[platform] = {"ready": False, "skipped": True, "blockers": [], "warnings": []}
+            continue
+        status = _validate_platform_metadata(
+            platform=platform,
+            title_text=title_text,
+            long_description=long_description,
+            tags=tags,
+            categories=categories,
+            performers=performers or [],
+            decision_log=decision_log or {},
+        )
+        per_platform[platform] = status
+        for b in status.get("blockers", []):
+            flat_blockers.append(f"{platform}: {b}")
+        for w in status.get("warnings", []):
+            flat_warnings.append(f"{platform}: {w}")
+
+    overall_ready = bool(targets) and all(
+        status.get("ready", False)
+        for p, status in per_platform.items()
+        if p in targets
+    )
+    return {
+        "overall_ready": overall_ready,
+        "per_platform": per_platform,
+        "blockers": flat_blockers,
+        "warnings": flat_warnings,
+        "target_platforms": targets,
+    }
+
+
 def check_distribution_ready(scene_id: str, verbose: bool = True) -> dict:
     """
     Verify a scene is distribution-ready.
@@ -151,22 +219,16 @@ def check_distribution_ready(scene_id: str, verbose: bool = True) -> dict:
         ),
     })
 
-    for platform in PLATFORM_REQUIREMENTS.keys():
-        if platform not in target_platforms:
-            result["per_platform"][platform] = {"ready": False, "skipped": True}
-            continue
-
-        plat_status = _check_platform(
-            platform,
-            title_text=title_text,
-            long_description=long_description,
-            tags=tags,
-            categories=categories,
-            review=review,
-            decision_log=decision_log,
-            review_meta=review_meta,
-        )
-        result["per_platform"][platform] = plat_status
+    validation = validate_metadata_for_platforms(
+        title_text=title_text,
+        long_description=long_description,
+        tags=tags,
+        categories=categories,
+        target_platforms=target_platforms,
+        performers=review_meta.get("performers") or [],
+        decision_log=decision_log,
+    )
+    result["per_platform"] = validation["per_platform"]
 
     # ── Overall ready ──
     no_blockers = len(result["blockers"]) == 0
@@ -179,27 +241,24 @@ def check_distribution_ready(scene_id: str, verbose: bool = True) -> dict:
     return _save_and_return(result, verbose)
 
 
-def _check_platform(
+def _validate_platform_metadata(
     platform: str,
     *,
     title_text: str,
     long_description: str,
     tags: List[str],
     categories: List[str],
-    review: dict,
+    performers: List[str],
     decision_log: dict,
-    review_meta: Dict[str, Any],
 ) -> dict:
     """Check readiness for a specific platform."""
-    reqs = PLATFORM_REQUIREMENTS[platform]
+    reqs = get_platform_metadata_rules(platform)
     blockers = []
     warnings = []
 
-    md = reqs.get("metadata", {}) if isinstance(reqs.get("metadata"), dict) else {}
-
     # Title length checks
-    min_chars = int(md.get("title_min_chars", 1))
-    max_chars = int(reqs.get("title_max_chars", md.get("title_max_chars", 100)))
+    min_chars = reqs["title_min_chars"]
+    max_chars = reqs["title_max_chars"]
     if len(title_text) < min_chars:
         blockers.append(f"Title too short: {len(title_text)} < {min_chars}")
     if len(title_text) > max_chars:
@@ -212,8 +271,8 @@ def _check_platform(
             blockers.append(f"Title contains banned term '{term}'")
 
     # Metadata quality checks
-    desc_min = int(md.get("description_min_chars", 0))
-    desc_max = int(md.get("description_max_chars", 9999))
+    desc_min = reqs["description_min_chars"]
+    desc_max = reqs["description_max_chars"]
     if desc_min and len(long_description) < desc_min:
         blockers.append(
             f"Description too short: {len(long_description)} < {desc_min}"
@@ -223,21 +282,20 @@ def _check_platform(
             f"Description too long: {len(long_description)} > {desc_max}"
         )
 
-    min_tags = int(md.get("min_tags", 0))
-    max_tags = int(md.get("max_tags", 9999))
+    min_tags = reqs["min_tags"]
+    max_tags = reqs["max_tags"]
     if min_tags and len(tags) < min_tags:
         blockers.append(f"Too few tags: {len(tags)} < {min_tags}")
     if max_tags and len(tags) > max_tags:
         warnings.append(f"Too many tags: {len(tags)} > {max_tags}")
 
-    min_categories = int(md.get("min_categories", 0))
-    max_categories = int(md.get("max_categories", 9999))
+    min_categories = reqs["min_categories"]
+    max_categories = reqs["max_categories"]
     if min_categories and len(categories) < min_categories:
         blockers.append(f"Too few categories: {len(categories)} < {min_categories}")
     if max_categories and len(categories) > max_categories:
         warnings.append(f"Too many categories: {len(categories)} > {max_categories}")
 
-    performers = review_meta.get("performers", [])
     if performers and title_text:
         lead = str(performers[0]).split(" ")[0]
         if lead and lead.lower() not in title_text.lower():
@@ -246,7 +304,7 @@ def _check_platform(
     # 2257 doc check
     if reqs.get("requires_2257", True):
         # decision log records compliance check result
-        compliance = decision_log.get("execution", {}).get("error_codes", [])
+        compliance = (decision_log or {}).get("execution", {}).get("error_codes", [])
         if "E_COMPLIANCE_NO_2257" in compliance:
             blockers.append("Missing 2257 documentation")
 
@@ -259,7 +317,7 @@ def _check_platform(
     # Resolution check
     pref_min = reqs.get("preferred_resolution_min")
     if pref_min:
-        resolution_str = decision_log.get("input", {}).get("resolution", "0x0")
+        resolution_str = (decision_log or {}).get("input", {}).get("resolution", "0x0")
         try:
             w, h = map(int, resolution_str.split("x"))
             min_w, min_h = pref_min

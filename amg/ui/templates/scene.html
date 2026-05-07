@@ -338,6 +338,13 @@
 
           <div class="card scene-side-card">
             <h3 class="card-section-title">Distribution Readiness</h3>
+            {% if save_validation %}
+              <div class="row" style="gap: 8px; margin-bottom: 8px;">
+                <span class="pill {{ 'ok' if save_validation.overall_ready else 'warn' }}">
+                  {{ 'save validation pass' if save_validation.overall_ready else 'save validation has blockers' }}
+                </span>
+              </div>
+            {% endif %}
             {% if readiness %}
               <div class="row" style="gap: 8px; margin-bottom: 8px;">
                 <span class="pill {{ 'ok' if readiness.overall_ready else 'warn' }}">

@@ -23,11 +23,14 @@ import requests
 from amg.config import (
     OLLAMA_API_URL,
     VISION_MODEL,
+    TEXT_MODEL,
     AI_IMAGE_SIZE,
     AI_CALL_TIMEOUT_SEC,
     AI_CALL_RETRY_COUNT,
     AI_CALL_RETRY_DELAYS,
     AI_SCORING_SEED,
+    TEXT_GEN_TIMEOUT_SEC,
+    TEXT_GEN_TEMPERATURE,
 )
 
 
@@ -55,15 +58,31 @@ class AIClient:
         self,
         api_url: str = OLLAMA_API_URL,
         model: Optional[str] = None,
+        text_model: Optional[str] = None,
         timeout_sec: int = AI_CALL_TIMEOUT_SEC,
+        text_timeout_sec: int = TEXT_GEN_TIMEOUT_SEC,
     ):
         self.api_url = api_url
-        # Resolution order: explicit model= arg → AMG_VISION_MODEL_OVERRIDE env var
+        # Vision model resolution order: explicit model= arg → AMG_VISION_MODEL_OVERRIDE env var
         # (used by scripts/bake_off.py to swap models per run without modifying
         # config) → VISION_MODEL constant from config. Default behavior unchanged
         # when env var is unset.
-        self.model = model or os.environ.get("AMG_VISION_MODEL_OVERRIDE") or VISION_MODEL
+        self.vision_model = model or os.environ.get("AMG_VISION_MODEL_OVERRIDE") or VISION_MODEL
+        # Text model resolution:
+        # - explicit text_model arg (when caller wants strict routing)
+        # - fallback to explicit model arg for backward compatibility
+        # - AMG_TEXT_MODEL_OVERRIDE env
+        # - TEXT_MODEL config default
+        self.text_model = (
+            text_model
+            or model
+            or os.environ.get("AMG_TEXT_MODEL_OVERRIDE")
+            or TEXT_MODEL
+        )
+        # Keep legacy `model` attribute for older call sites/logging.
+        self.model = self.vision_model
         self.timeout_sec = timeout_sec
+        self.text_timeout_sec = text_timeout_sec
         # Use a session for connection pooling (faster across many calls)
         self._session = requests.Session()
 
@@ -98,7 +117,7 @@ class AIClient:
         })
 
         payload = {
-            "model": self.model,
+            "model": self.vision_model,
             "messages": messages,
             "stream": False,
             "options": {
@@ -209,11 +228,11 @@ class AIClient:
         messages.append({"role": "user", "content": prompt})
 
         payload = {
-            "model": self.model,
+            "model": self.text_model,
             "messages": messages,
             "stream": False,
             "options": {
-                "temperature": 0.7,  # Higher temp for creative title generation
+                "temperature": TEXT_GEN_TEMPERATURE,  # Higher temp for creative title generation
                 "num_predict": 400,
             },
         }
@@ -222,7 +241,7 @@ class AIClient:
             response = self._session.post(
                 self.api_url,
                 json=payload,
-                timeout=timeout_sec or self.timeout_sec,
+                timeout=timeout_sec or self.text_timeout_sec,
             )
             if response.status_code == 200:
                 data = response.json()
@@ -242,7 +261,7 @@ class AIClient:
             return AIResponse(
                 success=False,
                 error_code="E_AI_TIMEOUT",
-                error_message=f"Timeout after {timeout_sec or self.timeout_sec}s",
+                error_message=f"Timeout after {timeout_sec or self.text_timeout_sec}s",
                 duration_sec=time.time() - start,
             )
         except Exception as e:
@@ -263,7 +282,7 @@ class AIClient:
             return False
 
     def is_model_loaded(self) -> bool:
-        """Check if our target model is available."""
+        """Check if the vision model is available."""
         try:
             base_url = self.api_url.rsplit("/api/", 1)[0]
             response = self._session.get(f"{base_url}/api/tags", timeout=5)
@@ -272,6 +291,6 @@ class AIClient:
             data = response.json()
             models = [m.get("name", "") for m in data.get("models", [])]
             # Match exact name or with :latest suffix
-            return any(self.model in m for m in models)
+            return any(self.vision_model in m for m in models)
         except Exception:
             return False

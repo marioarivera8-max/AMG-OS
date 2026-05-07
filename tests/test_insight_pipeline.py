@@ -1,0 +1,73 @@
+from types import SimpleNamespace
+from pathlib import Path
+
+
+class _FakeClient:
+    def __init__(self):
+        self.vision_model = "vision-test"
+        self.text_model = "text-test"
+
+    def is_alive(self):
+        return False
+
+    def generate_text(self, _prompt):
+        class _R:
+            success = False
+            raw_text = ""
+        return _R()
+
+
+def test_generate_scene_insight_payload_includes_validation_telemetry(monkeypatch, tmp_path):
+    import amg.scoring.insight_pipeline as mod
+
+    monkeypatch.setattr(
+        mod,
+        "resolve_folder_context",
+        lambda _p: SimpleNamespace(
+            studio="StudioX",
+            performers=["Performer A"],
+            title="Scene title",
+            is_generic_filename=False,
+            source_folder=tmp_path,
+            metadata_documents=[],
+            ancestor_names=["StudioX"],
+        ),
+    )
+    monkeypatch.setattr(mod, "detect_studio", lambda _p: "StudioX")
+    monkeypatch.setattr(mod, "get_or_create_profile", lambda _s: {})
+    monkeypatch.setattr(mod, "parse_performer_code_with_context", lambda *_: {"total": 1, "code": "BG"})
+    monkeypatch.setattr(mod, "parse_title_with_context", lambda *_: {"detected_genres": ["POV"], "description": "desc", "metadata_title": "meta"})
+    monkeypatch.setattr(mod, "derive_primary_scene_type", lambda *_: "STANDARD")
+    monkeypatch.setattr(mod, "detect_scene_type_from_code", lambda *_: "STANDARD")
+    monkeypatch.setattr(mod, "describe_scene_from_covers", lambda **_: None)
+    monkeypatch.setattr(mod, "summarize_positions", lambda *_: {})
+    monkeypatch.setattr(
+        mod,
+        "generate_titles_with_insight",
+        lambda **_: {
+            "titles": [{"text": "POV Scene With Performer"}],
+            "long_description": "short",
+            "categories": ["POV"],
+            "tags": ["pov"],
+            "title_tone": "edgy",
+            "ai_used": True,
+        },
+    )
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"x")
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(b"x")
+
+    payload = mod.generate_scene_insight_payload(
+        video_path=video,
+        saved_covers=[{"path": str(cover)}],
+        work_dir=tmp_path / "work",
+        ai_client=_FakeClient(),
+        persist=False,
+    )
+    assert payload["vision_model_used"] == "vision-test"
+    assert payload["text_model_used"] == "text-test"
+    assert "metadata_blockers_initial" in payload
+    assert "metadata_blockers_final" in payload
+    assert "repair_attempts" in payload

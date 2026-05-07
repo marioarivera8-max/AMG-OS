@@ -86,6 +86,7 @@ OLLAMA_BASE_URL = _build_ollama_base_url(OLLAMA_HOST)
 OLLAMA_API_URL = f"{OLLAMA_BASE_URL}/api/chat"
 
 VISION_MODEL = "qwen2.5vl:7b"
+TEXT_MODEL = "qwen2.5:14b-instruct"
 FALLBACK_MODEL = "qwen2.5vl:3b"  # If memory pressure
 LEGACY_MODEL = "llava:13b"        # For comparison testing only
 
@@ -554,6 +555,8 @@ PLATFORM_REQUIREMENTS = {
 TITLE_SUGGESTIONS_PER_SCENE = 5  # AI generates this many candidates
 TITLE_AI_TIMEOUT_SEC = 15
 TITLE_TONE_DEFAULT = "edgy"  # retail_safe | edgy | premium_story | creative
+TEXT_GEN_TIMEOUT_SEC = 25
+TEXT_GEN_TEMPERATURE = 0.7
 
 # Title style patterns (v11.1 quick patterns; v11.2 will replace with research-driven)
 TITLE_STYLE_PATTERNS = [

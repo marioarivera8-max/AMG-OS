@@ -35,6 +35,7 @@ from amg.config import (
 from amg.ingest.inventory import VIDEO_EXTENSIONS, discover_scenes
 from amg.learning.feedback_eval import evaluate_feedback, load_feedback_rows
 from amg.scoring.insight_pipeline import generate_scene_insight_payload
+from amg.review.distribution_gate import validate_metadata_for_platforms
 from amg.utils.logging import get_logger
 from amg.cloud.job_backend import get_backend
 from amg.ui.auth import get_current_user, install_auth, is_auth_enabled
@@ -1249,6 +1250,25 @@ def _readiness_snapshot(scene_id: str) -> Optional[dict]:
         return None
 
 
+def _parse_csv_tokens(raw: str, *, title_case: bool = False, lowercase: bool = False) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for token in re.split(r"[,;\n|]", str(raw or "")):
+        t = " ".join(token.strip().split())
+        if not t:
+            continue
+        if lowercase:
+            t = t.lower()
+        if title_case:
+            t = " ".join(part.capitalize() for part in t.split())
+        k = t.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(t)
+    return out
+
+
 def _platform_rules_snapshot() -> dict:
     out = {}
     for platform, req in (PLATFORM_REQUIREMENTS or {}).items():
@@ -2406,6 +2426,7 @@ def create_app() -> FastAPI:
                         )
         form_state = _build_review_form_state(reviewed=reviewed, insight=insight, cover_items=covers)
         readiness = _readiness_snapshot(scene_id)
+        save_validation = (reviewed or {}).get("metadata_validation") if isinstance(reviewed, dict) else None
         finalized_thumbnails = bool((reviewed or {}).get("finalized_thumbnails"))
         scene_source_name = None
         if isinstance(decision_log, dict):
@@ -2429,6 +2450,7 @@ def create_app() -> FastAPI:
                 "reviewed": reviewed,
                 "form_state": form_state,
                 "readiness": readiness,
+                "save_validation": save_validation,
                 "platform_names": list(PLATFORM_REQUIREMENTS.keys()),
                 "platform_rules": _platform_rules_snapshot(),
                 "editor_suggestions": _editor_suggestion_seed(decision_log, insight),
@@ -2566,6 +2588,15 @@ def create_app() -> FastAPI:
         soft_decision = (form.get("soft_thumb_decision") or "").strip().lower()
         soft_score_raw = (form.get("soft_thumb_score") or "").strip()
         soft_score_100 = _parse_user_score_100(soft_score_raw)
+        metadata_validation = validate_metadata_for_platforms(
+            title_text=title,
+            long_description=long_description,
+            tags=_parse_csv_tokens(tags_csv, lowercase=True),
+            categories=_parse_csv_tokens(categories_csv, title_case=True),
+            target_platforms=target_platforms,
+            performers=[],
+            decision_log=decision_log or {},
+        )
 
         REVIEWED_DIR.mkdir(parents=True, exist_ok=True)
         sid = _safe_scene_id(scene_id)
@@ -2583,6 +2614,7 @@ def create_app() -> FastAPI:
             "tags_csv": tags_csv or None,
             "categories_csv": categories_csv or None,
             "target_platforms": target_platforms,
+            "metadata_validation": metadata_validation,
             "notes": notes or None,
             "soft_thumbnail_review": {
                 "decision": soft_decision if soft_decision in {"keep", "reject"} else None,

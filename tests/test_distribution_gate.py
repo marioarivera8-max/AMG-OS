@@ -132,3 +132,56 @@ def test_distribution_gate_passes_publishable_metadata(monkeypatch, tmp_path):
     assert result["overall_ready"] is True
     assert result["per_platform"]["AEBN"]["ready"] is True
     assert result["per_platform"]["AEBN"]["blockers"] == []
+
+
+def test_shared_metadata_validator_marks_skipped_platforms(monkeypatch):
+    import amg.review.distribution_gate as gate
+
+    monkeypatch.setattr(
+        gate,
+        "PLATFORM_REQUIREMENTS",
+        {
+            "AEBN": {
+                "title_max_chars": 80,
+                "requires_2257": False,
+                "requires_individual_releases": False,
+                "banned_terms": [],
+                "preferred_resolution_min": (1280, 720),
+                "metadata": {
+                    "title_min_chars": 20,
+                    "description_min_chars": 80,
+                    "description_max_chars": 400,
+                    "min_tags": 4,
+                    "max_tags": 30,
+                    "min_categories": 2,
+                    "max_categories": 10,
+                },
+            },
+            "SLR": {
+                "title_max_chars": 80,
+                "requires_2257": False,
+                "requires_individual_releases": False,
+                "banned_terms": [],
+                "preferred_resolution_min": (1280, 720),
+                "metadata": {
+                    "title_min_chars": 20,
+                    "description_min_chars": 80,
+                    "description_max_chars": 400,
+                    "min_tags": 4,
+                    "max_tags": 30,
+                    "min_categories": 2,
+                    "max_categories": 10,
+                },
+            },
+        },
+    )
+
+    out = gate.validate_metadata_for_platforms(
+        title_text="A strong title that fits",
+        long_description="This description is long enough for the platform checks and clearly explains the scene flow.",
+        tags=["pov", "blowjob", "doggy style", "missionary"],
+        categories=["POV", "Blowjob"],
+        target_platforms=["AEBN"],
+    )
+    assert out["per_platform"]["AEBN"]["ready"] is True
+    assert out["per_platform"]["SLR"]["skipped"] is True
