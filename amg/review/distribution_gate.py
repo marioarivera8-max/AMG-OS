@@ -18,7 +18,7 @@ Output: data/distribution_status/{scene_id}.json
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from amg.config import (
     DISTRIBUTION_STATUS_DIR,
@@ -92,8 +92,13 @@ def check_distribution_ready(scene_id: str, verbose: bool = True) -> dict:
         result["blockers"].append("Not reviewed — run 'amg review' first")
         return _save_and_return(result, verbose)
 
+    review_meta = _extract_review_metadata(review)
+    title_text = review_meta["title_text"]
+    long_description = review_meta["long_description"]
+    tags = review_meta["tags"]
+    categories = review_meta["categories"]
+
     # ── Check 3: Title set ──
-    title_text = (review.get("title") or {}).get("text", "")
     if title_text:
         result["checks"].append({
             "name": "Title set",
@@ -105,16 +110,16 @@ def check_distribution_ready(scene_id: str, verbose: bool = True) -> dict:
         result["blockers"].append("Title missing")
 
     # ── Check 4: Hero cover picked ──
-    cover = review.get("cover_pick") or {}
-    if cover.get("filename"):
+    hero_cover = review_meta["hero_cover"]
+    if hero_cover:
         result["checks"].append({
             "name": "Hero cover designated",
             "passed": True,
-            "detail": cover["filename"],
+            "detail": hero_cover,
         })
     else:
         result["checks"].append({"name": "Hero cover designated", "passed": False})
-        result["blockers"].append("Hero cover not picked — re-run amg review")
+        result["blockers"].append("Hero cover not picked — mark at least one kept/selected cover")
 
     # ── Check 5: Cover count meets floor ──
     cover_count = (decision_log.get("outcomes", {}).get("covers_delivered", 0))
@@ -133,16 +138,34 @@ def check_distribution_ready(scene_id: str, verbose: bool = True) -> dict:
         result["warnings"].append(f"Only {cover_count} covers (below {COVER_FLOOR})")
 
     # ── Check 6: Per-platform readiness ──
-    target_platforms = review.get("target_platforms", [])
+    target_platforms = review_meta["target_platforms"]
     if not target_platforms:
         result["warnings"].append("No target platforms selected")
+
+    result["checks"].append({
+        "name": "Metadata completeness",
+        "passed": bool(long_description and tags and categories),
+        "detail": (
+            f"description={len(long_description)} chars, "
+            f"tags={len(tags)}, categories={len(categories)}"
+        ),
+    })
 
     for platform in PLATFORM_REQUIREMENTS.keys():
         if platform not in target_platforms:
             result["per_platform"][platform] = {"ready": False, "skipped": True}
             continue
 
-        plat_status = _check_platform(platform, title_text, review, decision_log)
+        plat_status = _check_platform(
+            platform,
+            title_text=title_text,
+            long_description=long_description,
+            tags=tags,
+            categories=categories,
+            review=review,
+            decision_log=decision_log,
+            review_meta=review_meta,
+        )
         result["per_platform"][platform] = plat_status
 
     # ── Overall ready ──
@@ -158,25 +181,67 @@ def check_distribution_ready(scene_id: str, verbose: bool = True) -> dict:
 
 def _check_platform(
     platform: str,
-    title: str,
+    *,
+    title_text: str,
+    long_description: str,
+    tags: List[str],
+    categories: List[str],
     review: dict,
     decision_log: dict,
+    review_meta: Dict[str, Any],
 ) -> dict:
     """Check readiness for a specific platform."""
     reqs = PLATFORM_REQUIREMENTS[platform]
     blockers = []
     warnings = []
 
-    # Title length check
-    max_chars = reqs.get("title_max_chars", 100)
-    if len(title) > max_chars:
-        blockers.append(f"Title too long: {len(title)} > {max_chars}")
+    md = reqs.get("metadata", {}) if isinstance(reqs.get("metadata"), dict) else {}
+
+    # Title length checks
+    min_chars = int(md.get("title_min_chars", 1))
+    max_chars = int(reqs.get("title_max_chars", md.get("title_max_chars", 100)))
+    if len(title_text) < min_chars:
+        blockers.append(f"Title too short: {len(title_text)} < {min_chars}")
+    if len(title_text) > max_chars:
+        blockers.append(f"Title too long: {len(title_text)} > {max_chars}")
 
     # Banned terms
-    title_lower = title.lower()
+    title_lower = title_text.lower()
     for term in reqs.get("banned_terms", []):
         if term.lower() in title_lower:
             blockers.append(f"Title contains banned term '{term}'")
+
+    # Metadata quality checks
+    desc_min = int(md.get("description_min_chars", 0))
+    desc_max = int(md.get("description_max_chars", 9999))
+    if desc_min and len(long_description) < desc_min:
+        blockers.append(
+            f"Description too short: {len(long_description)} < {desc_min}"
+        )
+    if desc_max and len(long_description) > desc_max:
+        blockers.append(
+            f"Description too long: {len(long_description)} > {desc_max}"
+        )
+
+    min_tags = int(md.get("min_tags", 0))
+    max_tags = int(md.get("max_tags", 9999))
+    if min_tags and len(tags) < min_tags:
+        blockers.append(f"Too few tags: {len(tags)} < {min_tags}")
+    if max_tags and len(tags) > max_tags:
+        warnings.append(f"Too many tags: {len(tags)} > {max_tags}")
+
+    min_categories = int(md.get("min_categories", 0))
+    max_categories = int(md.get("max_categories", 9999))
+    if min_categories and len(categories) < min_categories:
+        blockers.append(f"Too few categories: {len(categories)} < {min_categories}")
+    if max_categories and len(categories) > max_categories:
+        warnings.append(f"Too many categories: {len(categories)} > {max_categories}")
+
+    performers = review_meta.get("performers", [])
+    if performers and title_text:
+        lead = str(performers[0]).split(" ")[0]
+        if lead and lead.lower() not in title_text.lower():
+            warnings.append(f"Title missing lead performer token '{lead}'")
 
     # 2257 doc check
     if reqs.get("requires_2257", True):
@@ -187,7 +252,6 @@ def _check_platform(
 
     # Individual model releases
     if reqs.get("requires_individual_releases", False):
-        performers = review.get("performers_confirmed", [])
         for performer in performers:
             if not _has_performer_release(performer):
                 blockers.append(f"Missing model release: {performer}")
@@ -209,6 +273,71 @@ def _check_platform(
         "blockers": blockers,
         "warnings": warnings,
     }
+
+
+def _extract_review_metadata(review: dict) -> Dict[str, Any]:
+    review = review if isinstance(review, dict) else {}
+    title_text = (
+        ((review.get("title") or {}).get("text"))
+        or review.get("title_override")
+        or ""
+    )
+    long_description = str(review.get("long_description") or "").strip()
+
+    target_platforms = review.get("target_platforms") or []
+    if not isinstance(target_platforms, list):
+        target_platforms = []
+    target_platforms = [str(p).upper().strip() for p in target_platforms if str(p).strip()]
+
+    performers = review.get("performers_confirmed") or []
+    if not isinstance(performers, list):
+        performers = []
+
+    hero_cover = ((review.get("cover_pick") or {}).get("filename") or "").strip()
+    if not hero_cover:
+        kept = review.get("kept_covers") or []
+        selected = review.get("selected_covers") or []
+        if isinstance(kept, list) and kept:
+            hero_cover = str(kept[0])
+        elif isinstance(selected, list) and selected:
+            hero_cover = str(selected[0])
+
+    tags = _normalize_tokens(review.get("tags_csv"))
+    categories = _normalize_tokens(review.get("categories_csv"), title_case=True)
+
+    return {
+        "title_text": str(title_text).strip(),
+        "long_description": long_description,
+        "target_platforms": target_platforms,
+        "performers": [str(x).strip() for x in performers if str(x).strip()],
+        "hero_cover": hero_cover,
+        "tags": tags,
+        "categories": categories,
+    }
+
+
+def _normalize_tokens(value: Any, *, title_case: bool = False) -> List[str]:
+    if value is None:
+        return []
+    raw: List[str] = []
+    if isinstance(value, str):
+        raw = [x.strip() for x in value.replace(";", ",").split(",")]
+    elif isinstance(value, list):
+        raw = [str(x).strip() for x in value]
+    out = []
+    seen = set()
+    for token in raw:
+        if not token:
+            continue
+        t = " ".join(token.split())
+        if title_case:
+            t = " ".join(part.capitalize() for part in t.split())
+        lower = t.lower()
+        if lower in seen:
+            continue
+        seen.add(lower)
+        out.append(t)
+    return out
 
 
 def _has_performer_release(performer_name: str) -> bool:

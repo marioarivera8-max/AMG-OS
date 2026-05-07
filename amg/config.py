@@ -505,6 +505,15 @@ PLATFORM_REQUIREMENTS = {
         "requires_individual_releases": True,
         "banned_terms": [],  # Operator-populated as encountered
         "preferred_resolution_min": (1280, 720),
+        "metadata": {
+            "title_min_chars": 30,
+            "description_min_chars": 140,
+            "description_max_chars": 500,
+            "min_categories": 8,
+            "max_categories": 15,
+            "min_tags": 15,
+            "max_tags": 30,
+        },
     },
     "SLR": {
         "title_max_chars": 80,
@@ -513,6 +522,15 @@ PLATFORM_REQUIREMENTS = {
         "banned_terms": [],
         "preferred_resolution_min": (1920, 1080),
         "vr_supported": True,
+        "metadata": {
+            "title_min_chars": 30,
+            "description_min_chars": 120,
+            "description_max_chars": 500,
+            "min_categories": 8,
+            "max_categories": 15,
+            "min_tags": 15,
+            "max_tags": 30,
+        },
     },
     "ADE": {
         "title_max_chars": 100,
@@ -520,6 +538,15 @@ PLATFORM_REQUIREMENTS = {
         "requires_individual_releases": True,
         "banned_terms": [],
         "preferred_resolution_min": (1280, 720),
+        "metadata": {
+            "title_min_chars": 30,
+            "description_min_chars": 140,
+            "description_max_chars": 500,
+            "min_categories": 8,
+            "max_categories": 15,
+            "min_tags": 15,
+            "max_tags": 30,
+        },
     },
 }
 
