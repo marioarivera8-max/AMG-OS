@@ -979,6 +979,80 @@ def _cloud_browse_error(request, remote: str, path: str, message: str):
     )
 
 
+def _is_video_cloud_path(path: str) -> bool:
+    return Path(path).suffix.lower() in {ext.lower() for ext in VIDEO_EXTENSIONS}
+
+
+def _join_cloud_path(base: str, rel: str) -> str:
+    base_clean = base.strip().strip("/")
+    rel_clean = rel.strip().strip("/")
+    if not base_clean:
+        return rel_clean
+    if not rel_clean:
+        return base_clean
+    if rel_clean.startswith(base_clean + "/") or rel_clean == base_clean:
+        return rel_clean
+    return f"{base_clean}/{rel_clean}"
+
+
+def _expand_cloud_selection_to_videos(
+    remote: str,
+    selected_items: List[dict],
+) -> List[dict]:
+    """
+    Expand multi-select cloud items into concrete video file paths.
+
+    Supports direct file picks plus "folder picks" (recursive listing via
+    rclone lsjson). Returns rows shaped like:
+      {"path": "folder/video.mp4", "source_folder": "folder" | None}
+    """
+    from amg.cloud.credentials import CredentialStore
+    from amg.cloud.rclone import Rclone, RcloneError, RcloneNotFoundError
+
+    expanded: List[dict] = []
+    seen: set[str] = set()
+
+    store = CredentialStore()
+    with store.materialize_config(names=[remote]) as cfg_path:
+        rc = Rclone(config_path=cfg_path)
+        for item in selected_items:
+            p = str(item.get("path") or "").strip().strip("/")
+            if not p:
+                continue
+            is_dir = bool(item.get("is_dir"))
+            if not is_dir:
+                if _is_video_cloud_path(p) and p not in seen:
+                    expanded.append({"path": p, "source_folder": None})
+                    seen.add(p)
+                continue
+            try:
+                folder_entries = rc.lsjson(
+                    remote=remote,
+                    path=p,
+                    max_depth=32,
+                    videos_only=True,
+                    timeout=180.0,
+                )
+            except RcloneNotFoundError as exc:
+                raise RuntimeError(f"rclone is not installed on controller: {exc}") from exc
+            except RcloneError as exc:
+                raise RuntimeError(f"failed to list folder {remote}:{p}: {exc}") from exc
+            for entry in folder_entries:
+                if entry.get("IsDir"):
+                    continue
+                rel = str(entry.get("Path") or entry.get("Name") or "").strip()
+                if not rel:
+                    continue
+                full_path = _join_cloud_path(p, rel)
+                if not _is_video_cloud_path(full_path):
+                    continue
+                if full_path in seen:
+                    continue
+                expanded.append({"path": full_path, "source_folder": p})
+                seen.add(full_path)
+    return expanded
+
+
 def _run_job(job_id: str) -> None:
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -1911,11 +1985,12 @@ def create_app() -> FastAPI:
     async def create_cloud_job(
         request: Request,
         remote: str = Form(...),
-        path: str = Form(...),
+        path: str = Form(default=""),
+        paths_json: str = Form(default=""),
         scene_id: str = Form(default=""),
     ):
-        if not remote.strip() or not path.strip():
-            raise HTTPException(status_code=400, detail="remote and path are required")
+        if not remote.strip():
+            raise HTTPException(status_code=400, detail="remote is required")
         # Verify the credential actually exists before queueing — better to
         # 400 here than queue a job that's guaranteed to fail.
         from amg.cloud.credentials import (
@@ -1930,30 +2005,74 @@ def create_app() -> FastAPI:
         except CredentialKeyMissingError as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
-        job_id = uuid.uuid4().hex[:10]
-        scene_folder = scene_id.strip() or Path(path).stem or job_id
+        selected_items: List[dict] = []
+        if paths_json.strip():
+            try:
+                raw = json.loads(paths_json)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=400, detail=f"invalid paths_json: {exc}") from exc
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict):
+                        selected_items.append(
+                            {
+                                "path": str(item.get("path") or "").strip(),
+                                "is_dir": bool(item.get("type") == "folder" or item.get("is_dir")),
+                            }
+                        )
+                    elif isinstance(item, str):
+                        selected_items.append({"path": item.strip(), "is_dir": False})
+        if not selected_items and path.strip():
+            selected_items.append({"path": path.strip(), "is_dir": False})
+        if not selected_items:
+            raise HTTPException(status_code=400, detail="select at least one cloud file/folder")
+
+        expanded_items = _expand_cloud_selection_to_videos(remote.strip(), selected_items)
+        if not expanded_items:
+            raise HTTPException(
+                status_code=400,
+                detail="selection contains no playable videos (expected mp4/mov/mkv/avi/m4v/webm/wmv/flv)",
+            )
+
+        first_job_id = ""
         global _job_seq_counter
-        with _jobs_lock:
-            _job_seq_counter += 1
-            queue_seq = _job_seq_counter
-        job = {
-            "job_id": job_id,
-            "status": "queued",
-            "scene_id": scene_folder,
-            "video_path": "",  # populated by the backend after rclone copy
-            "cloud_source": {"remote": remote, "path": path, "scene_id": scene_folder},
-            "created_at": datetime.now().isoformat(),
-            "message": f"Queued · cloud · {remote}:{path} · priority #{queue_seq}",
-            "result": None,
-            "source_mode": "cloud",
-            "log_tail": [],
-            "current_phase": None,
-            "progress_pct": 0,
-            "queue_seq": queue_seq,
-        }
-        with _jobs_lock:
-            _jobs[job_id] = job
-            _job_fifo.append(job_id)
+        total = len(expanded_items)
+        for idx, item in enumerate(expanded_items):
+            one_path = item["path"]
+            source_folder = item.get("source_folder")
+            job_id = uuid.uuid4().hex[:10]
+            if not first_job_id:
+                first_job_id = job_id
+            scene_folder = (
+                scene_id.strip()
+                or (Path(source_folder).name if source_folder else "")
+                or Path(one_path).parent.name
+                or Path(one_path).stem
+                or job_id
+            )
+            with _jobs_lock:
+                _job_seq_counter += 1
+                queue_seq = _job_seq_counter
+                _jobs[job_id] = {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "scene_id": scene_folder,
+                    "video_path": "",  # populated by the backend after rclone copy
+                    "cloud_source": {"remote": remote, "path": one_path, "scene_id": scene_folder},
+                    "created_at": datetime.now().isoformat(),
+                    "message": (
+                        f"Queued · cloud {idx + 1}/{total} · {remote}:{one_path} · priority #{queue_seq}"
+                        if total > 1
+                        else f"Queued · cloud · {remote}:{one_path} · priority #{queue_seq}"
+                    ),
+                    "result": None,
+                    "source_mode": "cloud",
+                    "log_tail": [],
+                    "current_phase": None,
+                    "progress_pct": 0,
+                    "queue_seq": queue_seq,
+                }
+                _job_fifo.append(job_id)
         _start_dispatcher_if_needed()
 
         # The operator submitted from /cloud, but the queue panel + per-job
@@ -1963,7 +2082,7 @@ def create_app() -> FastAPI:
         return Response(
             status_code=204,
             headers={
-                "HX-Redirect": f"/?job_id={job_id}",
+                "HX-Redirect": f"/?job_id={first_job_id}",
             },
         )
 

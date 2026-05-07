@@ -50,6 +50,32 @@
     padding: 6px 14px;
     flex-shrink: 0;
   }
+  .cloud-row-check {
+    accent-color: var(--accent);
+  }
+  .cloud-selection-list {
+    display: grid;
+    gap: 6px;
+    max-height: 260px;
+    overflow: auto;
+  }
+  .cloud-selection-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    border: 1.2px solid color-mix(in oklab, var(--line) 20%, transparent);
+    border-radius: 6px;
+    padding: 7px 8px;
+    background: color-mix(in oklab, var(--paper-2) 75%, transparent);
+  }
+  .cloud-selection-item .label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
   /* HTMX request indicator: dim + non-interactive while a click is in flight. */
   #cloud-browse-panel.htmx-request {
     opacity: 0.55;
@@ -131,13 +157,159 @@ amg cloud-remote list
 
     <div>
       <h3 class="card-section-title">Browse</h3>
-      <div id="cloud-browse-panel" class="card cloud-browse-panel" style="padding: 14px; min-height: 180px;">
-        <div class="muted" style="font-size: 13px;">
-          Select a remote on the left to start browsing and queue a cloud run.
+      <div class="stack-md">
+        <div id="cloud-browse-panel" class="card cloud-browse-panel" style="padding: 14px; min-height: 180px;">
+          <div class="muted" style="font-size: 13px;">
+            Select a remote on the left to start browsing and queue cloud items.
+          </div>
         </div>
+        <form
+          id="cloud-selection-form"
+          method="POST"
+          action="/jobs/cloud"
+          hx-post="/jobs/cloud"
+          hx-target="this"
+          hx-swap="none"
+          class="card cloud-browse-panel"
+          style="padding: 14px;"
+        >
+          <h3 style="margin: 0 0 8px 0;">Selected cloud items</h3>
+          <div class="muted" style="font-size: 12px; margin-bottom: 10px;">
+            Multi-select files or choose whole folders. Folder selection queues all videos recursively.
+          </div>
+          <div id="cloud-selection-empty" class="muted" style="font-size: 12px;">No items selected yet.</div>
+          <div id="cloud-selection-list" class="cloud-selection-list"></div>
+          <input type="hidden" name="remote" id="cloud-selection-remote" value="" />
+          <input type="hidden" name="paths_json" id="cloud-selection-json" value="[]" />
+          <input type="hidden" name="scene_id" value="" />
+          <div style="display: flex; gap: 8px; margin-top: 10px;">
+            <button type="submit" class="btn-primary" id="cloud-selection-submit" disabled>
+              Queue selected items
+            </button>
+            <button type="button" class="btn btn-ghost" id="cloud-selection-clear" disabled>Clear</button>
+          </div>
+        </form>
       </div>
     </div>
   </div>
 {% endif %}
+
+<script>
+(() => {
+  const selected = [];
+  const selectedSet = new Set();
+
+  const listEl = document.getElementById("cloud-selection-list");
+  const emptyEl = document.getElementById("cloud-selection-empty");
+  const hiddenEl = document.getElementById("cloud-selection-json");
+  const remoteEl = document.getElementById("cloud-selection-remote");
+  const submitEl = document.getElementById("cloud-selection-submit");
+  const clearEl = document.getElementById("cloud-selection-clear");
+  const remotesRoot = document.getElementById("cloud-remotes-list");
+
+  function keyOf(item) {
+    return `${item.type}:${item.path}`;
+  }
+
+  function render() {
+    listEl.innerHTML = "";
+    for (const item of selected) {
+      const row = document.createElement("div");
+      row.className = "cloud-selection-item";
+      const label = document.createElement("div");
+      label.className = "label";
+      label.textContent = `${item.type === "folder" ? "Folder" : "File"} · ${item.path}`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "btn btn-ghost";
+      remove.style.fontSize = "11px";
+      remove.style.padding = "3px 8px";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => {
+        const key = keyOf(item);
+        const idx = selected.findIndex((x) => keyOf(x) === key);
+        if (idx >= 0) {
+          selected.splice(idx, 1);
+          selectedSet.delete(key);
+          render();
+        }
+      });
+      row.appendChild(label);
+      row.appendChild(remove);
+      listEl.appendChild(row);
+    }
+    hiddenEl.value = JSON.stringify(selected);
+    emptyEl.style.display = selected.length ? "none" : "block";
+    submitEl.disabled = selected.length === 0 || !remoteEl.value;
+    clearEl.disabled = selected.length === 0;
+  }
+
+  function addSelection(item) {
+    if (!item.path) return;
+    const key = keyOf(item);
+    if (selectedSet.has(key)) return;
+    selected.push(item);
+    selectedSet.add(key);
+    render();
+  }
+
+  if (clearEl) {
+    clearEl.addEventListener("click", () => {
+      selected.length = 0;
+      selectedSet.clear();
+      render();
+    });
+  }
+
+  if (remotesRoot) {
+    remotesRoot.addEventListener("click", (evt) => {
+      const btn = evt.target.closest("[hx-get*='/partials/cloud-browse?remote=']");
+      if (!btn) return;
+      const hxGet = btn.getAttribute("hx-get") || "";
+      const match = hxGet.match(/remote=([^&]+)/);
+      if (!match) return;
+      remoteEl.value = decodeURIComponent(match[1]);
+      render();
+    });
+  }
+
+  document.body.addEventListener("click", (evt) => {
+    const fileBtn = evt.target.closest("[data-cloud-add-file='1']");
+    if (fileBtn) {
+      const path = fileBtn.getAttribute("data-cloud-path") || "";
+      addSelection({ type: "file", path });
+      const checkbox = fileBtn.matches("input[type='checkbox']")
+        ? fileBtn
+        : fileBtn.closest(".cloud-row")?.querySelector("input[type='checkbox'][data-cloud-add-file='1']");
+      if (checkbox) checkbox.checked = true;
+      return;
+    }
+    const folderBtn = evt.target.closest("[data-cloud-add-folder='1']");
+    if (folderBtn) {
+      const path = folderBtn.getAttribute("data-cloud-path") || "";
+      addSelection({ type: "folder", path });
+    }
+  });
+
+  document.body.addEventListener("change", (evt) => {
+    const check = evt.target.closest("input[type='checkbox'][data-cloud-add-file='1']");
+    if (!check) return;
+    const path = check.getAttribute("data-cloud-path") || "";
+    const key = `file:${path}`;
+    if (check.checked) {
+      addSelection({ type: "file", path });
+    } else {
+      const idx = selected.findIndex((x) => keyOf(x) === key);
+      if (idx >= 0) {
+        selected.splice(idx, 1);
+        selectedSet.delete(key);
+      }
+      render();
+    }
+  });
+
+  render();
+})();
+</script>
 
 {% endblock %}

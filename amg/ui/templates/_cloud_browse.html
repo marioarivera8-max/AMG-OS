@@ -29,39 +29,55 @@
     {% for entry in entries %}
       {% set entry_path = (path + "/" + entry.Name) if path else entry.Name %}
       {% if entry.IsDir %}
-        <button
-          type="button"
-          class="cloud-row cloud-row-dir"
-          hx-get="/partials/cloud-browse?remote={{ remote | urlencode }}&path={{ entry_path | urlencode }}"
-          hx-target="#cloud-browse-panel"
-          hx-swap="innerHTML"
-          hx-indicator="#cloud-browse-panel"
-        >
+        <div class="cloud-row cloud-row-dir" style="cursor: default;">
+          <button
+            type="button"
+            class="btn btn-ghost"
+            style="font-size: 11px; padding: 4px 8px;"
+            hx-get="/partials/cloud-browse?remote={{ remote | urlencode }}&path={{ entry_path | urlencode }}"
+            hx-target="#cloud-browse-panel"
+            hx-swap="innerHTML"
+            hx-indicator="#cloud-browse-panel"
+          >
+            Open
+          </button>
           <span aria-hidden="true">📁</span>
           <span class="cloud-row-name">{{ entry.Name }}</span>
-          <span aria-hidden="true" class="cloud-row-chevron">›</span>
-        </button>
+          <button
+            type="button"
+            class="btn btn-ghost cloud-row-process"
+            data-cloud-add-folder="1"
+            data-cloud-path="{{ entry_path }}"
+            data-cloud-label="{{ entry.Name }}/"
+          >
+            Select folder
+          </button>
+        </div>
       {% else %}
-        <form
-          method="POST"
-          action="/jobs/cloud"
-          hx-post="/jobs/cloud"
-          hx-target="this"
-          hx-swap="none"
-          hx-indicator="#cloud-browse-panel"
-          class="cloud-row cloud-row-file"
-        >
+        <div class="cloud-row cloud-row-file">
+          <input
+            type="checkbox"
+            class="cloud-row-check"
+            data-cloud-add-file="1"
+            data-cloud-path="{{ entry_path }}"
+            data-cloud-label="{{ entry.Name }}"
+            aria-label="Select {{ entry.Name }}"
+          />
           <span aria-hidden="true">🎬</span>
           <span class="cloud-row-name">{{ entry.Name }}</span>
           <span class="muted cloud-row-size">
             {% if entry.Size %}{{ (entry.Size / (1024 * 1024)) | round(1) }} MB{% endif %}
           </span>
-          <input type="hidden" name="remote" value="{{ remote }}" />
-          <input type="hidden" name="path" value="{{ entry_path }}" />
-          <button type="submit" class="btn-primary cloud-row-process">
-            Process
+          <button
+            type="button"
+            class="btn btn-ghost cloud-row-process"
+            data-cloud-add-file="1"
+            data-cloud-path="{{ entry_path }}"
+            data-cloud-label="{{ entry.Name }}"
+          >
+            Add
           </button>
-        </form>
+        </div>
       {% endif %}
     {% endfor %}
   </div>
