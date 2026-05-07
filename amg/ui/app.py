@@ -89,6 +89,23 @@ def _safe_scene_id(scene_id: str) -> str:
     return "".join(c if c.isalnum() or c in "_-" else "_" for c in scene_id)[:120]
 
 
+def _debug_log_dbg_mode(run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    try:
+        row = {
+            "sessionId": "a40662",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open("debug-a40662.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+
+
 def _build_scene_id_from_video(video_path: Path) -> str:
     """
     Build a stable, human-readable scene id per video (not per folder).
@@ -2755,10 +2772,28 @@ def create_app() -> FastAPI:
     @app.post("/scene/{scene_id}/rerun")
     async def rerun_scene(scene_id: str):
         target_scene = _safe_scene_id((scene_id or "").strip())
+        # #region agent log
+        _debug_log_dbg_mode(
+            "pre-fix-rerun",
+            "H2",
+            "amg/ui/app.py:rerun_scene:entry",
+            "rerun route hit",
+            {"scene_id_raw": scene_id, "target_scene": target_scene},
+        )
+        # #endregion
         if not target_scene:
             raise HTTPException(status_code=400, detail="scene_id is required")
 
         decision_log = _load_decision_log(target_scene)
+        # #region agent log
+        _debug_log_dbg_mode(
+            "pre-fix-rerun",
+            "H2",
+            "amg/ui/app.py:rerun_scene:decision_log",
+            "decision log lookup",
+            {"found": bool(decision_log), "scene_id": target_scene},
+        )
+        # #endregion
         if not decision_log:
             return RedirectResponse(
                 url=f"/scene/{target_scene}?rerun_error={quote_plus('missing decision log')}",
@@ -2773,6 +2808,15 @@ def create_app() -> FastAPI:
             )
 
         resolved_video = _resolve_video_path(Path(scene_path))
+        # #region agent log
+        _debug_log_dbg_mode(
+            "pre-fix-rerun",
+            "H2",
+            "amg/ui/app.py:rerun_scene:resolve_video",
+            "resolve video path result",
+            {"scene_path": scene_path, "resolved_video": str(resolved_video) if resolved_video else None},
+        )
+        # #endregion
         if resolved_video is None:
             return RedirectResponse(
                 url=f"/scene/{target_scene}?rerun_error={quote_plus('source path is missing or inaccessible')}",
@@ -2799,6 +2843,15 @@ def create_app() -> FastAPI:
                 "queue_seq": queue_seq,
             }
             _job_fifo.append(job_id)
+        # #region agent log
+        _debug_log_dbg_mode(
+            "pre-fix-rerun",
+            "H4",
+            "amg/ui/app.py:rerun_scene:queued",
+            "rerun job queued",
+            {"job_id": job_id, "scene_id": target_scene, "queue_seq": queue_seq},
+        )
+        # #endregion
         _start_dispatcher_if_needed()
         return RedirectResponse(url=f"/?job_id={job_id}", status_code=303)
 

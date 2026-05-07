@@ -452,6 +452,27 @@
     var initialState = {{ (form_state or {}) | tojson }};
     var platformRules = {{ (platform_rules or {}) | tojson }};
     var editorSuggestions = {{ (editor_suggestions or {}) | tojson }};
+    var rerunForm = document.querySelector('form[action$="/rerun"]');
+    var rerunBtn = rerunForm ? rerunForm.querySelector('button[type="submit"]') : null;
+
+    // #region agent log
+    fetch('http://127.0.0.1:7870/ingest/adb48027-1c92-4bdb-bae2-2575faf35eb6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'a40662'},body:JSON.stringify({sessionId:'a40662',runId:'pre-fix-rerun',hypothesisId:'H1',location:'amg/ui/templates/scene.html:script:init',message:'scene script init rerun controls',data:{hasRerunForm:!!rerunForm,hasRerunBtn:!!rerunBtn,sceneId:'{{ scene_id }}'},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+
+    if (rerunBtn) {
+      rerunBtn.addEventListener('click', function() {
+        // #region agent log
+        fetch('http://127.0.0.1:7870/ingest/adb48027-1c92-4bdb-bae2-2575faf35eb6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'a40662'},body:JSON.stringify({sessionId:'a40662',runId:'pre-fix-rerun',hypothesisId:'H1',location:'amg/ui/templates/scene.html:script:rerun_click',message:'rerun button clicked',data:{sceneId:'{{ scene_id }}'},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      });
+    }
+    if (rerunForm) {
+      rerunForm.addEventListener('submit', function() {
+        // #region agent log
+        fetch('http://127.0.0.1:7870/ingest/adb48027-1c92-4bdb-bae2-2575faf35eb6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'a40662'},body:JSON.stringify({sessionId:'a40662',runId:'pre-fix-rerun',hypothesisId:'H3',location:'amg/ui/templates/scene.html:script:rerun_submit',message:'rerun form submit fired',data:{action:rerunForm.getAttribute('action')||'',method:rerunForm.getAttribute('method')||'get',sceneId:'{{ scene_id }}'},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      });
+    }
 
     function setFieldValueByName(name, value) {
       if (!name || !form || !form.elements) return;
