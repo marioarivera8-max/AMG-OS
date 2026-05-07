@@ -103,7 +103,13 @@ def process_scene(
         }
     """
     video_path = Path(video_path).resolve()
-    scene_id = video_path.parent.name  # Use folder name as scene ID
+    parent = (video_path.parent.name or "").strip()
+    stem = (video_path.stem or "").strip()
+    # Use a per-video id to avoid collisions when one folder has many scenes.
+    if parent and stem and parent.lower() != stem.lower():
+        scene_id = f"{parent}_{stem}"
+    else:
+        scene_id = stem or parent or video_path.name
     init_logging(run_log_name=scene_id)
 
     def _emit_progress(pct: int) -> None:

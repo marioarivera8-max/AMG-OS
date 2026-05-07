@@ -643,7 +643,12 @@ class RunpodBackend(JobBackend):
 
     def _submit_job(self, pod_id: str, video_path: Path) -> str:
         url = f"{self._pod_base_url(pod_id)}/jobs"
-        scene_id = video_path.parent.name
+        parent = (video_path.parent.name or "").strip()
+        stem = (video_path.stem or "").strip()
+        if parent and stem and parent.lower() != stem.lower():
+            scene_id = f"{parent}_{stem}"
+        else:
+            scene_id = stem or parent or video_path.name
         with video_path.open("rb") as fh:
             files = {"video": (video_path.name, fh, "application/octet-stream")}
             data = {"scene_id": scene_id}

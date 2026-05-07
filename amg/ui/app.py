@@ -89,6 +89,48 @@ def _safe_scene_id(scene_id: str) -> str:
     return "".join(c if c.isalnum() or c in "_-" else "_" for c in scene_id)[:120]
 
 
+def _build_scene_id_from_video(video_path: Path) -> str:
+    """
+    Build a stable, human-readable scene id per video (not per folder).
+    """
+    parent = (video_path.parent.name or "").strip()
+    stem = (video_path.stem or "").strip()
+    if parent and stem and parent.lower() != stem.lower():
+        return _safe_scene_id(f"{parent}_{stem}")
+    if stem:
+        return _safe_scene_id(stem)
+    if parent:
+        return _safe_scene_id(parent)
+    return _safe_scene_id(video_path.name or "scene")
+
+
+def _build_cloud_scene_id(
+    *,
+    one_path: str,
+    download_root: Optional[str],
+    relative_path: Optional[str],
+    explicit_scene_id: str,
+) -> str:
+    """
+    Build a deterministic scene id for one cloud-selected video.
+    """
+    if explicit_scene_id.strip():
+        return _safe_scene_id(explicit_scene_id.strip())
+    if relative_path:
+        rel = Path(relative_path.strip().strip("/"))
+        base = rel.with_suffix("").as_posix().replace("/", "_")
+    else:
+        base = Path(one_path).stem
+    root_name = Path(download_root).name if download_root else Path(one_path).parent.name
+    if root_name and base and root_name.lower() not in base.lower():
+        return _safe_scene_id(f"{root_name}_{base}")
+    if base:
+        return _safe_scene_id(base)
+    if root_name:
+        return _safe_scene_id(root_name)
+    return _safe_scene_id(Path(one_path).name or "scene")
+
+
 def _utc_now_isoz() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -424,6 +466,9 @@ def _persist_review_to_decision_log(
     tags_csv: Optional[str] = None,
     categories_csv: Optional[str] = None,
     soft_thumbnail_review: Optional[dict] = None,
+    rule_pack_id: Optional[str] = None,
+    rule_pack_applied: Optional[bool] = None,
+    rule_pack_mode: Optional[str] = None,
 ) -> None:
     """
     Persist review choices back into decision log for downstream learning.
@@ -467,6 +512,9 @@ def _persist_review_to_decision_log(
             "tags_csv": tags_csv or None,
             "categories_csv": categories_csv or None,
             "soft_thumbnail_review": soft_thumbnail_review or None,
+            "rule_pack_id": rule_pack_id or None,
+            "rule_pack_applied": bool(rule_pack_applied) if rule_pack_applied is not None else None,
+            "rule_pack_mode": rule_pack_mode or None,
         }
     )
     dlog["review"] = review
@@ -542,6 +590,8 @@ def _scene_summary(d: dict) -> dict:
     out = (d.get("outcomes") or {})
     saved_covers = out.get("saved_covers") or []
     sid = d.get("scene_id") or ""
+    work_dir = _resolve_scene_work_dir(sid, d)
+    insight = _load_insight(work_dir)
     preview_path: Optional[Path] = None
     if saved_covers:
         raw_path = (saved_covers[0] or {}).get("path")
@@ -553,7 +603,6 @@ def _scene_summary(d: dict) -> dict:
         # Cloud runs often persist pod-local cover paths in decision logs.
         # Re-resolve against the controller's extracted work dir so library
         # cards still render thumbnails.
-        work_dir = _resolve_scene_work_dir(sid, d)
         covers_dir = (work_dir / "covers") if work_dir else None
         if covers_dir and covers_dir.is_dir():
             preferred = None
@@ -593,6 +642,9 @@ def _scene_summary(d: dict) -> dict:
         "status_cls": status_cls,
         "title": title,
         "performers": performers,
+        "rule_pack_id": (insight or {}).get("rule_pack_id"),
+        "rule_pack_mode": (insight or {}).get("rule_pack_mode"),
+        "text_model_fallback_used": bool((insight or {}).get("text_model_fallback_used")),
     }
 
 
@@ -846,6 +898,9 @@ def _append_feedback_rows(
     title_override: Optional[str],
     title_tone: Optional[str],
     notes: Optional[str],
+    rule_pack_id: Optional[str] = None,
+    rule_pack_applied: Optional[bool] = None,
+    rule_pack_mode: Optional[str] = None,
 ) -> int:
     OPERATOR_FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
     rows_written = 0
@@ -869,6 +924,11 @@ def _append_feedback_rows(
                 "scene_id": scene_id,
                 "filename": filename,
                 "timestamp_sec": item.get("timestamp_sec"),
+                "rule_pack": {
+                    "id": rule_pack_id or None,
+                    "applied": bool(rule_pack_applied) if rule_pack_applied is not None else None,
+                    "mode": rule_pack_mode or None,
+                },
                 "model": {
                     "type": item.get("model_type"),
                     "position_label": item.get("model_position"),
@@ -902,6 +962,11 @@ def _append_feedback_rows(
                 "scene_id": scene_id,
                 "filename": (soft_thumbnail or {}).get("path").name if (soft_thumbnail or {}).get("path") else "00_soft_thumbnail.jpg",
                 "timestamp_sec": (soft_thumbnail or {}).get("timestamp_sec"),
+                "rule_pack": {
+                    "id": rule_pack_id or None,
+                    "applied": bool(rule_pack_applied) if rule_pack_applied is not None else None,
+                    "mode": rule_pack_mode or None,
+                },
                 "model": {
                     "type": "SOFT_THUMBNAIL",
                     "position_label": None,
@@ -1759,6 +1824,20 @@ def _feedback_page_data(
             trend_days[day] = trend_days.get(day, 0) + 1
     trend_rows = [{"day": k, "count": v} for k, v in sorted(trend_days.items(), reverse=True)[:7]]
     trend_rows.reverse()
+    try:
+        from amg.learning.rule_packs import get_active_rule_pointer
+        from amg.learning.rule_promotion import list_rule_eval_runs
+        rule_status = get_active_rule_pointer()
+        latest_rule_eval = next(iter(list_rule_eval_runs(limit=1)), None)
+    except Exception:
+        rule_status = {
+            "enabled": False,
+            "mode": "off",
+            "rule_pack_id": None,
+            "canary_pct": 0.0,
+            "updated_at_utc": None,
+        }
+        latest_rule_eval = None
 
     return {
         "metrics": metrics,
@@ -1774,6 +1853,8 @@ def _feedback_page_data(
             "view": "all" if (view == "all") else "disagreements",
         },
         "trend_rows": trend_rows,
+        "rule_status": rule_status,
+        "latest_rule_eval": latest_rule_eval,
     }
 
 
@@ -1798,11 +1879,32 @@ def _library_data(filt: dict) -> dict:
     }
 
     # filter
+    filtered, sort = _filter_and_sort_library_summaries(summaries, filt)
+    limit = max(12, min(_safe_int(filt.get("limit"), 24), 120))
+    total_filtered = len(filtered)
+    visible_scenes = filtered[:limit]
+    has_more = total_filtered > len(visible_scenes)
+    next_limit = min(limit + 24, 120)
+
+    return {
+        "scenes": visible_scenes,
+        "studios": studios,
+        "stats": stats,
+        "filter": {**filt, "sort": sort, "limit": str(limit)},
+        "total_filtered": total_filtered,
+        "has_more": has_more,
+        "next_limit": next_limit,
+    }
+
+
+def _filter_and_sort_library_summaries(summaries: List[dict], filt: dict) -> tuple[List[dict], str]:
+    # filter
     q = (filt.get("q") or "").strip().lower()
     studio = (filt.get("studio") or "").strip()
     status = (filt.get("status") or "").strip().lower()
     sort = (filt.get("sort") or "newest").strip().lower()
-    limit = max(12, min(_safe_int(filt.get("limit"), 24), 120))
+    text_fallback = (filt.get("text_fallback") or "").strip().lower()
+    only_text_fallback = text_fallback in {"1", "true", "yes", "on"}
 
     filtered = []
     for s in summaries:
@@ -1827,6 +1929,8 @@ def _library_data(filt: dict) -> dict:
             }.get(status)
             if wanted and s["status"] != wanted:
                 continue
+        if only_text_fallback and not bool(s.get("text_model_fallback_used")):
+            continue
         filtered.append(s)
 
     action_rank = {"REVIEW": 0, "FAILED": 1, "DRAFT": 2, "REVIEWED": 3}
@@ -1845,21 +1949,7 @@ def _library_data(filt: dict) -> dict:
             ),
             reverse=False,
         )
-
-    total_filtered = len(filtered)
-    visible_scenes = filtered[:limit]
-    has_more = total_filtered > len(visible_scenes)
-    next_limit = min(limit + 24, 120)
-
-    return {
-        "scenes": visible_scenes,
-        "studios": studios,
-        "stats": stats,
-        "filter": {**filt, "sort": sort, "limit": str(limit)},
-        "total_filtered": total_filtered,
-        "has_more": has_more,
-        "next_limit": next_limit,
-    }
+    return filtered, sort
 
 
 def _remove_feedback_rows_for_scene(scene_id: str) -> tuple[int, int]:
@@ -2035,7 +2125,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Provide either a valid path or a video/folder upload.")
 
         job_id = uuid.uuid4().hex[:10]
-        scene_id = video_path.parent.name
+        scene_id = _build_scene_id_from_video(video_path)
         global _job_seq_counter
         with _jobs_lock:
             _job_seq_counter += 1
@@ -2225,6 +2315,7 @@ def create_app() -> FastAPI:
             )
 
         first_job_id = ""
+        seen_scene_ids: Dict[str, int] = {}
         global _job_seq_counter
         total = len(expanded_items)
         for idx, item in enumerate(expanded_items):
@@ -2234,13 +2325,15 @@ def create_app() -> FastAPI:
             job_id = uuid.uuid4().hex[:10]
             if not first_job_id:
                 first_job_id = job_id
-            scene_folder = (
-                scene_id.strip()
-                or (Path(download_root).name if download_root else "")
-                or Path(one_path).parent.name
-                or Path(one_path).stem
-                or job_id
+            base_scene_id = _build_cloud_scene_id(
+                one_path=one_path,
+                download_root=download_root,
+                relative_path=relative_path,
+                explicit_scene_id=scene_id,
             )
+            seen_scene_ids[base_scene_id] = seen_scene_ids.get(base_scene_id, 0) + 1
+            n = seen_scene_ids[base_scene_id]
+            scene_folder = base_scene_id if n == 1 else _safe_scene_id(f"{base_scene_id}_{n}")
             with _jobs_lock:
                 _job_seq_counter += 1
                 queue_seq = _job_seq_counter
@@ -2294,11 +2387,21 @@ def create_app() -> FastAPI:
         studio: str = Query(default=""),
         status: str = Query(default=""),
         sort: str = Query(default="newest"),
+        text_fallback: str = Query(default=""),
         limit: str = Query(default="24"),
         deleted: str = Query(default=""),
         feedback_deleted: str = Query(default=""),
+        rerun_queued: str = Query(default=""),
+        rerun_skipped: str = Query(default=""),
     ):
-        filt = {"q": q, "studio": studio, "status": status, "sort": sort, "limit": limit}
+        filt = {
+            "q": q,
+            "studio": studio,
+            "status": status,
+            "sort": sort,
+            "text_fallback": text_fallback,
+            "limit": limit,
+        }
         data = _library_data(filt)
         delete_notice = None
         if deleted.strip():
@@ -2306,6 +2409,13 @@ def create_app() -> FastAPI:
                 delete_notice = f"Deleted scene '{deleted}' (feedback rows removed: {feedback_deleted})."
             else:
                 delete_notice = f"Deleted scene '{deleted}'."
+        rerun_notice = None
+        if rerun_queued.strip() or rerun_skipped.strip():
+            queued_n = max(0, _safe_int(rerun_queued, 0))
+            skipped_n = max(0, _safe_int(rerun_skipped, 0))
+            rerun_notice = f"Queued {queued_n} scene rerun job(s)."
+            if skipped_n:
+                rerun_notice += f" Skipped {skipped_n} scene(s) with missing/inaccessible source video path."
         return templates.TemplateResponse(
             request=request,
             name="library.html",
@@ -2313,9 +2423,98 @@ def create_app() -> FastAPI:
                 "request": request,
                 **data,
                 "delete_notice": delete_notice,
+                "rerun_notice": rerun_notice,
                 "active_nav": "library",
                 "health": _health_snapshot(),
             },
+        )
+
+    @app.post("/library/rerun-filtered")
+    async def library_rerun_filtered(
+        q: str = Form(default=""),
+        studio: str = Form(default=""),
+        status: str = Form(default=""),
+        sort: str = Form(default="newest"),
+        text_fallback: str = Form(default=""),
+    ):
+        filt = {
+            "q": q,
+            "studio": studio,
+            "status": status,
+            "sort": sort,
+            "text_fallback": text_fallback,
+            "limit": "120",
+        }
+        logs = _all_decision_logs()
+        filtered_summaries, normalized_sort = _filter_and_sort_library_summaries(
+            [_scene_summary(d) for d in logs],
+            filt,
+        )
+        log_by_scene = {
+            str((d or {}).get("scene_id") or ""): d
+            for d in logs
+            if str((d or {}).get("scene_id") or "")
+        }
+
+        queued_count = 0
+        skipped_count = 0
+        first_job_id = ""
+        seen_scene_ids: set[str] = set()
+
+        global _job_seq_counter
+        for summary in filtered_summaries:
+            scene_id = str(summary.get("scene_id") or "").strip()
+            if not scene_id or scene_id in seen_scene_ids:
+                continue
+            seen_scene_ids.add(scene_id)
+            decision_log = log_by_scene.get(scene_id) or {}
+            scene_path = str((decision_log or {}).get("scene_path") or "").strip()
+            if not scene_path:
+                skipped_count += 1
+                continue
+            resolved_video = _resolve_video_path(Path(scene_path))
+            if resolved_video is None:
+                skipped_count += 1
+                continue
+
+            job_id = uuid.uuid4().hex[:10]
+            if not first_job_id:
+                first_job_id = job_id
+            with _jobs_lock:
+                _job_seq_counter += 1
+                queue_seq = _job_seq_counter
+                _jobs[job_id] = {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "scene_id": scene_id,
+                    "video_path": str(resolved_video),
+                    "created_at": datetime.now().isoformat(),
+                    "message": f"Queued · bulk rerun · {scene_id} · priority #{queue_seq}",
+                    "result": None,
+                    "source_mode": "path",
+                    "log_tail": [],
+                    "current_phase": None,
+                    "progress_pct": 0,
+                    "queue_seq": queue_seq,
+                }
+                _job_fifo.append(job_id)
+            queued_count += 1
+
+        if queued_count:
+            _start_dispatcher_if_needed()
+
+        filter_query = (
+            f"&q={quote_plus(q)}"
+            f"&studio={quote_plus(studio)}"
+            f"&status={quote_plus(status)}"
+            f"&sort={quote_plus(normalized_sort)}"
+            f"&text_fallback={quote_plus(text_fallback)}"
+        )
+        if first_job_id:
+            filter_query += f"&job_id={quote_plus(first_job_id)}"
+        return RedirectResponse(
+            url=f"/library?rerun_queued={queued_count}&rerun_skipped={skipped_count}{filter_query}",
+            status_code=303,
         )
 
     @app.post("/library/delete")
@@ -2344,6 +2543,7 @@ def create_app() -> FastAPI:
         studio: str = Query(default=""),
         since_days: str = Query(default=""),
         view: str = Query(default="disagreements"),
+        rule_notice: str = Query(default=""),
     ):
         data = _feedback_page_data(scene_id=scene, studio=studio, since_days=since_days, view=view)
         return templates.TemplateResponse(
@@ -2352,10 +2552,90 @@ def create_app() -> FastAPI:
             context={
                 "request": request,
                 **data,
+                "rule_notice": rule_notice.strip(),
                 "active_nav": "feedback",
                 "health": _health_snapshot(),
             },
         )
+
+    @app.post("/rules/activate")
+    async def rules_activate(
+        rule_pack_id: str = Form(...),
+        mode: str = Form(default="canary"),
+        canary_pct: str = Form(default="35"),
+    ):
+        from amg.learning.rule_packs import set_active_rule_pack
+
+        pack_id = str(rule_pack_id or "").strip()
+        if not pack_id:
+            raise HTTPException(status_code=400, detail="rule_pack_id is required")
+        try:
+            set_active_rule_pack(
+                rule_pack_id=pack_id,
+                mode=str(mode or "canary").strip().lower(),
+                canary_pct=float(canary_pct or "35"),
+            )
+            notice = f"Activated rule pack {pack_id}."
+        except Exception as e:
+            notice = f"Rule activate failed: {e}"
+        return RedirectResponse(url=f"/feedback?rule_notice={quote_plus(notice)}", status_code=303)
+
+    @app.post("/rules/rollback")
+    async def rules_rollback():
+        from amg.learning.rule_promotion import rollback_active_rule_pack
+
+        try:
+            rollback_active_rule_pack()
+            notice = "Active rule pack rolled back (disabled)."
+        except Exception as e:
+            notice = f"Rule rollback failed: {e}"
+        return RedirectResponse(url=f"/feedback?rule_notice={quote_plus(notice)}", status_code=303)
+
+    @app.post("/rules/eval")
+    async def rules_eval(
+        rule_pack_id: str = Form(...),
+        days: str = Form(default="30"),
+    ):
+        from amg.learning.rule_promotion import run_rule_eval
+
+        pack_id = str(rule_pack_id or "").strip()
+        if not pack_id:
+            raise HTTPException(status_code=400, detail="rule_pack_id is required")
+        try:
+            result = run_rule_eval(rule_pack_id=pack_id, days_back=max(1, _safe_int(days, 30)))
+            if result.gates_passed:
+                notice = f"Rule eval pass for {pack_id} (run {result.run_id})."
+            else:
+                blocked = ", ".join(result.blocked_reasons) if result.blocked_reasons else "unknown"
+                notice = f"Rule eval blocked for {pack_id} (run {result.run_id}): {blocked}"
+        except Exception as e:
+            notice = f"Rule eval failed: {e}"
+        return RedirectResponse(url=f"/feedback?rule_notice={quote_plus(notice)}", status_code=303)
+
+    @app.post("/rules/promote")
+    async def rules_promote(
+        run_id: str = Form(...),
+        mode: str = Form(default="canary"),
+        canary_pct: str = Form(default="35"),
+    ):
+        from amg.learning.rule_promotion import promote_rule_pack_from_run
+
+        rid = str(run_id or "").strip()
+        if not rid:
+            raise HTTPException(status_code=400, detail="run_id is required")
+        try:
+            promotion = promote_rule_pack_from_run(
+                run_id=rid,
+                mode=str(mode or "canary").strip().lower(),
+                canary_pct=float(canary_pct or "35"),
+            )
+            notice = (
+                f"Promoted rule eval run {rid}: mode={promotion.get('mode')} "
+                f"canary={promotion.get('canary_pct')}"
+            )
+        except Exception as e:
+            notice = f"Rule promote failed: {e}"
+        return RedirectResponse(url=f"/feedback?rule_notice={quote_plus(notice)}", status_code=303)
 
     # Backward-compatibility aliases: older UI/deploys linked to
     # /covers/review* before scene detail stabilized at /scene/{scene_id}.
@@ -2523,8 +2803,12 @@ def create_app() -> FastAPI:
 
         decision_log = _load_decision_log(scene_id)
         work_dir = _resolve_scene_work_dir(scene_id, decision_log)
+        insight = _load_insight(work_dir)
         cover_items = _cover_items(scene_id, decision_log, work_dir)
         soft_thumbnail = _load_soft_thumbnail(work_dir)
+        rule_pack_id = str((insight or {}).get("rule_pack_id") or "").strip() or None
+        rule_pack_applied = bool((insight or {}).get("rule_pack_applied")) if isinstance(insight, dict) else None
+        rule_pack_mode = str((insight or {}).get("rule_pack_mode") or "").strip() or None
         selected = []
         kept_only = []
         per_cover = {}
@@ -2584,6 +2868,9 @@ def create_app() -> FastAPI:
             title_override=title,
             title_tone=title_tone,
             notes=notes,
+            rule_pack_id=rule_pack_id,
+            rule_pack_applied=rule_pack_applied,
+            rule_pack_mode=rule_pack_mode,
         )
         soft_decision = (form.get("soft_thumb_decision") or "").strip().lower()
         soft_score_raw = (form.get("soft_thumb_score") or "").strip()
@@ -2616,6 +2903,9 @@ def create_app() -> FastAPI:
             "target_platforms": target_platforms,
             "metadata_validation": metadata_validation,
             "notes": notes or None,
+            "rule_pack_id": rule_pack_id,
+            "rule_pack_applied": rule_pack_applied,
+            "rule_pack_mode": rule_pack_mode,
             "soft_thumbnail_review": {
                 "decision": soft_decision if soft_decision in {"keep", "reject"} else None,
                 "score_100": soft_score_100,
@@ -2636,6 +2926,9 @@ def create_app() -> FastAPI:
             per_cover=per_cover,
             tags_csv=tags_csv or None,
             categories_csv=categories_csv or None,
+            rule_pack_id=rule_pack_id,
+            rule_pack_applied=rule_pack_applied,
+            rule_pack_mode=rule_pack_mode,
             soft_thumbnail_review={
                 "decision": soft_decision if soft_decision in {"keep", "reject"} else None,
                 "score_100": soft_score_100,

@@ -256,4 +256,4 @@ class TestCreateCloudJob:
         )
         with app_mod._jobs_lock:
             job = next(iter(app_mod._jobs.values()))
-        assert job["scene_id"] == "some_scene"
+        assert job["scene_id"] == "incoming_some_scene"
