@@ -8,9 +8,9 @@
     align-items: center;
     text-align: left;
     padding: 10px 12px;
-    border: 1px solid var(--color-border, #2a2a2a);
+    border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
     border-radius: 6px;
-    background: rgba(255,255,255,0.02);
+    background: color-mix(in oklab, var(--bg-3) 40%, transparent);
     color: inherit;
     cursor: pointer;
     width: 100%;
@@ -18,8 +18,8 @@
     font: inherit;
   }
   .cloud-row:hover {
-    background: rgba(255,255,255,0.06);
-    border-color: rgba(255,255,255,0.2);
+    background: color-mix(in oklab, var(--bg-3) 75%, transparent);
+    border-color: color-mix(in oklab, var(--accent) 28%, transparent);
   }
   .cloud-row:active {
     transform: translateY(1px);
@@ -57,12 +57,12 @@
     position: relative;
   }
   #cloud-browse-panel.htmx-request::after {
-    content: "loading…";
+    content: "loading cloud items…";
     position: absolute;
     top: 14px;
     right: 14px;
     font-size: 11px;
-    color: var(--color-muted, #9aa);
+    color: var(--muted);
     letter-spacing: 0.05em;
   }
 </style>
@@ -78,19 +78,19 @@
 </div>
 
 {% if error_msg %}
-  <div class="card" style="border-left: 3px solid var(--color-warn, #d2a72d); padding: 12px 14px; margin-bottom: 16px;">
+  <div class="card cloud-warn-card" style="padding: 12px 14px; margin-bottom: 16px;">
     <strong>Cloud storage not configured:</strong>
     <div class="muted" style="margin-top: 4px; font-size: 13px;">{{ error_msg }}</div>
   </div>
 {% endif %}
 
 {% if not remotes %}
-  <div class="card" style="padding: 18px;">
+  <div class="card cloud-empty-card" style="padding: 18px;">
     <h3 style="margin-top: 0;">No remotes configured yet</h3>
     <p class="muted">
       Add a Drive / Dropbox / Mega remote with the <code>amg cloud-remote</code> CLI:
     </p>
-    <pre style="background: rgba(255,255,255,0.04); padding: 10px 12px; border-radius: 6px; font-size: 12px; overflow-x: auto;">
+    <pre class="log" style="padding: 10px 12px; font-size: 12px; overflow-x: auto;">
 # 1. Generate the rclone config on your laptop
 rclone config
 
@@ -131,9 +131,9 @@ amg cloud-remote list
 
     <div>
       <h3 class="card-section-title">Browse</h3>
-      <div id="cloud-browse-panel" class="card" style="padding: 14px; min-height: 180px;">
+      <div id="cloud-browse-panel" class="card cloud-browse-panel" style="padding: 14px; min-height: 180px;">
         <div class="muted" style="font-size: 13px;">
-          Select a remote on the left to start browsing.
+          Select a remote on the left to start browsing and queue a cloud run.
         </div>
       </div>
     </div>

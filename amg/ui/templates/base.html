@@ -447,6 +447,12 @@
       /* === Misc === */
       a { color: var(--accent); text-decoration: none; }
       a:hover { text-decoration: underline; }
+      a:focus-visible,
+      button:focus-visible,
+      .btn:focus-visible {
+        outline: none;
+        box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 40%, transparent);
+      }
       .muted { color: var(--muted); }
       .ok { color: var(--ok); }
       .warn { color: var(--warn); }

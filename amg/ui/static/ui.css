@@ -192,6 +192,20 @@
   border: 1.5px solid color-mix(in oklab, var(--line) 18%, transparent);
 }
 
+/* PR5: consistency and cloud state polish */
+.cloud-warn-card {
+  border: 1.5px solid color-mix(in oklab, var(--warn) 34%, var(--line-soft) 66%);
+  background: color-mix(in oklab, var(--warn-soft) 55%, transparent);
+}
+
+.cloud-empty-card {
+  border: 1.5px solid color-mix(in oklab, var(--line) 18%, transparent);
+}
+
+.cloud-browse-panel {
+  border: 1.5px solid color-mix(in oklab, var(--line) 18%, transparent);
+}
+
 @media (max-width: 1100px) {
   .scene-head-row {
     gap: 14px;

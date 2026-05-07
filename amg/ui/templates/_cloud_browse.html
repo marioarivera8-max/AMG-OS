@@ -1,5 +1,5 @@
 {% if error_msg %}
-  <div style="border-left: 3px solid var(--color-warn, #d2a72d); padding: 8px 12px; margin-bottom: 10px;">
+  <div class="cloud-warn-card" style="padding: 8px 12px; margin-bottom: 10px; border-radius: 8px;">
     <strong>Browse failed</strong>
     <div class="muted" style="margin-top: 4px; font-size: 12px;">{{ error_msg }}</div>
   </div>
@@ -68,7 +68,7 @@
 {% else %}
   {% if not error_msg %}
     <div class="muted" style="font-size: 13px;">
-      No video files or subfolders here.
+      No video files or subfolders in this folder.
     </div>
   {% endif %}
 {% endif %}
