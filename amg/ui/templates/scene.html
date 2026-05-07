@@ -321,6 +321,22 @@
           </div>
 
           <div class="card scene-side-card">
+            <h3 class="card-section-title">Pre-save metadata checks</h3>
+            <div class="stack" style="font-size: 12px;">
+              <div><span class="muted">Title chars:</span> <span id="live-title-count">0</span></div>
+              <div><span class="muted">Description chars:</span> <span id="live-desc-count">0</span></div>
+              <div><span class="muted">Tags:</span> <span id="live-tags-count">0</span></div>
+              <div><span class="muted">Categories:</span> <span id="live-cats-count">0</span></div>
+            </div>
+            <div class="row" style="margin-top: 10px; gap: 8px; flex-wrap: wrap;">
+              <button class="btn btn-ghost" type="button" id="btn-autofix-tags">Auto-fill tags</button>
+              <button class="btn btn-ghost" type="button" id="btn-autofix-categories">Auto-fill categories</button>
+              <button class="btn btn-ghost" type="button" id="btn-autofix-description">Auto-expand description</button>
+            </div>
+            <div id="live-platform-checks" class="stack" style="margin-top: 10px; font-size: 12px;"></div>
+          </div>
+
+          <div class="card scene-side-card">
             <h3 class="card-section-title">Distribution Readiness</h3>
             {% if readiness %}
               <div class="row" style="gap: 8px; margin-bottom: 8px;">
@@ -408,6 +424,8 @@
     var activeIndex = 0;
     var dirty = false;
     var initialState = {{ (form_state or {}) | tojson }};
+    var platformRules = {{ (platform_rules or {}) | tojson }};
+    var editorSuggestions = {{ (editor_suggestions or {}) | tojson }};
 
     function setFieldValueByName(name, value) {
       if (!name || !form || !form.elements) return;
@@ -505,6 +523,170 @@
       if (rejectCount) rejectCount.textContent = String(counts.reject);
     }
 
+    function parseCsv(raw, toLower) {
+      var out = [];
+      var seen = {};
+      String(raw || '')
+        .split(/[,\n;|]/)
+        .map(function(x) { return x.trim(); })
+        .forEach(function(token) {
+          if (!token) return;
+          var t = toLower ? token.toLowerCase() : token;
+          var key = t.toLowerCase();
+          if (seen[key]) return;
+          seen[key] = true;
+          out.push(t);
+        });
+      return out;
+    }
+
+    function selectedPlatforms() {
+      return Array.from(form.querySelectorAll('input[name="target_platforms"]:checked'))
+        .map(function(el) { return String(el.value || '').toUpperCase().trim(); })
+        .filter(Boolean);
+    }
+
+    function getRule(platform) {
+      return platformRules[platform] || {};
+    }
+
+    function summarizeRuleTargets(platforms) {
+      if (!platforms.length) return null;
+      var mins = { title: 0, desc: 0, tags: 0, categories: 0 };
+      var maxs = { title: Number.MAX_SAFE_INTEGER, desc: Number.MAX_SAFE_INTEGER, tags: Number.MAX_SAFE_INTEGER, categories: Number.MAX_SAFE_INTEGER };
+      platforms.forEach(function(p) {
+        var r = getRule(p);
+        mins.title = Math.max(mins.title, Number(r.title_min_chars || 0));
+        mins.desc = Math.max(mins.desc, Number(r.description_min_chars || 0));
+        mins.tags = Math.max(mins.tags, Number(r.min_tags || 0));
+        mins.categories = Math.max(mins.categories, Number(r.min_categories || 0));
+        maxs.title = Math.min(maxs.title, Number(r.title_max_chars || maxs.title));
+        maxs.desc = Math.min(maxs.desc, Number(r.description_max_chars || maxs.desc));
+        maxs.tags = Math.min(maxs.tags, Number(r.max_tags || maxs.tags));
+        maxs.categories = Math.min(maxs.categories, Number(r.max_categories || maxs.categories));
+      });
+      return { mins: mins, maxs: maxs };
+    }
+
+    function updateLiveChecks() {
+      var titleTextEl = form.querySelector('textarea[name="title"]');
+      var titleChoiceEl = form.querySelector('input[name="title"]:checked');
+      var descEl = form.elements['long_description'];
+      var tagsEl = form.elements['tags_csv'];
+      var catsEl = form.elements['categories_csv'];
+      if (!descEl || !tagsEl || !catsEl) return;
+
+      var title = String(
+        (titleTextEl && titleTextEl.value)
+        || (titleChoiceEl && titleChoiceEl.value)
+        || ''
+      ).trim();
+      var desc = String(descEl.value || '').trim();
+      var tags = parseCsv(tagsEl.value || '', true);
+      var cats = parseCsv(catsEl.value || '', false);
+      var platforms = selectedPlatforms();
+
+      var titleCount = document.getElementById('live-title-count');
+      var descCount = document.getElementById('live-desc-count');
+      var tagsCount = document.getElementById('live-tags-count');
+      var catsCount = document.getElementById('live-cats-count');
+      if (titleCount) titleCount.textContent = String(title.length);
+      if (descCount) descCount.textContent = String(desc.length);
+      if (tagsCount) tagsCount.textContent = String(tags.length);
+      if (catsCount) catsCount.textContent = String(cats.length);
+
+      var box = document.getElementById('live-platform-checks');
+      if (!box) return;
+      box.innerHTML = '';
+      if (!platforms.length) {
+        var none = document.createElement('div');
+        none.className = 'muted';
+        none.textContent = 'Select at least one target platform.';
+        box.appendChild(none);
+        return;
+      }
+
+      platforms.forEach(function(p) {
+        var rule = getRule(p);
+        var blockers = [];
+        if (title.length < Number(rule.title_min_chars || 0)) blockers.push('title too short');
+        if (title.length > Number(rule.title_max_chars || 99999)) blockers.push('title too long');
+        if (desc.length < Number(rule.description_min_chars || 0)) blockers.push('description too short');
+        if (desc.length > Number(rule.description_max_chars || 99999)) blockers.push('description too long');
+        if (tags.length < Number(rule.min_tags || 0)) blockers.push('too few tags');
+        if (cats.length < Number(rule.min_categories || 0)) blockers.push('too few categories');
+
+        var row = document.createElement('div');
+        var badge = document.createElement('span');
+        badge.className = 'pill ' + (blockers.length ? 'err' : 'ok');
+        badge.textContent = blockers.length ? '✗' : '✓';
+        row.appendChild(badge);
+        var txt = document.createElement('span');
+        txt.style.marginLeft = '6px';
+        txt.textContent = blockers.length ? (p + ': ' + blockers.join(', ')) : (p + ': metadata threshold pass');
+        row.appendChild(txt);
+        box.appendChild(row);
+      });
+    }
+
+    function autoFillToMin(fieldName, seedList, fallbackList, minGetter, lowercase) {
+      var el = form.elements[fieldName];
+      if (!el) return;
+      var platforms = selectedPlatforms();
+      var target = summarizeRuleTargets(platforms);
+      var minNeeded = target ? Number(minGetter(target.mins) || 0) : 0;
+      var tokens = parseCsv(el.value || '', lowercase);
+      var existing = {};
+      tokens.forEach(function(t) { existing[t.toLowerCase()] = true; });
+      var pool = []
+        .concat(seedList || [])
+        .concat(fallbackList || [])
+        .map(function(x) { return String(x || '').trim(); })
+        .filter(Boolean);
+      for (var i = 0; i < pool.length && tokens.length < minNeeded; i++) {
+        var token = lowercase ? pool[i].toLowerCase() : pool[i];
+        var k = token.toLowerCase();
+        if (existing[k]) continue;
+        existing[k] = true;
+        tokens.push(token);
+      }
+      el.value = tokens.join(', ');
+      markDirty(true);
+      updateLiveChecks();
+    }
+
+    function autoExpandDescription() {
+      var descEl = form.elements['long_description'];
+      var titleTextEl = form.querySelector('textarea[name="title"]');
+      var titleChoiceEl = form.querySelector('input[name="title"]:checked');
+      var tagsEl = form.elements['tags_csv'];
+      if (!descEl) return;
+      var platforms = selectedPlatforms();
+      var target = summarizeRuleTargets(platforms);
+      var minChars = target ? Number(target.mins.desc || 0) : 0;
+      var text = String(descEl.value || '').trim();
+      var title = String(
+        (titleTextEl && titleTextEl.value)
+        || (titleChoiceEl && titleChoiceEl.value)
+        || ''
+      ).trim();
+      var tagTokens = parseCsv((tagsEl && tagsEl.value) || '', true).slice(0, 4).join(', ');
+      if (!text) {
+        text = String((editorSuggestions && editorSuggestions.description_seed) || '').trim();
+      }
+      if (!text) {
+        text = (title || 'This scene') + ' delivers a focused action sequence with clear visual beats and strong shelf readability.';
+      }
+      var addOn = ' The scene keeps momentum across multiple moments with consistent framing and explicit, searchable cues.';
+      if (tagTokens) addOn = ' Key searchable elements include ' + tagTokens + '.';
+      while (text.length < minChars) {
+        text += addOn;
+      }
+      descEl.value = text.trim();
+      markDirty(true);
+      updateLiveChecks();
+    }
+
     function setActiveIndex(nextIndex) {
       if (!coverCards.length) return;
       if (nextIndex < 0) nextIndex = 0;
@@ -590,6 +772,10 @@
     form.addEventListener('change', function() {
       markDirty(true);
       updateDecisionCounts();
+      updateLiveChecks();
+    });
+    form.addEventListener('input', function() {
+      updateLiveChecks();
     });
 
     form.addEventListener('submit', function() {
@@ -604,7 +790,37 @@
 
     setActiveIndex(0);
     updateDecisionCounts();
+    updateLiveChecks();
     markDirty(false);
+
+    var btnTags = document.getElementById('btn-autofix-tags');
+    if (btnTags) {
+      btnTags.addEventListener('click', function() {
+        autoFillToMin(
+          'tags_csv',
+          (editorSuggestions && editorSuggestions.tags) || [],
+          ['pov', 'blowjob', 'deepthroat', 'doggy style', 'missionary', 'eye contact', 'cum in mouth', 'creampie', 'squirting'],
+          function(mins) { return mins.tags; },
+          true
+        );
+      });
+    }
+    var btnCats = document.getElementById('btn-autofix-categories');
+    if (btnCats) {
+      btnCats.addEventListener('click', function() {
+        autoFillToMin(
+          'categories_csv',
+          (editorSuggestions && editorSuggestions.categories) || [],
+          ['HD Porn', 'POV', 'Blowjob', 'Deepthroat', 'Anal', 'Cumshot', 'Toys', 'Big Ass'],
+          function(mins) { return mins.categories; },
+          false
+        );
+      });
+    }
+    var btnDesc = document.getElementById('btn-autofix-description');
+    if (btnDesc) {
+      btnDesc.addEventListener('click', autoExpandDescription);
+    }
   })();
 </script>
 

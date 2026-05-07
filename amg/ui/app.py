@@ -1249,6 +1249,49 @@ def _readiness_snapshot(scene_id: str) -> Optional[dict]:
         return None
 
 
+def _platform_rules_snapshot() -> dict:
+    out = {}
+    for platform, req in (PLATFORM_REQUIREMENTS or {}).items():
+        if not isinstance(req, dict):
+            continue
+        md = req.get("metadata") if isinstance(req.get("metadata"), dict) else {}
+        out[platform] = {
+            "title_min_chars": int(md.get("title_min_chars", 1)),
+            "title_max_chars": int(req.get("title_max_chars", md.get("title_max_chars", 120))),
+            "description_min_chars": int(md.get("description_min_chars", 0)),
+            "description_max_chars": int(md.get("description_max_chars", 9999)),
+            "min_tags": int(md.get("min_tags", 0)),
+            "max_tags": int(md.get("max_tags", 9999)),
+            "min_categories": int(md.get("min_categories", 0)),
+            "max_categories": int(md.get("max_categories", 9999)),
+        }
+    return out
+
+
+def _editor_suggestion_seed(decision_log: Optional[dict], insight: Optional[dict]) -> dict:
+    insight = insight if isinstance(insight, dict) else {}
+    inp = (decision_log or {}).get("input") if isinstance(decision_log, dict) else {}
+    inp = inp if isinstance(inp, dict) else {}
+    genres = [str(g).strip() for g in (inp.get("genres") or []) if str(g).strip()]
+    ai_tags = [str(t).strip() for t in (insight.get("ai_tags") or []) if str(t).strip()]
+    ai_categories = [str(c).strip() for c in (insight.get("ai_categories") or []) if str(c).strip()]
+    tags = []
+    for token in ai_tags + [g.lower().replace("_", " ") for g in genres]:
+        norm = " ".join(token.split()).lower()
+        if norm and norm not in tags:
+            tags.append(norm)
+    categories = []
+    for token in ai_categories + [" ".join(g.split("_")).title() for g in genres]:
+        norm = " ".join(str(token).split())
+        if norm and norm.lower() not in {x.lower() for x in categories}:
+            categories.append(norm)
+    return {
+        "tags": tags[:40],
+        "categories": categories[:24],
+        "description_seed": str(insight.get("long_description") or "").strip(),
+    }
+
+
 def _load_recent_run_timings(limit: int = 12) -> List[dict]:
     if not RUN_TIMINGS_PATH.exists():
         return []
@@ -2387,6 +2430,8 @@ def create_app() -> FastAPI:
                 "form_state": form_state,
                 "readiness": readiness,
                 "platform_names": list(PLATFORM_REQUIREMENTS.keys()),
+                "platform_rules": _platform_rules_snapshot(),
+                "editor_suggestions": _editor_suggestion_seed(decision_log, insight),
                 "finalized_thumbnails": finalized_thumbnails,
                 "finalized_items": finalized_items,
                 "scene_source_name": scene_source_name,
