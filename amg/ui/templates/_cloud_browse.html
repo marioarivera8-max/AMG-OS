@@ -25,6 +25,16 @@
 </div>
 
 {% if entries %}
+  <div style="display: flex; justify-content: flex-end; margin: 0 0 8px 0;">
+    <button
+      type="button"
+      class="btn btn-ghost"
+      style="font-size: 11px; padding: 4px 8px;"
+      data-cloud-add-visible-files="1"
+    >
+      Select all files on page
+    </button>
+  </div>
   <div class="stack" style="gap: 4px;">
     {% for entry in entries %}
       {% set entry_path = (path + "/" + entry.Name) if path else entry.Name %}

@@ -274,6 +274,18 @@ amg cloud-remote list
   }
 
   document.body.addEventListener("click", (evt) => {
+    const addVisibleBtn = evt.target.closest("[data-cloud-add-visible-files='1']");
+    if (addVisibleBtn) {
+      const panel = document.getElementById("cloud-browse-panel");
+      if (!panel) return;
+      panel.querySelectorAll("[data-cloud-add-file='1']").forEach((el) => {
+        const path = el.getAttribute("data-cloud-path") || "";
+        if (!path) return;
+        addSelection({ type: "file", path });
+        if (el.matches("input[type='checkbox']")) el.checked = true;
+      });
+      return;
+    }
     const fileBtn = evt.target.closest("[data-cloud-add-file='1']");
     if (fileBtn) {
       const path = fileBtn.getAttribute("data-cloud-path") || "";
