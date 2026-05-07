@@ -14,6 +14,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import quote_plus
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -1706,8 +1707,7 @@ def _library_data(filt: dict) -> dict:
     q = (filt.get("q") or "").strip().lower()
     studio = (filt.get("studio") or "").strip()
     status = (filt.get("status") or "").strip().lower()
-    min_score = filt.get("min_score")
-    sort = (filt.get("sort") or "action_queue").strip().lower()
+    sort = (filt.get("sort") or "newest").strip().lower()
     limit = max(12, min(_safe_int(filt.get("limit"), 24), 120))
 
     filtered = []
@@ -1733,13 +1733,6 @@ def _library_data(filt: dict) -> dict:
             }.get(status)
             if wanted and s["status"] != wanted:
                 continue
-        if min_score is not None and min_score != "":
-            try:
-                score_ui = _normalize_score_for_ui(s["top_score"]) or 0.0
-                if score_ui < float(min_score):
-                    continue
-            except Exception:
-                pass
         filtered.append(s)
 
     action_rank = {"REVIEW": 0, "FAILED": 1, "DRAFT": 2, "REVIEWED": 3}
@@ -1773,6 +1766,66 @@ def _library_data(filt: dict) -> dict:
         "has_more": has_more,
         "next_limit": next_limit,
     }
+
+
+def _remove_feedback_rows_for_scene(scene_id: str) -> tuple[int, int]:
+    """
+    Remove operator-feedback rows for one scene_id from feedback jsonl.
+    Returns (removed_count, remaining_count).
+    """
+    if not OPERATOR_FEEDBACK_PATH.exists():
+        return 0, 0
+    kept_lines: list[str] = []
+    removed_count = 0
+    for raw in OPERATOR_FEEDBACK_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            kept_lines.append(line)
+            continue
+        if str((row or {}).get("scene_id") or "") == scene_id:
+            removed_count += 1
+            continue
+        kept_lines.append(line)
+    tmp = OPERATOR_FEEDBACK_PATH.with_suffix(".tmp")
+    tmp.write_text(("\n".join(kept_lines) + ("\n" if kept_lines else "")), encoding="utf-8")
+    tmp.replace(OPERATOR_FEEDBACK_PATH)
+    return removed_count, len(kept_lines)
+
+
+def _delete_scene_from_library(scene_id: str, *, delete_feedback: bool) -> dict:
+    """
+    Delete scene artifacts surfaced in Library:
+    decision log, reviewed state, extracted work_dir, and optionally feedback rows.
+    """
+    sid = _safe_scene_id(scene_id)
+    decision_log_path = DECISION_LOGS_DIR / f"{sid}.json"
+    reviewed_path = REVIEWED_DIR / f"{sid}.json"
+    decision_log = _load_decision_log(scene_id)
+    work_dir = _resolve_scene_work_dir(scene_id, decision_log)
+
+    deleted = {"decision_log": False, "reviewed": False, "work_dir": False, "feedback_rows": 0}
+
+    if decision_log_path.exists():
+        decision_log_path.unlink(missing_ok=True)
+        deleted["decision_log"] = True
+    if reviewed_path.exists():
+        reviewed_path.unlink(missing_ok=True)
+        deleted["reviewed"] = True
+    if work_dir and work_dir.exists():
+        try:
+            if _path_within_roots(work_dir.resolve(), [DATA_DIR.resolve()]):
+                shutil.rmtree(work_dir, ignore_errors=True)
+                deleted["work_dir"] = True
+        except Exception:
+            pass
+    if delete_feedback:
+        removed_count, _ = _remove_feedback_rows_for_scene(scene_id)
+        deleted["feedback_rows"] = removed_count
+    return deleted
 
 
 def _process_jobs_view() -> dict:
@@ -2135,21 +2188,48 @@ def create_app() -> FastAPI:
         q: str = Query(default=""),
         studio: str = Query(default=""),
         status: str = Query(default=""),
-        min_score: str = Query(default=""),
-        sort: str = Query(default="action_queue"),
+        sort: str = Query(default="newest"),
         limit: str = Query(default="24"),
+        deleted: str = Query(default=""),
+        feedback_deleted: str = Query(default=""),
     ):
-        filt = {"q": q, "studio": studio, "status": status, "min_score": min_score, "sort": sort, "limit": limit}
+        filt = {"q": q, "studio": studio, "status": status, "sort": sort, "limit": limit}
         data = _library_data(filt)
+        delete_notice = None
+        if deleted.strip():
+            if feedback_deleted.strip():
+                delete_notice = f"Deleted scene '{deleted}' (feedback rows removed: {feedback_deleted})."
+            else:
+                delete_notice = f"Deleted scene '{deleted}'."
         return templates.TemplateResponse(
             request=request,
             name="library.html",
             context={
                 "request": request,
                 **data,
+                "delete_notice": delete_notice,
                 "active_nav": "library",
                 "health": _health_snapshot(),
             },
+        )
+
+    @app.post("/library/delete")
+    async def library_delete_scene(
+        scene_id: str = Form(...),
+        delete_feedback: str = Form(default=""),
+    ):
+        target_scene = scene_id.strip()
+        if not target_scene:
+            raise HTTPException(status_code=400, detail="scene_id is required")
+        deleted_meta = _delete_scene_from_library(
+            target_scene,
+            delete_feedback=(delete_feedback.strip().lower() in {"1", "true", "on", "yes"}),
+        )
+        feedback_q = f"&feedback_deleted={deleted_meta.get('feedback_rows', 0)}" if deleted_meta.get("feedback_rows") else ""
+        target_scene_q = quote_plus(target_scene)
+        return RedirectResponse(
+            url=f"/library?deleted={target_scene_q}{feedback_q}",
+            status_code=303,
         )
 
     @app.get("/feedback", response_class=HTMLResponse)

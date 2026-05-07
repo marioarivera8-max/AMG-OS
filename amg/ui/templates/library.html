@@ -4,7 +4,7 @@
 <div class="page-head between">
   <div>
     <h1>Library</h1>
-    <div class="sub">{{ stats.total }} processed scenes · {{ stats.review }} awaiting review · {{ stats.failed }} failed · {{ stats.ready }} ready</div>
+    <div class="sub">{{ stats.total }} scenes · sorted newest first</div>
   </div>
   <div class="row">
     <a href="/" class="btn btn-primary">+ New Scene</a>
@@ -37,11 +37,16 @@
     {% endfor %}
 
     <div class="sidenav-section">Smart filters</div>
-    <a href="/library?min_score=90&sort=highest_score">Top-scored (≥90)</a>
+    <a href="/library?sort=highest_score">Top-scored</a>
     <a href="/library?status=failed">No covers / failed</a>
   </aside>
 
   <div>
+    {% if delete_notice %}
+      <div class="card" style="margin-bottom: 12px; border-color: color-mix(in oklab, var(--warn) 40%, var(--line));">
+        <div class="muted" style="font-size: 12px;">{{ delete_notice }}</div>
+      </div>
+    {% endif %}
     {% if stats.review > 0 %}
       {% set ns = namespace(review_target='/library?status=review&sort=action_queue', found=false) %}
       {% for s in scenes %}
@@ -54,7 +59,7 @@
         <div class="between">
           <div>
             <h3 class="card-section-title" style="margin: 0;">{{ stats.review }} scenes need review</h3>
-            <div class="muted" style="font-size: 12px; margin-top: 4px;">Start with the next queued scene and move straight through the stack.</div>
+            <div class="muted" style="font-size: 12px; margin-top: 4px;">est ~12 minutes if you go fast</div>
           </div>
           <a href="{{ ns.review_target }}" class="btn-primary">Start reviewing →</a>
         </div>
@@ -78,25 +83,24 @@
           <option value="failed" {% if filter.status == 'failed' %}selected{% endif %}>Failed</option>
         </select>
         <select name="sort">
-          <option value="action_queue" {% if filter.sort == 'action_queue' %}selected{% endif %}>Sort: Action queue</option>
           <option value="newest" {% if filter.sort == 'newest' %}selected{% endif %}>Sort: Newest</option>
+          <option value="action_queue" {% if filter.sort == 'action_queue' %}selected{% endif %}>Sort: Action queue</option>
           <option value="highest_score" {% if filter.sort == 'highest_score' %}selected{% endif %}>Sort: Highest score</option>
           <option value="lowest_score" {% if filter.sort == 'lowest_score' %}selected{% endif %}>Sort: Lowest score</option>
         </select>
-        <input type="number" name="min_score" step="0.5" min="0" max="100" value="{{ filter.min_score or '' }}" placeholder="Min score" style="width: 110px;" />
         <input type="hidden" name="limit" value="{{ filter.limit or '24' }}" />
         <button type="submit" class="btn">Filter</button>
-        {% if filter.q or filter.studio or filter.status or filter.min_score or (filter.sort and filter.sort != 'action_queue') %}
+        {% if filter.q or filter.studio or filter.status or (filter.sort and filter.sort != 'newest') %}
           <a href="/library" class="btn btn-ghost">Clear</a>
         {% endif %}
       </div>
     </form>
 
     <div class="row library-sort-tabs" style="margin-bottom: 10px;">
-      <a class="pill {% if filter.sort == 'action_queue' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&min_score={{ filter.min_score or '' }}&sort=action_queue&limit={{ filter.limit or '24' }}">Action queue</a>
-      <a class="pill {% if filter.sort == 'newest' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&min_score={{ filter.min_score or '' }}&sort=newest&limit={{ filter.limit or '24' }}">Newest</a>
-      <a class="pill {% if filter.sort == 'highest_score' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&min_score={{ filter.min_score or '' }}&sort=highest_score&limit={{ filter.limit or '24' }}">Highest score</a>
-      <a class="pill {% if filter.sort == 'lowest_score' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&min_score={{ filter.min_score or '' }}&sort=lowest_score&limit={{ filter.limit or '24' }}">Lowest score</a>
+      <a class="pill {% if filter.sort == 'newest' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&sort=newest&limit={{ filter.limit or '24' }}">Newest</a>
+      <a class="pill {% if filter.sort == 'action_queue' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&sort=action_queue&limit={{ filter.limit or '24' }}">Action queue</a>
+      <a class="pill {% if filter.sort == 'highest_score' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&sort=highest_score&limit={{ filter.limit or '24' }}">Highest score</a>
+      <a class="pill {% if filter.sort == 'lowest_score' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&sort=lowest_score&limit={{ filter.limit or '24' }}">Lowest score</a>
     </div>
 
     <div class="muted" style="font-size: 12px; margin-bottom: 10px;">
@@ -106,25 +110,29 @@
     {% if scenes %}
       <div class="cover-grid">
         {% for s in scenes %}
-          <a class="cover-card library-scene-card" href="/scene/{{ s.scene_id }}" style="text-decoration: none; color: inherit;">
-            <div class="cover-thumb grad-{{ s.grad_idx }}">
-              {% if s.preview_path %}
-                <img src="/artifact?path={{ s.preview_path | urlencode }}" alt="{{ s.scene_id }} preview" loading="lazy" />
-              {% endif %}
-              <div class="overlay-tl">
-                {% if s.top_score %}
-                  {% set top_score_disp = (s.top_score * 10.0) if ((s.top_score|float) > 0 and (s.top_score|float) <= 10.0) else (s.top_score|float) %}
-                  <span class="score-badge">{{ "%.1f"|format(top_score_disp) }}</span>
-                {% else %}
-                  <span class="rank-badge">—</span>
+          <div class="cover-card library-scene-card">
+            <a href="/scene/{{ s.scene_id }}" style="text-decoration: none; color: inherit;">
+              <div class="cover-thumb grad-{{ s.grad_idx }}">
+                {% if s.preview_path %}
+                  <img src="/artifact?path={{ s.preview_path | urlencode }}" alt="{{ s.scene_id }} preview" loading="lazy" />
                 {% endif %}
+                <div class="overlay-tl">
+                  {% if s.top_score %}
+                    {% set top_score_disp = (s.top_score * 10.0) if ((s.top_score|float) > 0 and (s.top_score|float) <= 10.0) else (s.top_score|float) %}
+                    <span class="score-badge">{{ "%.1f"|format(top_score_disp) }}</span>
+                  {% else %}
+                    <span class="rank-badge">—</span>
+                  {% endif %}
+                </div>
+                <div class="overlay-tr">
+                  <span class="pill {{ s.status_cls }}">{{ s.status }}</span>
+                </div>
               </div>
-              <div class="overlay-tr">
-                <span class="pill {{ s.status_cls }}">{{ s.status }}</span>
-              </div>
-            </div>
+            </a>
             <div class="cover-body">
-              <div class="cover-title" title="{{ s.scene_id }}">{{ s.scene_id }}</div>
+              <a href="/scene/{{ s.scene_id }}" style="text-decoration: none; color: inherit;">
+                <div class="cover-title" title="{{ s.scene_id }}">{{ s.scene_id }}</div>
+              </a>
               <div class="cover-meta">
                 {% if s.studio %}{{ s.studio }} · {% endif %}{{ s.covers }} covers{% if s.duration_str %} · {{ s.duration_str }}{% endif %}
               </div>
@@ -138,19 +146,34 @@
                   {% for t in s.tags[:3] %}<span class="chip">{{ t }}</span>{% endfor %}
                 </div>
               {% endif %}
-              <div class="cover-actions">
+              <div class="cover-actions" style="align-items: center;">
                 <span class="muted" style="font-size: 11px;">{{ s.processed_ago }}</span>
-                <span class="muted">›</span>
+                <a href="/scene/{{ s.scene_id }}" class="btn btn-ghost" style="padding: 4px 8px; font-size: 11px;">Open</a>
+                <button type="button" class="btn btn-ghost" style="padding: 4px 8px; font-size: 11px; border-color: color-mix(in oklab, var(--err) 45%, var(--line));" data-delete-start>Delete</button>
               </div>
+              <form method="post" action="/library/delete" data-delete-confirm hidden style="margin-top: 8px; border: 1px solid color-mix(in oklab, var(--err) 40%, var(--line)); border-radius: 8px; padding: 8px;">
+                <input type="hidden" name="scene_id" value="{{ s.scene_id }}" />
+                <div class="muted" style="font-size: 11px; margin-bottom: 6px;">
+                  This is unrecoverable. Delete scene files from library?
+                </div>
+                <label class="row" style="gap: 6px; margin-bottom: 8px; font-size: 11px;">
+                  <input type="checkbox" name="delete_feedback" value="1" />
+                  Also delete feedback rows for this scene
+                </label>
+                <div class="row" style="gap: 8px;">
+                  <button type="submit" class="btn" style="border-color: color-mix(in oklab, var(--err) 55%, var(--line)); color: var(--err);">I am sure I want to delete</button>
+                  <button type="button" class="btn btn-ghost" data-delete-cancel>Cancel</button>
+                </div>
+              </form>
             </div>
-          </a>
+          </div>
         {% endfor %}
       </div>
       {% if has_more %}
         <div style="margin-top: 12px;">
           <a
             class="btn"
-            href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&min_score={{ filter.min_score or '' }}&sort={{ filter.sort or 'action_queue' }}&limit={{ next_limit }}"
+            href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&sort={{ filter.sort or 'newest' }}&limit={{ next_limit }}"
           >
             Load more
           </a>
@@ -161,5 +184,24 @@
     {% endif %}
   </div>
 </div>
+
+<script>
+  (function() {
+    document.querySelectorAll('.library-scene-card').forEach(function(card) {
+      var startBtn = card.querySelector('[data-delete-start]');
+      var cancelBtn = card.querySelector('[data-delete-cancel]');
+      var confirm = card.querySelector('[data-delete-confirm]');
+      if (!startBtn || !cancelBtn || !confirm) return;
+      startBtn.addEventListener('click', function() {
+        confirm.hidden = false;
+        startBtn.hidden = true;
+      });
+      cancelBtn.addEventListener('click', function() {
+        confirm.hidden = true;
+        startBtn.hidden = false;
+      });
+    });
+  })();
+</script>
 
 {% endblock %}
