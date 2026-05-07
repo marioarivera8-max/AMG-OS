@@ -2056,6 +2056,15 @@ def create_app() -> FastAPI:
                 status_code=400,
                 detail="selection contains no playable videos (expected mp4/mov/mkv/avi/m4v/webm/wmv/flv)",
             )
+        max_batch = 200
+        if len(expanded_items) > max_batch:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"selection expands to {len(expanded_items)} videos which exceeds the max queue size "
+                    f"({max_batch}). Narrow the folder scope or submit in chunks."
+                ),
+            )
 
         first_job_id = ""
         global _job_seq_counter
@@ -2091,9 +2100,13 @@ def create_app() -> FastAPI:
                     },
                     "created_at": datetime.now().isoformat(),
                     "message": (
-                        f"Queued · cloud {idx + 1}/{total} · {remote}:{one_path} · priority #{queue_seq}"
+                        f"Queued · cloud {idx + 1}/{total} · {remote}:{one_path}"
+                        f"{' · folder context' if download_root else ''} · priority #{queue_seq}"
                         if total > 1
-                        else f"Queued · cloud · {remote}:{one_path} · priority #{queue_seq}"
+                        else (
+                            f"Queued · cloud · {remote}:{one_path}"
+                            f"{' · folder context' if download_root else ''} · priority #{queue_seq}"
+                        )
                     ),
                     "result": None,
                     "source_mode": "cloud",
