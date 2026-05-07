@@ -2663,7 +2663,12 @@ def create_app() -> FastAPI:
         return RedirectResponse(url=f"/scene/{target_scene}", status_code=307)
 
     @app.get("/scene/{scene_id}", response_class=HTMLResponse)
-    async def scene_detail(request: Request, scene_id: str, saved: int = 0):
+    async def scene_detail(
+        request: Request,
+        scene_id: str,
+        saved: int = 0,
+        rerun_error: str = "",
+    ):
         decision_log = _load_decision_log(scene_id)
         reviewed = _load_reviewed(scene_id)
         dlog_work_dir = _work_dir_from_decision_log(decision_log)
@@ -2741,10 +2746,61 @@ def create_app() -> FastAPI:
                 "kept_folder_path": kept_bundle.get("kept_folder_path"),
                 "kept_zip_path": kept_bundle.get("kept_zip_path"),
                 "saved": saved,
+                "rerun_error": rerun_error.strip(),
                 "active_nav": "library",
                 "health": _health_snapshot(),
             },
         )
+
+    @app.post("/scene/{scene_id}/rerun")
+    async def rerun_scene(scene_id: str):
+        target_scene = _safe_scene_id((scene_id or "").strip())
+        if not target_scene:
+            raise HTTPException(status_code=400, detail="scene_id is required")
+
+        decision_log = _load_decision_log(target_scene)
+        if not decision_log:
+            return RedirectResponse(
+                url=f"/scene/{target_scene}?rerun_error={quote_plus('missing decision log')}",
+                status_code=303,
+            )
+
+        scene_path = str((decision_log.get("scene_path") or "")).strip()
+        if not scene_path:
+            return RedirectResponse(
+                url=f"/scene/{target_scene}?rerun_error={quote_plus('missing source path')}",
+                status_code=303,
+            )
+
+        resolved_video = _resolve_video_path(Path(scene_path))
+        if resolved_video is None:
+            return RedirectResponse(
+                url=f"/scene/{target_scene}?rerun_error={quote_plus('source path is missing or inaccessible')}",
+                status_code=303,
+            )
+
+        job_id = uuid.uuid4().hex[:10]
+        global _job_seq_counter
+        with _jobs_lock:
+            _job_seq_counter += 1
+            queue_seq = _job_seq_counter
+            _jobs[job_id] = {
+                "job_id": job_id,
+                "status": "queued",
+                "scene_id": target_scene,
+                "video_path": str(resolved_video),
+                "created_at": datetime.now().isoformat(),
+                "message": f"Queued · rerun · {target_scene} · priority #{queue_seq}",
+                "result": None,
+                "source_mode": "path",
+                "log_tail": [],
+                "current_phase": None,
+                "progress_pct": 0,
+                "queue_seq": queue_seq,
+            }
+            _job_fifo.append(job_id)
+        _start_dispatcher_if_needed()
+        return RedirectResponse(url=f"/?job_id={job_id}", status_code=303)
 
     @app.post("/scene/{scene_id}/insight", response_class=HTMLResponse)
     async def regenerate_insight(request: Request, scene_id: str):

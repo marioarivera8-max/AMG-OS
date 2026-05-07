@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 import zipfile
+from pathlib import Path
 
 
 def test_healthz_route_returns_ok():
@@ -148,3 +149,48 @@ def test_legacy_review_query_route_resolves_scene_from_job_id(monkeypatch):
     finally:
         with app_mod._jobs_lock:
             app_mod._jobs.pop("job_legacy_1", None)
+
+
+def test_scene_rerun_queues_job_and_redirects_home(monkeypatch):
+    import amg.ui.app as app_mod
+
+    with app_mod._jobs_lock:
+        app_mod._jobs.clear()
+        app_mod._job_fifo.clear()
+        app_mod._job_seq_counter = 0
+
+    monkeypatch.setattr(
+        app_mod,
+        "_load_decision_log",
+        lambda _sid: {"scene_id": "demo_scene", "scene_path": "/tmp/demo_scene.mp4"},
+    )
+    monkeypatch.setattr(app_mod, "_resolve_video_path", lambda _p: Path("/tmp/demo_scene.mp4"))
+    monkeypatch.setattr(app_mod, "_start_dispatcher_if_needed", lambda: None)
+
+    app = app_mod.create_app()
+    client = TestClient(app, follow_redirects=False)
+    res = client.post("/scene/demo_scene/rerun")
+    assert res.status_code == 303
+    assert res.headers.get("location", "").startswith("/?job_id=")
+
+    with app_mod._jobs_lock:
+        assert len(app_mod._jobs) == 1
+        job = next(iter(app_mod._jobs.values()))
+    assert job["scene_id"] == "demo_scene"
+    assert job["source_mode"] == "path"
+    assert "rerun" in str(job.get("message") or "").lower()
+
+
+def test_scene_rerun_redirects_with_error_when_source_missing(monkeypatch):
+    import amg.ui.app as app_mod
+
+    monkeypatch.setattr(
+        app_mod,
+        "_load_decision_log",
+        lambda _sid: {"scene_id": "demo_scene", "scene_path": ""},
+    )
+    app = app_mod.create_app()
+    client = TestClient(app, follow_redirects=False)
+    res = client.post("/scene/demo_scene/rerun")
+    assert res.status_code == 303
+    assert "/scene/demo_scene?rerun_error=" in (res.headers.get("location") or "")

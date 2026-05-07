@@ -31,6 +31,16 @@
         </span>
         <span class="pill info">generated {{ covers | length if covers else 0 }}</span>
         <span class="pill {{ 'ok' if finalized_items and finalized_items|length > 0 else 'neutral' }}">finalized {{ finalized_items | length if finalized_items else 0 }}</span>
+        {% if insight and insight.rule_pack_id %}
+          <span class="pill {{ 'ok' if insight.rule_pack_applied else 'neutral' }}">
+            rule pack: {{ insight.rule_pack_id }}{% if insight.rule_pack_mode %} · {{ insight.rule_pack_mode }}{% endif %}
+          </span>
+        {% endif %}
+        {% if insight and insight.text_model_fallback_used %}
+          <span class="pill warn" title="Primary text model failed for this scene; fallback model was used.">
+            text fallback engaged{% if insight.text_model_fallback_model %}: {{ insight.text_model_fallback_model }}{% endif %}
+          </span>
+        {% endif %}
       </div>
     </div>
     <div class="row scene-head-actions">
@@ -40,9 +50,18 @@
         <a class="btn btn-ghost" href="/artifact?path={{ kept_zip_path | urlencode }}" download>Download finalized zip ({{ kept_count }})</a>
       {% endif %}
       {% if work_dir %}<a class="btn btn-ghost" href="/artifact-zip?path={{ (work_dir / 'covers') | urlencode }}">Download covers folder</a>{% endif %}
-      <a class="btn btn-ghost" href="/">Re-run</a>
+      <form method="post" action="/scene/{{ scene_id }}/rerun" style="display:inline;">
+        <button type="submit" class="btn btn-ghost">Re-run</button>
+      </form>
     </div>
   </div>
+  {% if rerun_error %}
+    <div class="card" style="margin-top: 8px; border-color: color-mix(in oklab, var(--err) 40%, var(--line));">
+      <div class="muted" style="font-size: 12px;">
+        Re-run could not be queued: {{ rerun_error }}.
+      </div>
+    </div>
+  {% endif %}
   {% if kept_zip_path %}
     <div class="sub" style="margin-top: 8px;">
       Kept package ready: <span class="mono">{{ kept_zip_path.name }}</span> · folder <span class="mono">{{ kept_folder_path.name if kept_folder_path else "00_kept_for_publish" }}</span>
