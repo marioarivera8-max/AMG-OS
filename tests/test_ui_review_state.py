@@ -8,6 +8,7 @@ def test_build_review_form_state_prefills_from_reviewed_and_insight():
         "notes": "Saved notes",
         "tags_csv": "tag1, tag2",
         "categories_csv": "cat1, cat2",
+        "target_platforms": ["AEBN", "ADE"],
         "selected_covers": ["01_a.jpg"],
         "kept_covers": ["01_a.jpg"],
         "soft_thumbnail_review": {"decision": "keep", "score_100": 82.5},
@@ -32,6 +33,7 @@ def test_build_review_form_state_prefills_from_reviewed_and_insight():
     assert state["notes"] == "Saved notes"
     assert state["tags_csv"] == "tag1, tag2"
     assert state["categories_csv"] == "cat1, cat2"
+    assert state["target_platforms"] == ["AEBN", "ADE"]
     assert state["soft_thumb_decision"] == "keep"
     assert state["soft_thumb_score"] == "82.5"
     assert state["per_cover"]["01_a.jpg"]["decision"] == "keep"

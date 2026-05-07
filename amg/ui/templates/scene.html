@@ -54,7 +54,7 @@
   {% endif %}
 </div>
 
-<div class="grid grid-2 scene-layout">
+<div class="scene-parity-shell">
   <div class="col">
     <form id="review-form" method="post" action="/scene/{{ scene_id }}/review">
       <div class="card card-tight review-toolbar">
@@ -268,52 +268,118 @@
     </div>
   </div>
 
-  <div class="col scene-side-rail">
-    {% include "_provided_thumbs_panel.html" %}
+    <details class="card stage-section" style="margin-top: 12px;">
+      <summary class="between" style="cursor: pointer; list-style: none;">
+        <h3 class="card-section-title" style="margin: 0;">Metadata, tags, and readiness</h3>
+        <span class="muted" style="font-size: 12px;">▼</span>
+      </summary>
+      <div style="margin-top: 10px;">
+        {% include "_provided_thumbs_panel.html" %}
 
-    {% if decision_log %}
-      <div class="card scene-side-card">
-        <h3 class="card-section-title">Studio · Performers · 2257</h3>
-        <div class="stack">
-          <div><span class="muted">Studio:</span> {{ decision_log.input.studio or "—" }}</div>
-          <div><span class="muted">Performer code:</span> {{ decision_log.input.performer_code or "—" }} ({{ decision_log.input.performer_count or 0 }})</div>
-          <div><span class="muted">Scene type:</span> {{ decision_log.input.scene_type or "—" }}</div>
+        {% if decision_log %}
+          <div class="card scene-side-card">
+            <h3 class="card-section-title">Studio · Performers · 2257</h3>
+            <div class="stack">
+              <div><span class="muted">Studio:</span> {{ decision_log.input.studio or "—" }}</div>
+              <div><span class="muted">Performer code:</span> {{ decision_log.input.performer_code or "—" }} ({{ decision_log.input.performer_count or 0 }})</div>
+              <div><span class="muted">Scene type:</span> {{ decision_log.input.scene_type or "—" }}</div>
+            </div>
+          </div>
+
+          <div class="card scene-side-card">
+            <h3 class="card-section-title">Tags</h3>
+            <div>
+              {% for g in decision_log.input.genres or [] %}<span class="chip">{{ g }}</span>{% endfor %}
+              {% if not decision_log.input.genres %}<span class="muted">No tags</span>{% endif %}
+            </div>
+          </div>
+
+          <div class="card scene-side-card">
+            <h3 class="card-section-title">Notes</h3>
+            <textarea form="review-form" name="notes" rows="4" placeholder="Capture quick QA notes: what worked, what to adjust, and any publish concerns.">{{ form_state.notes if form_state else "" }}</textarea>
+          </div>
+
+          <div class="card scene-side-card">
+            <h3 class="card-section-title">Target platforms</h3>
+            <div class="stack">
+              {% for p in platform_names %}
+                <label class="row" style="gap: 8px; align-items: center;">
+                  <input
+                    form="review-form"
+                    type="checkbox"
+                    name="target_platforms"
+                    value="{{ p }}"
+                    {% if form_state and (p in (form_state.target_platforms or [])) %}checked{% endif %}
+                  />
+                  <span>{{ p }}</span>
+                </label>
+              {% endfor %}
+            </div>
+            <div class="muted" style="font-size: 12px; margin-top: 6px;">
+              Save review after changing platform targets so readiness recalculates.
+            </div>
+          </div>
+
+          <div class="card scene-side-card">
+            <h3 class="card-section-title">Distribution Readiness</h3>
+            {% if readiness %}
+              <div class="row" style="gap: 8px; margin-bottom: 8px;">
+                <span class="pill {{ 'ok' if readiness.overall_ready else 'warn' }}">
+                  {{ '✓ READY' if readiness.overall_ready else '✗ NOT READY' }}
+                </span>
+              </div>
+
+              {% if readiness.blockers %}
+                <div style="margin-bottom: 8px;">
+                  {% for b in readiness.blockers %}
+                    <div class="pill err" style="display:block; margin-bottom:6px;">{{ b }}</div>
+                  {% endfor %}
+                </div>
+              {% endif %}
+
+              {% if readiness.warnings %}
+                <div style="margin-bottom: 8px;">
+                  {% for w in readiness.warnings %}
+                    <div class="pill warn" style="display:block; margin-bottom:6px;">{{ w }}</div>
+                  {% endfor %}
+                </div>
+              {% endif %}
+
+              <div class="stack">
+                {% for platform, status in (readiness.per_platform or {}).items() %}
+                  {% if status.skipped %}
+                    <div><span class="pill neutral">~</span> {{ platform }} not targeted</div>
+                  {% else %}
+                    <div>
+                      <span class="pill {{ 'ok' if status.ready else 'err' }}">{{ '✓' if status.ready else '✗' }}</span>
+                      {{ platform }}
+                      {% if status.blockers %}<span class="muted">· {{ status.blockers | length }} blocker(s)</span>{% endif %}
+                      {% if status.warnings %}<span class="muted">· {{ status.warnings | length }} warning(s)</span>{% endif %}
+                    </div>
+                    {% if status.blockers %}
+                      {% for b in status.blockers %}
+                        <div class="muted" style="font-size:12px; margin-left: 8px;">✗ {{ b }}</div>
+                      {% endfor %}
+                    {% endif %}
+                    {% if status.warnings %}
+                      {% for w in status.warnings %}
+                        <div class="muted" style="font-size:12px; margin-left: 8px;">⚠ {{ w }}</div>
+                      {% endfor %}
+                    {% endif %}
+                  {% endif %}
+                {% endfor %}
+              </div>
+            {% else %}
+              <div class="muted">Readiness snapshot unavailable for this scene.</div>
+            {% endif %}
+          </div>
+        {% endif %}
+
+        <div class="card scene-side-card" style="font-size: 12px;">
+          <span class="muted">Operator corrections are saved locally and feed the model improvement loop. See <a href="/feedback">Feedback</a>.</span>
         </div>
       </div>
-
-      <div class="card scene-side-card">
-        <h3 class="card-section-title">Tags</h3>
-        <div>
-          {% for g in decision_log.input.genres or [] %}<span class="chip">{{ g }}</span>{% endfor %}
-          {% if not decision_log.input.genres %}<span class="muted">No tags</span>{% endif %}
-        </div>
-      </div>
-
-      <div class="card scene-side-card">
-        <h3 class="card-section-title">Notes</h3>
-        <textarea form="review-form" name="notes" rows="4" placeholder="Capture quick QA notes: what worked, what to adjust, and any publish concerns.">{{ form_state.notes if form_state else "" }}</textarea>
-      </div>
-
-      <div class="card scene-side-card">
-        <h3 class="card-section-title">Distribution Readiness</h3>
-        <div class="stack">
-          <div><span class="pill {{ 'ok' if decision_log.outcomes.covers_delivered >= 12 else 'warn' }}">
-            {{ '✓' if decision_log.outcomes.covers_delivered >= 12 else '⚠' }}
-          </span> {{ decision_log.outcomes.covers_delivered }} covers selected (target 12)</div>
-          <div><span class="pill warn">☐</span> Title reviewed</div>
-          <div><span class="pill ok">✓</span> 2257 tracked</div>
-          <div><span class="pill {{ 'ok' if decision_log.input.genres else 'warn' }}">
-            {{ '✓' if decision_log.input.genres else '⚠' }}
-          </span> Tags ready ({{ (decision_log.input.genres or []) | length }})</div>
-          <div><span class="pill">☐</span> Manual publish approval</div>
-        </div>
-        <button class="btn" disabled style="width: 100%; margin-top: 12px;">Mark Ready (coming soon)</button>
-      </div>
-    {% endif %}
-
-    <div class="card scene-side-card" style="font-size: 12px;">
-      <span class="muted">Operator corrections are saved locally and feed the model improvement loop. See <a href="/feedback">Feedback</a>.</span>
-    </div>
+    </details>
   </div>
 </div>
 

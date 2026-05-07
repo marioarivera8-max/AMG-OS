@@ -30,6 +30,7 @@ from amg.config import (
     OPERATOR_FEEDBACK_PATH,
     VISION_MODEL,
     TITLE_TONE_DEFAULT,
+    PLATFORM_REQUIREMENTS,
 )
 from amg.ingest.inventory import VIDEO_EXTENSIONS, discover_scenes
 from amg.learning.feedback_eval import evaluate_feedback, load_feedback_rows
@@ -276,6 +277,11 @@ def _build_review_form_state(
         "notes": _str_or_empty(reviewed.get("notes") or ""),
         "tags_csv": _str_or_empty(reviewed.get("tags_csv") or ", ".join(insight.get("ai_tags") or [])),
         "categories_csv": _str_or_empty(reviewed.get("categories_csv") or ", ".join(insight.get("ai_categories") or [])),
+        "target_platforms": [
+            str(p).upper().strip()
+            for p in (reviewed.get("target_platforms") or list(PLATFORM_REQUIREMENTS.keys()))
+            if str(p).strip()
+        ],
         "soft_thumb_decision": _str_or_empty(((reviewed.get("soft_thumbnail_review") or {}).get("decision")) or ""),
         "soft_thumb_score": (
             _str_or_empty((reviewed.get("soft_thumbnail_review") or {}).get("score_100"))
@@ -1231,6 +1237,16 @@ def _record_run_timing(job: dict, result: Optional[dict]) -> None:
             f.write(json.dumps(row) + "\n")
     except Exception:
         return
+
+
+def _readiness_snapshot(scene_id: str) -> Optional[dict]:
+    """Compute distribution readiness snapshot for scene detail UI."""
+    try:
+        from amg.review.distribution_gate import check_distribution_ready
+        return check_distribution_ready(scene_id, verbose=False)
+    except Exception as e:
+        log.warn("Readiness snapshot failed", scene_id=scene_id, error=str(e))
+        return None
 
 
 def _load_recent_run_timings(limit: int = 12) -> List[dict]:
@@ -2346,6 +2362,7 @@ def create_app() -> FastAPI:
                             }
                         )
         form_state = _build_review_form_state(reviewed=reviewed, insight=insight, cover_items=covers)
+        readiness = _readiness_snapshot(scene_id)
         finalized_thumbnails = bool((reviewed or {}).get("finalized_thumbnails"))
         scene_source_name = None
         if isinstance(decision_log, dict):
@@ -2368,6 +2385,8 @@ def create_app() -> FastAPI:
                 "soft_thumbnail": soft_thumbnail,
                 "reviewed": reviewed,
                 "form_state": form_state,
+                "readiness": readiness,
+                "platform_names": list(PLATFORM_REQUIREMENTS.keys()),
                 "finalized_thumbnails": finalized_thumbnails,
                 "finalized_items": finalized_items,
                 "scene_source_name": scene_source_name,
@@ -2425,6 +2444,12 @@ def create_app() -> FastAPI:
         long_description = (form.get("long_description") or "").strip()
         tags_csv = (form.get("tags_csv") or "").strip()
         categories_csv = (form.get("categories_csv") or "").strip()
+        target_platforms = [
+            p for p in [str(x).upper().strip() for x in form.getlist("target_platforms")]
+            if p in PLATFORM_REQUIREMENTS
+        ]
+        if not target_platforms:
+            target_platforms = list(PLATFORM_REQUIREMENTS.keys())
         title_tone = (form.get("title_tone") or TITLE_TONE_DEFAULT).strip().lower()
         if title_tone not in {"retail_safe", "edgy", "creative", "premium_story"}:
             title_tone = TITLE_TONE_DEFAULT
@@ -2512,6 +2537,7 @@ def create_app() -> FastAPI:
             "long_description": long_description or None,
             "tags_csv": tags_csv or None,
             "categories_csv": categories_csv or None,
+            "target_platforms": target_platforms,
             "notes": notes or None,
             "soft_thumbnail_review": {
                 "decision": soft_decision if soft_decision in {"keep", "reject"} else None,
