@@ -57,7 +57,11 @@ MATRIX = [
         "name": "turbo-h100-7b-p12",
         "env": {
             "AMG_PROCESSING_PROFILE": "turbo",
-            "AMG_RUNPOD_GPU_TYPE": "NVIDIA H100 SXM",
+            # Runpod's gpuTypeId for H100 SXM 80GB. The display name is
+            # "H100 SXM" but the actual id (returned by the GraphQL gpuTypes
+            # query) is "NVIDIA H100 80GB HBM3". Using the display name as
+            # the id is rejected at provision time.
+            "AMG_RUNPOD_GPU_TYPE": "NVIDIA H100 80GB HBM3",
             "AMG_RUNPOD_OLLAMA_NUM_PARALLEL": "12",
             "AMG_RUNPOD_AI_PARALLEL_WORKERS": "12",
         },
