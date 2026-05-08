@@ -25,7 +25,7 @@ from amg.config import (
 from amg.video.reader import VideoReader
 from amg.video.frames import measure_sharpness, is_frame_too_dark
 from amg.video.dedup import deduplicate_frames
-from amg.scoring.orchestrator import score_frames_parallel
+from amg.scoring.orchestrator import get_last_scoring_stats, score_frames_parallel
 from amg.utils.logging import get_logger
 
 log = get_logger("scanning.buildup_hunter")
@@ -57,6 +57,8 @@ def run_buildup_hunter(
              start_sec=start_sec, end_sec=end_sec, sharp_floor=sharpness_floor)
 
     candidates = []
+    aborted = False
+    abort_reason = None
     interval = get_adaptive_interval(
         BUILDUP_HUNTER_INTERVAL_BASE,
         duration_sec,
@@ -67,11 +69,9 @@ def run_buildup_hunter(
         for ts, frame in vr.iter_frames_sequential(start_sec, end_sec, interval):
             if deadline_sec and time.time() > deadline_sec:
                 log.warn("Buildup hunter: deadline exceeded")
-                return {
-                    "candidates": [],
-                    "aborted": True,
-                    "abort_reason": "E_TIMEOUT_HARD",
-                }
+                aborted = True
+                abort_reason = "E_TIMEOUT_HARD"
+                break
 
             if is_frame_too_dark(frame):
                 continue
@@ -89,7 +89,7 @@ def run_buildup_hunter(
     log.info("Buildup hunter: post-gate candidates", count=len(candidates))
 
     if not candidates:
-        return {"candidates": [], "aborted": False}
+        return {"candidates": [], "aborted": aborted, "abort_reason": abort_reason}
 
     # v11.1.2: pass stricter dedup threshold (2 vs global 5). The buildup zone
     # is typically slow (kissing, undressing, oral) and the global threshold
@@ -102,7 +102,13 @@ def run_buildup_hunter(
     top = deduped[:BUILDUP_HUNTER_TOP_N]
 
     # Score
-    scored = score_frames_parallel(top, prompt, system_prompt=system_prompt)
+    scored = score_frames_parallel(
+        top,
+        prompt,
+        system_prompt=system_prompt,
+        deadline_sec=deadline_sec,
+    )
+    scoring_stats = _scoring_stat_payload()
     log.info("Buildup hunter: scored", count=len(scored))
 
     passing = [
@@ -116,5 +122,17 @@ def run_buildup_hunter(
         "candidates": passing,
         "all_scored": scored,
         "interval_sec": interval,
-        "aborted": False,
+        "aborted": aborted,
+        "abort_reason": abort_reason,
+        **scoring_stats,
+    }
+
+
+def _scoring_stat_payload() -> dict:
+    stats = get_last_scoring_stats()
+    return {
+        "ai_submitted_count": int(stats.get("submitted_count", 0) or 0),
+        "ai_completed_count": int(stats.get("completed_count", 0) or 0),
+        "ai_skipped_count": int(stats.get("skipped_count", 0) or 0),
+        "ai_batch_wall_sec": float(stats.get("batch_wall_sec", 0.0) or 0.0),
     }

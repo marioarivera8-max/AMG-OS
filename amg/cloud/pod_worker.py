@@ -1,8 +1,8 @@
 """
 Pod-side worker for the AMG cloud-hosted edition.
 
-This runs INSIDE the Runpod GPU container (built from the repo Dockerfile,
-commit 8f8cef0). Its only client is the controller VM's dispatcher; every
+This runs INSIDE the Runpod GPU container (built from `Dockerfile.pod`).
+Its only client is the controller VM's dispatcher; every
 endpoint except ``/healthz`` is gated by a per-pod bearer token that the
 controller passes in via ``AMG_POD_AUTH_TOKEN`` when the pod is provisioned.
 
@@ -24,6 +24,8 @@ Endpoints:
   flows: ``queued -> downloading -> running -> done|error``.
 * ``GET /jobs`` — list recent job ids (authenticated); used by the controller
   readiness probe so we don't POST jobs until uvicorn has mounted all routes.
+* ``GET /readyz`` — authenticated readiness probe. Verifies Ollama is reachable
+  and the configured vision model is present before the controller submits work.
 * ``GET /jobs/{job_id}`` — poll status + log tail + result summary.
 * ``GET /jobs/{job_id}/zip`` — stream the entire scene work-dir (the
   ``out/...`` folder produced by the pipeline) back as a zip. The
@@ -490,6 +492,27 @@ def create_app(*, auth_token: Optional[str] = None, tracker: Optional[_JobTracke
         # Intentionally minimal — this endpoint is unauthenticated so Runpod's
         # proxy can probe liveness. Don't leak version numbers, env, etc.
         return {"ok": True}
+
+    @app.get("/readyz")
+    async def readyz() -> Dict[str, Any]:
+        from amg.scoring.ai_client import AIClient
+
+        client = AIClient()
+        ollama_ok = client.is_alive()
+        model_ok = client.is_model_loaded() if ollama_ok else False
+        payload = {
+            "ok": bool(ollama_ok and model_ok),
+            "ollama_ok": ollama_ok,
+            "model_ok": model_ok,
+            "vision_model": client.vision_model,
+            "ollama_num_parallel": os.environ.get("OLLAMA_NUM_PARALLEL"),
+            "ai_parallel_workers": os.environ.get("AMG_AI_PARALLEL_WORKERS"),
+            "video_backend": os.environ.get("AMG_VIDEO_BACKEND"),
+            "processing_profile": os.environ.get("AMG_PROCESSING_PROFILE"),
+        }
+        if not payload["ok"]:
+            raise HTTPException(status_code=503, detail=payload)
+        return payload
 
     @app.post("/jobs/cloud")
     @app.post("/jobs-cloud")

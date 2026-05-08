@@ -216,7 +216,11 @@ def _fallback_c(
 
     deduped = deduplicate_frames(candidates)
     simplified_prompt = build_simplified_prompt()
-    scored = score_frames_parallel(deduped, simplified_prompt)
+    scored = score_frames_parallel(
+        deduped,
+        simplified_prompt,
+        deadline_sec=deadline_sec,
+    )
 
     # Take any that parsed and got non-zero score
     return [

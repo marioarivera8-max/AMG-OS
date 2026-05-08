@@ -235,7 +235,7 @@ TIER_3_INTERVAL_MAX = 1.0
 # Scanner shape and guardrails to prevent long-tail scans from monopolizing runtime.
 TIER_SCAN_MODE = os.environ.get(
     "AMG_TIER_SCAN_MODE",
-    _profile_default("classic", balanced="classic", fast="single_pass", turbo="single_pass"),
+    _profile_default("classic", balanced="single_pass", fast="single_pass", turbo="single_pass"),
 ).strip().lower()
 if TIER_SCAN_MODE not in {"classic", "single_pass"}:
     TIER_SCAN_MODE = "classic"

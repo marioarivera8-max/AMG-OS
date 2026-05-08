@@ -124,17 +124,21 @@ class _FakeHttpSession:
 
     def get(self, url, *, headers=None, timeout=None, stream=False):
         self.calls.append({"method": "GET", "url": url, "stream": stream})
-        # /healthz is the TCP/proxy readiness probe. /jobs (authenticated)
-        # proves our FastAPI app + bearer middleware are mounted — the
-        # controller requires both before submitting work (see RunpodBackend
-        # ._wait_for_pod_worker_ready). Auto-respond so queue-based tests
-        # only model POST/poll/zip traffic.
+        # /healthz is the TCP/proxy readiness probe. /jobs proves FastAPI/auth
+        # are mounted, and /readyz proves Ollama/model readiness. Auto-respond
+        # so queue-based tests only model POST/poll/zip traffic.
         if self._auto_healthz_ok and url.endswith("/healthz"):
             return _FakePodResponse(200, {"status": "ok"})
         if self._auto_healthz_ok:
             path = urlparse(url).path.rstrip("/")
             if path == "/jobs":
                 return _FakePodResponse(200, {"job_ids": []})
+            if path == "/readyz":
+                return _FakePodResponse(200, {
+                    "ok": True,
+                    "vision_model": "qwen2.5vl:7b",
+                    "ai_parallel_workers": "6",
+                })
         return self._next()
 
     def close(self):
@@ -254,7 +258,7 @@ def test_runpod_backend_full_happy_path(runpod_backend, tmp_path, monkeypatch):
     assert client.provisioned[0].env.get("OLLAMA_NUM_PARALLEL") == "6"
     assert client.provisioned[0].env.get("AMG_AI_PARALLEL_WORKERS") == "6"
     assert client.provisioned[0].env.get("AMG_VIDEO_BACKEND") == "pyav"
-    assert "AMG_PROCESSING_PROFILE" not in client.provisioned[0].env
+    assert client.provisioned[0].env.get("AMG_PROCESSING_PROFILE") == "quality"
     # Artifacts extracted to work_dirs/<scene_id>/ (v0 layout: flat zip)
     extracted = work_root / "work_dirs" / "scene-42"
     assert (extracted / "out" / "cover_001.jpg").read_bytes() == b"jpg"
@@ -567,6 +571,8 @@ def test_runpod_backend_waits_for_pod_worker_healthz(runpod_backend, tmp_path, m
         _FakePodResponse(503, {}),                                     # /healthz - still not ready
         _FakePodResponse(200, {"status": "ok"}),                       # /healthz - ready!
         _FakePodResponse(200, {"job_ids": []}),                        # GET /jobs - app mounted
+        _FakePodResponse(200, {"ok": True, "vision_model": "qwen2.5vl:7b",
+                               "ai_parallel_workers": "6"}),           # GET /readyz - model ready
         _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),   # POST /jobs
         _FakePodResponse(200, {"status": "done", "result": {"success": True, "scene_id": "s"},
                                "log_tail": [], "progress_pct": 100}),  # GET /jobs/j1
@@ -581,6 +587,8 @@ def test_runpod_backend_waits_for_pod_worker_healthz(runpod_backend, tmp_path, m
 
     healthz_calls = [c for c in session.calls if c["url"].endswith("/healthz")]
     assert len(healthz_calls) == 3, f"expected 3 /healthz polls, got {len(healthz_calls)}: {healthz_calls}"
+    readyz_calls = [c for c in session.calls if c["url"].endswith("/readyz")]
+    assert len(readyz_calls) == 1
 
 
 def test_runpod_backend_pod_worker_readiness_timeout(runpod_backend, tmp_path, monkeypatch):
@@ -610,6 +618,32 @@ def test_runpod_backend_pod_worker_readiness_timeout(runpod_backend, tmp_path, m
         backend.run_job(video)
     # Pod must still be terminated even though we failed before submit.
     assert client.terminated == ["pod_test"], "pod should be terminated even on readiness timeout"
+
+
+def test_runpod_backend_requires_model_readyz(runpod_backend, monkeypatch):
+    """A mounted pod-worker is not ready until /readyz proves the model exists."""
+    backend, _client, session, _ = runpod_backend
+    import amg.cloud.job_backend as jb
+
+    session._auto_healthz_ok = False
+    session.queue(
+        _FakePodResponse(200, {"status": "ok"}),          # /healthz
+        _FakePodResponse(200, {"job_ids": []}),           # /jobs
+        _FakePodResponse(503, {"detail": {"model_ok": False}}),  # /readyz
+    )
+    ticks = iter([0.0, 0.0, 31.0, 31.0])
+    monkeypatch.setattr(jb.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError, match="did not become ready"):
+        backend._wait_for_pod_worker_ready(
+            "pod_test",
+            on_log=lambda _m: None,
+            timeout_sec=0.01,
+            poll_interval_sec=0,
+        )
+
+    assert any(c["url"].endswith("/readyz") for c in session.calls)
 
 
 # --- cloud-source jobs ------------------------------------------------------

@@ -2,7 +2,7 @@
 Parallel scoring orchestrator.
 
 Uses ThreadPoolExecutor to send AI requests in parallel to Ollama.
-Workers = AI_PARALLEL_WORKERS (matches OLLAMA_NUM_PARALLEL=4).
+Workers = AI_PARALLEL_WORKERS (must match OLLAMA_NUM_PARALLEL).
 
 For I/O-bound HTTP calls, threading is correct (no GIL contention).
 
@@ -12,9 +12,10 @@ each batch. parallelism_factor = sum(per_call_durations) / wall_time;
 4.0 = perfect 4-way overlap, 1.0 = sequential. This is the diagnostic for the
 v11.2 finding that 24 calls took 155s (~6.5s/call sequential-equivalent).
 """
+import copy
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import List, Optional, Callable
 import numpy as np
 
@@ -34,6 +35,8 @@ def score_frames_parallel(
     ai_client: Optional[AIClient] = None,
     max_workers: int = AI_PARALLEL_WORKERS,
     on_progress: Optional[Callable[[int, int], None]] = None,
+    deadline_sec: Optional[float] = None,
+    max_batch_wall_sec: Optional[float] = None,
 ) -> List[dict]:
     """
     Score a batch of frames in parallel.
@@ -44,8 +47,12 @@ def score_frames_parallel(
         prompt: Scoring prompt to use for all frames.
         system_prompt: Optional system message.
         ai_client: Optional reusable client. Created if not provided.
-        max_workers: Concurrent workers (default 4 = OLLAMA_NUM_PARALLEL).
+        max_workers: Concurrent workers (defaults to AI_PARALLEL_WORKERS).
         on_progress: Optional callback(completed, total) for progress reporting.
+        deadline_sec: Optional absolute Unix timestamp. No new work is submitted
+                      once this is reached.
+        max_batch_wall_sec: Optional per-batch wall-time cap. No new work is
+                            submitted once the cap is reached.
 
     Returns:
         Frames with added fields: 'scored_frame' (ScoredFrame), 'ai_response' (AIResponse).
@@ -56,9 +63,12 @@ def score_frames_parallel(
     if ai_client is None:
         ai_client = AIClient()
 
-    results = list(frames)  # Copy so we don't mutate input
+    results = [copy.copy(frame) for frame in frames]  # Avoid mutating caller-owned entries.
     total = len(results)
     completed = 0
+    submitted = 0
+    skipped = 0
+    worker_failures = 0
 
     # v11.1.1: per-call timing instrumentation. Each tuple = (worker_tid, t_start, t_end).
     call_timings: List[tuple] = []
@@ -99,14 +109,70 @@ def score_frames_parallel(
         entry["ai_response"] = ai_resp
         return idx, entry
 
-    # Submit all jobs
+    def budget_exhausted(batch_start: float) -> bool:
+        if deadline_sec is not None and time.time() >= deadline_sec:
+            return True
+        if max_batch_wall_sec is not None and (time.time() - batch_start) >= max_batch_wall_sec:
+            return True
+        return False
+
+    def mark_skipped(idx: int, reason: str) -> None:
+        entry = results[idx]
+        entry["scored_frame"] = ScoredFrame(parse_succeeded=False)
+        entry["ai_response"] = AIResponse(
+            success=False,
+            error_code="E_TIMEOUT_PARTIAL",
+            error_message=reason,
+        )
+        entry["_scoring_skipped"] = True
+
+    # Submit work incrementally so an expired deadline stops new Ollama calls
+    # instead of blindly queueing the entire batch.
     batch_t0 = time.time()
+    max_workers = max(1, int(max_workers or 1))
+    next_idx = 0
+    futures = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(score_one, (i, e)): i
-            for i, e in enumerate(results)
-        }
-        for fut in as_completed(futures):
+        while next_idx < total and len(futures) < max_workers and not budget_exhausted(batch_t0):
+            futures[executor.submit(score_one, (next_idx, results[next_idx]))] = next_idx
+            submitted += 1
+            next_idx += 1
+
+        while futures:
+            done, _pending = wait(futures, timeout=0.25, return_when=FIRST_COMPLETED)
+            if not done:
+                if budget_exhausted(batch_t0):
+                    break
+                continue
+
+            for fut in done:
+                submitted_idx = futures.pop(fut)
+                completed += 1
+                if on_progress:
+                    on_progress(completed, total)
+                entry = results[submitted_idx]
+                try:
+                    idx, entry = fut.result()
+                    results[idx] = entry
+                except Exception as e:
+                    worker_failures += 1
+                    log.error("Worker exception", error=str(e))
+                    entry["scored_frame"] = ScoredFrame(parse_succeeded=False)
+                    entry["ai_response"] = AIResponse(
+                        success=False,
+                        error_code="E_AI_WORKER_EXCEPTION",
+                        error_message=str(e),
+                    )
+                    results[submitted_idx] = entry
+
+            while next_idx < total and len(futures) < max_workers and not budget_exhausted(batch_t0):
+                futures[executor.submit(score_one, (next_idx, results[next_idx]))] = next_idx
+                submitted += 1
+                next_idx += 1
+
+        # Finish the already-submitted worker wave. That bounds overrun to the
+        # current Ollama calls and avoids background threads mutating client state.
+        for fut, submitted_idx in list(futures.items()):
             try:
                 idx, entry = fut.result()
                 results[idx] = entry
@@ -114,7 +180,25 @@ def score_frames_parallel(
                 if on_progress:
                     on_progress(completed, total)
             except Exception as e:
+                worker_failures += 1
                 log.error("Worker exception", error=str(e))
+                entry = results[submitted_idx]
+                entry["scored_frame"] = ScoredFrame(parse_succeeded=False)
+                entry["ai_response"] = AIResponse(
+                    success=False,
+                    error_code="E_AI_WORKER_EXCEPTION",
+                    error_message=str(e),
+                )
+                results[submitted_idx] = entry
+                completed += 1
+                if on_progress:
+                    on_progress(completed, total)
+
+        if next_idx < total:
+            reason = "AI scoring skipped because batch deadline was reached"
+            for idx in range(next_idx, total):
+                mark_skipped(idx, reason)
+                skipped += 1
                 completed += 1
                 if on_progress:
                     on_progress(completed, total)
@@ -135,7 +219,24 @@ def score_frames_parallel(
             unique_worker_threads=unique_workers,
             max_workers_configured=max_workers,
             parallelism_factor=round(parallelism_factor, 2),
+            submitted_count=submitted,
+            completed_count=completed - skipped,
+            skipped_count=skipped,
+            worker_failures=worker_failures,
         )
+
+    score_frames_parallel.last_stats = {
+        "requested_count": total,
+        "submitted_count": submitted,
+        "completed_count": completed - skipped,
+        "skipped_count": skipped,
+        "worker_failures": worker_failures,
+        "batch_wall_sec": round(batch_wall, 3),
+        "deadline_remaining_sec": (
+            round(deadline_sec - time.time(), 3) if deadline_sec is not None else None
+        ),
+        "max_workers": max_workers,
+    }
 
     return results
 
@@ -151,6 +252,11 @@ def count_successes(
         and f["scored_frame"].parse_succeeded
         and f["scored_frame"].score >= min_score
     )
+
+
+def get_last_scoring_stats() -> dict:
+    """Return a copy of the most recent score_frames_parallel batch metrics."""
+    return dict(getattr(score_frames_parallel, "last_stats", {}) or {})
 
 
 def count_tier_a_failures(scored_frames: List[dict]) -> dict:

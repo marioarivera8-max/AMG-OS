@@ -38,6 +38,9 @@ from amg.config import (
     SINGLE_PASS_SCAN_INTERVAL_SEC,
     SINGLE_PASS_MAX_AI_FRAMES,
     SINGLE_PASS_MIN_GAP_SEC,
+    FINISH_HUNTER_ZONE_START_PCT,
+    BUILDUP_HUNTER_ZONE_START_PCT,
+    BUILDUP_HUNTER_ZONE_END_PCT,
     get_adaptive_interval,
 )
 from amg.video.reader import VideoReader
@@ -282,6 +285,8 @@ def _run_single_pass_scan(
                 "motion": motion,
                 "tier": tier_name,
                 "_score_floor": score_floor,
+                "zone_tags": _zone_tags(ts, duration_sec),
+                "reservoir_priority": _reservoir_priority(ts, duration_sec, tier_name, sharp),
             })
             seen_timestamps.add(ts_key)
 
@@ -294,7 +299,13 @@ def _run_single_pass_scan(
     if SINGLE_PASS_MAX_AI_FRAMES > 0 and len(deduped) > len(ai_batch):
         ai_capped = True
 
-    scored = score_frames_parallel(ai_batch, prompt, system_prompt=system_prompt)
+    scored = score_frames_parallel(
+        ai_batch,
+        prompt,
+        system_prompt=system_prompt,
+        deadline_sec=deadline_sec,
+    )
+    scoring_stats = _last_scoring_stats()
     for entry in scored:
         entry.pop("_score_floor", None)
 
@@ -320,6 +331,7 @@ def _run_single_pass_scan(
             "wall_capped": wall_capped,
             "interval_sec": interval,
             "wall_sec": round(time.time() - scan_started, 3),
+            **scoring_stats,
         }
     }
 
@@ -341,6 +353,7 @@ def _select_single_pass_ai_batch(candidates, limit):
     ranked = sorted(
         candidates,
         key=lambda x: (
+            -float(x.get("reservoir_priority") or 0.0),
             tier_rank.get(x.get("tier"), 3),
             -float(x.get("sharpness") or 0.0),
             float(x.get("timestamp_sec") or 0.0),
@@ -360,6 +373,28 @@ def _select_single_pass_ai_batch(candidates, limit):
             if len(selected) >= limit:
                 break
     return selected
+
+
+def _zone_tags(ts: float, duration_sec: float) -> List[str]:
+    tags = []
+    if duration_sec > 0:
+        pct = float(ts) / float(duration_sec)
+        if pct >= FINISH_HUNTER_ZONE_START_PCT:
+            tags.append("finish_zone")
+        if BUILDUP_HUNTER_ZONE_START_PCT <= pct <= BUILDUP_HUNTER_ZONE_END_PCT:
+            tags.append("buildup_zone")
+    return tags
+
+
+def _reservoir_priority(ts: float, duration_sec: float, tier: str, sharpness: float) -> float:
+    tier_bonus = {"tier_1": 300.0, "tier_2": 200.0, "tier_3": 100.0}.get(tier, 0.0)
+    zone_bonus = 0.0
+    tags = _zone_tags(ts, duration_sec)
+    if "finish_zone" in tags:
+        zone_bonus += 45.0
+    if "buildup_zone" in tags:
+        zone_bonus += 30.0
+    return tier_bonus + zone_bonus + min(float(sharpness or 0.0) / 20.0, 50.0)
 
 
 def _score_floor_for_tier(tier):
@@ -395,6 +430,8 @@ def _run_tier(
     tier_started = time.time()
     extracted_capped = False
     ai_capped = False
+    aborted = False
+    abort_reason = None
 
     log.info(f"{tier_name}: extracting candidates",
              sharp_floor=sharpness_floor, motion_cap=motion_cap, interval=interval)
@@ -411,37 +448,17 @@ def _run_tier(
                     wall_sec=round(time.time() - tier_started, 2),
                     cap_sec=TIER_SCAN_MAX_WALL_SEC_PER_TIER,
                 )
-                return {
-                    "scored_frames": [],
-                    "aborted": True,
-                    "abort_reason": "E_TIER_SCAN_TIMEOUT",
-                    "frames_extracted": len(candidates),
-                    "candidates_after_cv": len(candidates),
-                    "candidates_after_dedup": 0,
-                    "ai_scored_count": 0,
-                    "passing_count": 0,
-                    "extracted_capped": extracted_capped,
-                    "ai_capped": ai_capped,
-                    "wall_sec": round(time.time() - tier_started, 3),
-                }
+                aborted = True
+                abort_reason = "E_TIER_SCAN_TIMEOUT"
+                break
 
             # Deadline check
             if deadline_sec and time.time() > deadline_sec:
                 log.warn(f"{tier_name}: deadline exceeded during extraction",
                          frames_seen=len(candidates))
-                return {
-                    "scored_frames": [],
-                    "aborted": True,
-                    "abort_reason": "E_TIMEOUT_HARD",
-                    "frames_extracted": len(candidates),
-                    "candidates_after_cv": len(candidates),
-                    "candidates_after_dedup": 0,
-                    "ai_scored_count": 0,
-                    "passing_count": 0,
-                    "extracted_capped": extracted_capped,
-                    "ai_capped": ai_capped,
-                    "wall_sec": round(time.time() - tier_started, 3),
-                }
+                aborted = True
+                abort_reason = "E_TIMEOUT_HARD"
+                break
 
             # Skip if we've already seen this timestamp (from prior tier)
             ts_key = round(ts, 1)
@@ -452,22 +469,22 @@ def _run_tier(
             if is_frame_too_dark(frame):
                 continue
 
+            small = cv2.resize(frame, (640, 360))
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
             sharp = measure_sharpness(frame)
             if sharp < sharpness_floor:
+                prev_gray = gray
                 continue
 
             # Motion check (skip first frame, no prev to compare)
             if prev_gray is not None:
-                small = cv2.resize(frame, (640, 360))
-                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
                 motion = measure_motion(prev_gray, gray)
                 if motion > motion_cap:
                     prev_gray = gray
                     continue
                 prev_gray = gray
             else:
-                small = cv2.resize(frame, (640, 360))
-                prev_gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                prev_gray = gray
 
             # Frame survives all gates
             candidates.append({
@@ -498,7 +515,8 @@ def _run_tier(
     if not deduped:
         return {
             "scored_frames": [],
-            "aborted": False,
+            "aborted": aborted,
+            "abort_reason": abort_reason,
             "frames_extracted": len(candidates),
             "candidates_after_cv": len(candidates),
             "candidates_after_dedup": len(deduped),
@@ -527,13 +545,20 @@ def _run_tier(
         )
 
     # Score in parallel
-    scored = score_frames_parallel(ai_batch, prompt, system_prompt=system_prompt)
+    scored = score_frames_parallel(
+        ai_batch,
+        prompt,
+        system_prompt=system_prompt,
+        deadline_sec=deadline_sec,
+    )
+    scoring_stats = _last_scoring_stats()
     passing_count = count_successes(scored, score_floor)
     log.info(f"{tier_name}: AI-scored", count=len(scored), passing=passing_count)
 
     return {
         "scored_frames": scored,
-        "aborted": False,
+        "aborted": aborted,
+        "abort_reason": abort_reason,
         "frames_extracted": len(candidates),
         "candidates_after_cv": len(candidates),
         "candidates_after_dedup": len(deduped),
@@ -542,6 +567,7 @@ def _run_tier(
         "extracted_capped": extracted_capped,
         "ai_capped": ai_capped,
         "wall_sec": round(time.time() - tier_started, 3),
+        **scoring_stats,
     }
 
 
@@ -559,6 +585,10 @@ def _tier_stat_payload(tier_result: dict) -> dict:
         "extracted_capped": bool(tier_result.get("extracted_capped", False)),
         "ai_capped": bool(tier_result.get("ai_capped", False)),
         "wall_sec": float(tier_result.get("wall_sec", 0.0) or 0.0),
+        "ai_submitted_count": int(tier_result.get("ai_submitted_count", 0) or 0),
+        "ai_completed_count": int(tier_result.get("ai_completed_count", 0) or 0),
+        "ai_skipped_count": int(tier_result.get("ai_skipped_count", 0) or 0),
+        "ai_batch_wall_sec": float(tier_result.get("ai_batch_wall_sec", 0.0) or 0.0),
     }
 
 
@@ -570,3 +600,13 @@ def _filter_passing(scored_frames, min_score):
         and f["scored_frame"].parse_succeeded
         and f["scored_frame"].score >= min_score
     ]
+
+
+def _last_scoring_stats() -> dict:
+    stats = getattr(score_frames_parallel, "last_stats", {}) or {}
+    return {
+        "ai_submitted_count": int(stats.get("submitted_count", 0) or 0),
+        "ai_completed_count": int(stats.get("completed_count", 0) or 0),
+        "ai_skipped_count": int(stats.get("skipped_count", 0) or 0),
+        "ai_batch_wall_sec": float(stats.get("batch_wall_sec", 0.0) or 0.0),
+    }

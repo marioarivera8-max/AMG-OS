@@ -18,7 +18,7 @@ from amg.config import get_cluster_window, CLUSTER_HUNTER_TOP_N, SCORE_TIER_3_SU
 from amg.video.reader import VideoReader
 from amg.video.frames import measure_sharpness, is_frame_too_dark
 from amg.video.dedup import deduplicate_frames
-from amg.scoring.orchestrator import score_frames_parallel
+from amg.scoring.orchestrator import get_last_scoring_stats, score_frames_parallel
 from amg.utils.logging import get_logger
 
 log = get_logger("scanning.cluster")
@@ -129,31 +129,49 @@ def expand_clusters(
 
     # Extract frames at sample points
     candidates = []
-    timestamps = [t for t, _ in sample_points]
+    aborted = False
+    abort_reason = None
+    chunk_size = 16
 
     with VideoReader(video_path) as vr:
-        frames = vr.get_frames_at(timestamps)
-        for (ts, source_score), frame in zip(sample_points, frames):
+        for chunk_start in range(0, len(sample_points), chunk_size):
             if deadline_sec and time.time() > deadline_sec:
                 log.warn("Cluster expansion: deadline exceeded")
+                aborted = True
+                abort_reason = "E_TIMEOUT_HARD"
                 break
-            if frame is None or is_frame_too_dark(frame):
-                continue
-            sharp = measure_sharpness(frame)
-            if sharp < sharpness_floor:
-                continue
-            candidates.append({
-                "timestamp_sec": ts,
-                "frame": frame,
-                "sharpness": sharp,
-                "tier": "cluster",
-                "_seed_score": source_score,
-            })
+            chunk = sample_points[chunk_start:chunk_start + chunk_size]
+            frames = vr.get_frames_at([t for t, _ in chunk])
+            for (ts, source_score), frame in zip(chunk, frames):
+                if deadline_sec and time.time() > deadline_sec:
+                    log.warn("Cluster expansion: deadline exceeded")
+                    aborted = True
+                    abort_reason = "E_TIMEOUT_HARD"
+                    break
+                if frame is None or is_frame_too_dark(frame):
+                    continue
+                sharp = measure_sharpness(frame)
+                if sharp < sharpness_floor:
+                    continue
+                candidates.append({
+                    "timestamp_sec": ts,
+                    "frame": frame,
+                    "sharpness": sharp,
+                    "tier": "cluster",
+                    "_seed_score": source_score,
+                })
+            if aborted:
+                break
 
     log.info("Cluster expansion: post-gate", count=len(candidates))
 
     if not candidates:
-        return {"cluster_candidates": [], "expansions_count": expansions, "aborted": False}
+        return {
+            "cluster_candidates": [],
+            "expansions_count": expansions,
+            "aborted": aborted,
+            "abort_reason": abort_reason,
+        }
 
     # Dedup (cluster samples around the same seed will look similar)
     deduped = deduplicate_frames(candidates)
@@ -170,12 +188,30 @@ def expand_clusters(
                  cap=CLUSTER_HUNTER_TOP_N)
 
     # Score in parallel
-    scored = score_frames_parallel(capped, prompt, system_prompt=system_prompt)
+    scored = score_frames_parallel(
+        capped,
+        prompt,
+        system_prompt=system_prompt,
+        deadline_sec=deadline_sec,
+    )
+    scoring_stats = _scoring_stat_payload()
     log.info("Cluster expansion: scored", count=len(scored))
 
     # Return all scored (caller will filter)
     return {
         "cluster_candidates": scored,
         "expansions_count": expansions,
-        "aborted": False,
+        "aborted": aborted,
+        "abort_reason": abort_reason,
+        **scoring_stats,
+    }
+
+
+def _scoring_stat_payload() -> dict:
+    stats = get_last_scoring_stats()
+    return {
+        "ai_submitted_count": int(stats.get("submitted_count", 0) or 0),
+        "ai_completed_count": int(stats.get("completed_count", 0) or 0),
+        "ai_skipped_count": int(stats.get("skipped_count", 0) or 0),
+        "ai_batch_wall_sec": float(stats.get("batch_wall_sec", 0.0) or 0.0),
     }

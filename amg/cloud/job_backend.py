@@ -46,7 +46,7 @@ from typing import Any, Callable, Dict, Optional
 
 import requests
 
-from amg.config import DATA_DIR
+from amg.config import DATA_DIR, PROCESSING_PROFILE
 from amg.utils.logging import get_logger
 
 log = get_logger("amg.cloud.job_backend")
@@ -488,19 +488,24 @@ class RunpodBackend(JobBackend):
             self._active_jobs += 1
             pod_id = self._warm_pod_id
         if pod_id:
+            on_log(
+                "[runpod] reusing warm pod; env/image changes require pod recycle "
+                "before they take effect"
+            )
             return pod_id
         on_log(f"[runpod] provisioning GPU pod (gpu={self._spec.gpu_type})")
         spec = self._spec
         ollama_parallel = str(os.environ.get("AMG_RUNPOD_OLLAMA_NUM_PARALLEL", "6"))
         worker_parallel = str(os.environ.get("AMG_RUNPOD_AI_PARALLEL_WORKERS", ollama_parallel))
         video_backend = str(os.environ.get("AMG_RUNPOD_VIDEO_BACKEND", "pyav"))
+        processing_profile = str(os.environ.get("AMG_PROCESSING_PROFILE", PROCESSING_PROFILE))
         # Pass the shared secret into pod env so worker accepts controller requests.
         spec_env = dict(spec.env or {})
-        spec_env.setdefault("OLLAMA_NUM_PARALLEL", ollama_parallel)
-        spec_env.setdefault("AMG_AI_PARALLEL_WORKERS", worker_parallel)
-        spec_env.setdefault("AMG_VIDEO_BACKEND", video_backend)
+        spec_env["OLLAMA_NUM_PARALLEL"] = ollama_parallel
+        spec_env["AMG_AI_PARALLEL_WORKERS"] = worker_parallel
+        spec_env["AMG_VIDEO_BACKEND"] = video_backend
+        spec_env["AMG_PROCESSING_PROFILE"] = processing_profile
         forwarded_env = [
-            "AMG_PROCESSING_PROFILE",
             "AMG_CALIBRATION_SAMPLE_COUNT",
             "AMG_CALIBRATION_MAX_DURATION_SEC",
             "AMG_TIER_SCAN_MODE",
@@ -529,7 +534,7 @@ class RunpodBackend(JobBackend):
         ]
         for env_name in forwarded_env:
             if env_name in os.environ:
-                spec_env.setdefault(env_name, os.environ[env_name])
+                spec_env[env_name] = os.environ[env_name]
         spec_env["AMG_POD_AUTH_TOKEN"] = self._auth_token
         spec.env = spec_env
         pod = self._client.provision_pod(
@@ -623,18 +628,18 @@ class RunpodBackend(JobBackend):
         ``/healthz`` alone is insufficient — some proxies can satisfy probes
         before uvicorn mounts our routes (brief window where POST
         ``/jobs/cloud`` returns 404 empty-body while GET ``/healthz`` looks
-        fine). We therefore require **both**:
+        fine). We therefore require all of:
 
           * GET ``/healthz`` → 200 (unauthenticated — proves TCP + routing),
           * GET ``/jobs`` with our bearer token → 200 (proves pod-worker app +
-            auth middleware agree with the controller's secret).
-
-        Phase 4 will distinguish "boot in progress" from "boot stuck"
-        based on richer readiness payloads.
+            auth middleware agree with the controller's secret),
+          * GET ``/readyz`` with our bearer token → 200 (proves Ollama and the
+            configured vision model are available).
         """
         base = self._pod_base_url(pod_id)
         health_url = f"{base}/healthz"
         jobs_ping_url = f"{base}/jobs"
+        ready_url = f"{base}/readyz"
         deadline = time.monotonic() + float(timeout_sec)
         last_log_at = 0.0
         attempts = 0
@@ -662,11 +667,31 @@ class RunpodBackend(JobBackend):
                                 "injected into the pod env."
                             )
                         if ping.status_code == 200:
-                            on_log(
-                                f"[runpod] pod-worker ready (/healthz + /jobs OK after "
-                                f"{attempts} attempt(s))"
-                            )
-                            return
+                            try:
+                                ready = self._session.get(
+                                    ready_url, headers=self._headers(), timeout=10.0
+                                )
+                            except requests.RequestException:
+                                ready = None
+                            if ready is None:
+                                pass
+                            elif ready.status_code == 401:
+                                raise RuntimeError(
+                                    f"pod {pod_id} rejected bearer token on GET /readyz (HTTP 401). "
+                                    "AMG_POD_AUTH_TOKEN on the controller must match the value "
+                                    "injected into the pod env."
+                                )
+                            elif ready.status_code == 200:
+                                try:
+                                    payload = ready.json() or {}
+                                except Exception:  # noqa: BLE001 - readiness body is diagnostic only
+                                    payload = {}
+                                on_log(
+                                    f"[runpod] pod-worker ready (/healthz + /jobs + /readyz OK "
+                                    f"after {attempts} attempt(s); model={payload.get('vision_model', '?')} "
+                                    f"workers={payload.get('ai_parallel_workers', '?')})"
+                                )
+                                return
             now = time.monotonic()
             # Throttle progress logs so a 5-minute model pull doesn't spam.
             if now - last_log_at >= 30.0:

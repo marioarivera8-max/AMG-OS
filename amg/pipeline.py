@@ -326,6 +326,12 @@ def process_scene(
             "duration_sec": t.elapsed,
             "candidates_found": len(finish_result["candidates"]),
             "passing_count": len(finish_result["candidates"]),
+            "aborted": finish_result.get("aborted", False),
+            "abort_reason": finish_result.get("abort_reason"),
+            "ai_submitted_count": finish_result.get("ai_submitted_count", 0),
+            "ai_completed_count": finish_result.get("ai_completed_count", 0),
+            "ai_skipped_count": finish_result.get("ai_skipped_count", 0),
+            "ai_batch_wall_sec": finish_result.get("ai_batch_wall_sec", 0.0),
         }
         all_scored.extend(finish_result.get("all_scored", []))
         candidates.extend(finish_result["candidates"])
@@ -349,6 +355,12 @@ def process_scene(
             "duration_sec": t.elapsed,
             "candidates_found": len(buildup_result["candidates"]),
             "passing_count": len(buildup_result["candidates"]),
+            "aborted": buildup_result.get("aborted", False),
+            "abort_reason": buildup_result.get("abort_reason"),
+            "ai_submitted_count": buildup_result.get("ai_submitted_count", 0),
+            "ai_completed_count": buildup_result.get("ai_completed_count", 0),
+            "ai_skipped_count": buildup_result.get("ai_skipped_count", 0),
+            "ai_batch_wall_sec": buildup_result.get("ai_batch_wall_sec", 0.0),
         }
         all_scored.extend(buildup_result.get("all_scored", []))
         candidates.extend(buildup_result["candidates"])
@@ -376,6 +388,12 @@ def process_scene(
             "candidates_found": len([c for c in cluster_result["cluster_candidates"]
                                      if c.get("scored_frame")
                                      and c["scored_frame"].score >= SCORE_TIER_3_SUCCESS_FLOOR]),
+            "aborted": cluster_result.get("aborted", False),
+            "abort_reason": cluster_result.get("abort_reason"),
+            "ai_submitted_count": cluster_result.get("ai_submitted_count", 0),
+            "ai_completed_count": cluster_result.get("ai_completed_count", 0),
+            "ai_skipped_count": cluster_result.get("ai_skipped_count", 0),
+            "ai_batch_wall_sec": cluster_result.get("ai_batch_wall_sec", 0.0),
         }
         # Add cluster results that scored well
         for c in cluster_result["cluster_candidates"]:
