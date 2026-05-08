@@ -955,12 +955,26 @@ class RunpodBackend(JobBackend):
         on_log: LogHook,
         on_progress: ProgressHook,
     ) -> Dict[str, Any]:
-        url = f"{self._pod_base_url(pod_id)}/jobs/{job_id}"
+        # Cache-bust every poll. The Runpod proxy (Cloudflare in front of
+        # the pod) will otherwise cache the very first response (often
+        # status=running or status=downloading taken seconds after submit)
+        # and serve it for the rest of the job's lifetime, so the
+        # controller never sees status=done. ``cf-cache-status: HIT, age:
+        # NNNN`` is the smoking-gun symptom on the wire. The same pattern
+        # is applied to readiness probes upstream and to the zip download
+        # below.
+        base_url = f"{self._pod_base_url(pod_id)}/jobs/{job_id}"
+        poll_headers = {
+            **self._headers(),
+            "Cache-Control": "no-cache, no-store, max-age=0",
+            "Pragma": "no-cache",
+        }
         deadline = time.monotonic() + self._run_timeout_sec
         last_seen_log_idx = 0
         transient_404s = 0
         while time.monotonic() < deadline:
-            resp = self._session.get(url, headers=self._headers(), timeout=30.0)
+            url = f"{base_url}?t={int(time.time() * 1000)}"
+            resp = self._session.get(url, headers=poll_headers, timeout=30.0)
             if resp.status_code != 200:
                 # Runpod proxy can briefly return 404 for /jobs/{id} right after
                 # a successful submit even though the worker accepted the job.
@@ -1037,8 +1051,20 @@ class RunpodBackend(JobBackend):
         safe_scene_id = "".join(
             c if (c.isalnum() or c in "_-") else "_" for c in scene_id
         )[:120] or job_id
-        url = f"{self._pod_base_url(pod_id)}/jobs/{job_id}/zip"
-        resp = self._session.get(url, headers=self._headers(), timeout=600.0, stream=True)
+        # Cache-bust the zip pull for the same reason described in
+        # ``_wait_for_job`` above — without this, the proxy can serve a
+        # stale cached payload (or worse, a cached 404 from when the file
+        # didn't exist yet) for the entire run.
+        url = (
+            f"{self._pod_base_url(pod_id)}/jobs/{job_id}/zip"
+            f"?t={int(time.time() * 1000)}"
+        )
+        zip_headers = {
+            **self._headers(),
+            "Cache-Control": "no-cache, no-store, max-age=0",
+            "Pragma": "no-cache",
+        }
+        resp = self._session.get(url, headers=zip_headers, timeout=600.0, stream=True)
         if resp.status_code != 200:
             raise RuntimeError(
                 f"pod {pod_id} /jobs/{job_id}/zip returned HTTP {resp.status_code}"

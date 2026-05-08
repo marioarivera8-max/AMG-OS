@@ -123,7 +123,12 @@ class _FakeHttpSession:
         return self._next()
 
     def get(self, url, *, headers=None, timeout=None, stream=False):
-        self.calls.append({"method": "GET", "url": url, "stream": stream})
+        self.calls.append({
+            "method": "GET",
+            "url": url,
+            "stream": stream,
+            "headers": dict(headers) if headers else {},
+        })
         # /healthz is the TCP/proxy readiness probe. /jobs proves FastAPI/auth
         # are mounted, and /readyz proves Ollama/model readiness. Auto-respond
         # so queue-based tests only model POST/poll/zip traffic.
@@ -1012,6 +1017,63 @@ class TestRunpodBackendCloud:
         # differentiates /jobs/cloud vs /jobs-cloud within a cycle.
         cycles = {c["url"].split("?", 1)[1].split("&", 1)[0] for c in posts}
         assert cycles == {"cycle=1", "cycle=2"}
+
+    def test_runpod_cloud_job_polls_with_cache_busters_and_no_cache_headers(
+        self, runpod_backend, populated_credential_store, monkeypatch
+    ):
+        """``_wait_for_job`` and ``_download_and_extract`` MUST cache-bust
+        every request. Without this, the Runpod proxy (Cloudflare) caches
+        the very first ``/jobs/{id}`` response (often
+        ``status=running`` / ``status=downloading`` taken seconds after
+        submit) and serves it for the rest of the run, so the controller
+        never sees ``status=done`` and the dispatcher thread blocks
+        indefinitely. The on-the-wire smoking gun is
+        ``cf-cache-status: HIT`` with a stale ``age:`` value — see the
+        2026-05-08 incident where Y&B_003 showed ``age: 2786`` (46 min)
+        for every poll while the pod-side job had been done for 16 min.
+        """
+        backend, _client, session, _ = runpod_backend
+        import amg.cloud.job_backend as jb
+        monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+        session.queue(
+            _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),  # POST /jobs/cloud
+            _FakePodResponse(200, {                                        # GET /jobs/j1
+                "status": "done",
+                "log_tail": [],
+                "progress_pct": 100,
+                "result": {"success": True, "scene_id": "scene-cb", "covers_saved": 1},
+            }),
+            _FakePodResponse(200, content=_make_zip_bytes({"out/x.jpg": b"x"})),
+        )
+
+        from amg.cloud.job_backend import CloudSource
+
+        backend.run_cloud_job(
+            CloudSource(remote="gdrive_amy", path="x.mp4", scene_id="scene-cb")
+        )
+
+        gets = [c for c in session.calls if c.get("method") == "GET"]
+        # Expect at least the poll + the zip pull.
+        poll_calls = [c for c in gets if urlparse(c["url"]).path == "/jobs/j1"]
+        zip_calls = [c for c in gets if urlparse(c["url"]).path == "/jobs/j1/zip"]
+        assert poll_calls, "expected at least one /jobs/{id} poll"
+        assert zip_calls, "expected exactly one /jobs/{id}/zip download"
+
+        for call in poll_calls + zip_calls:
+            url = call["url"]
+            headers = call.get("headers") or {}
+            assert "?t=" in url or "&t=" in url, (
+                f"poll/zip URL must include a per-request cache-buster query "
+                f"to defeat Cloudflare proxy caching; got {url!r}"
+            )
+            assert headers.get("Cache-Control") == "no-cache, no-store, max-age=0", (
+                f"poll/zip request missing no-cache Cache-Control header; got "
+                f"{headers!r}"
+            )
+            assert headers.get("Pragma") == "no-cache", (
+                f"poll/zip request missing Pragma: no-cache header; got {headers!r}"
+            )
 
     def test_runpod_cloud_job_no_controller_rclone_fallback_by_default(
         self, runpod_backend, populated_credential_store, monkeypatch
