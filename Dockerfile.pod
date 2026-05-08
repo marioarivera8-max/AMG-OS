@@ -34,11 +34,16 @@
 #     -e AMG_VISION_MODEL=qwen2.5vl:3b \
 #     ghcr.io/<owner>/amg-pod:0.1
 #
-# Cold-boot accelerator: when AMG_RUNPOD_NETWORK_VOLUME_ID is set in the
-# controller env, Runpod attaches a persistent block volume at /workspace.
-# We point OLLAMA_MODELS at /workspace/ollama so the qwen2.5vl:7b weights
-# (~5 GB) survive pod recycles. First boot still pulls the model; every
-# subsequent pod skips the 3-5 min model download.
+# Cold-boot accelerator: the vision model (qwen2.5vl:7b, ~5 GB) is BAKED
+# into this image at build time (see the model-bake RUN step further down)
+# so cold-starts on any datacenter — including ones without a network
+# volume, e.g. H100 SXM regions — finish in ~10 s instead of ~10 min.
+#
+# When AMG_RUNPOD_NETWORK_VOLUME_ID is set in the controller env, Runpod
+# attaches a persistent block volume at /workspace which shadows the
+# baked layer; the first pod in a fresh-volume datacenter pulls cold and
+# caches to the volume, every subsequent pod reuses that cache. Without
+# a volume the baked layer IS the cache, so cold-start is fast everywhere.
 #
 # Other on-pod state (AMG decision logs, work dirs, downloaded videos) lives
 # under AMG_DATA_DIR=/data which stays ephemeral — the controller pulls those
@@ -145,6 +150,56 @@ ENV AMG_DATA_DIR=/data \
 # attached, Runpod mounts over /workspace and the entrypoint mkdirs
 # /workspace/ollama into the volume itself.
 RUN mkdir -p /data /workspace
+
+# Bake the vision model into the image so cold-starts don't pay for a 5 GB
+# `ollama pull` from the registry. Critical for H100 SXM where there is no
+# network volume in the same datacenter (EU-RO-1 only has 4090s); without
+# this the cold-start blows past the controller's 15-min readiness ceiling
+# and the pod gets terminated mid-pull.
+#
+# Layout:
+#   Build time: `ollama serve` runs in background, the configured vision
+#   model is pulled into ${OLLAMA_MODELS} (= /workspace/ollama, set above
+#   in ENV), and ollama is killed before the layer is committed.
+#
+#   Run time, no network volume attached: /workspace stays as the image
+#   layer, so /workspace/ollama already contains the model. The entrypoint
+#   sees `ollama list | grep qwen2.5vl:7b` succeed and skips the pull
+#   entirely; /readyz returns 200 within ~10 s instead of ~10 min.
+#
+#   Run time, network volume attached: Runpod mounts the volume over
+#   /workspace, shadowing the baked layer. Behaves exactly like before —
+#   first cold pod in a fresh-volume datacenter pulls cold (and caches to
+#   the volume); subsequent pods skip the pull.
+#
+# We pull with --insecure-registry false (default) and verify the model
+# appears in `ollama list` before committing the layer so a flaky pull
+# fails the build instead of shipping a broken image.
+RUN set -eux; \
+    ollama serve > /tmp/ollama-build.log 2>&1 & \
+    OLLAMA_PID=$!; \
+    for i in $(seq 1 60); do \
+        if curl -fsS "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1; then \
+            echo "[bake] ollama up after ${i}s"; \
+            break; \
+        fi; \
+        sleep 1; \
+    done; \
+    if ! curl -fsS "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1; then \
+        echo "[bake] FATAL: ollama did not start within 60s"; \
+        tail -50 /tmp/ollama-build.log; \
+        exit 1; \
+    fi; \
+    echo "[bake] pulling ${AMG_VISION_MODEL} into ${OLLAMA_MODELS}"; \
+    ollama pull "${AMG_VISION_MODEL}"; \
+    echo "[bake] verifying model is listed"; \
+    ollama list | tee /tmp/ollama-list.log | awk '{print $1}' | grep -qx "${AMG_VISION_MODEL}" \
+        || (echo "[bake] FATAL: ${AMG_VISION_MODEL} not in ollama list after pull"; exit 1); \
+    echo "[bake] stopping ollama"; \
+    kill -TERM "${OLLAMA_PID}" 2>/dev/null || true; \
+    wait "${OLLAMA_PID}" 2>/dev/null || true; \
+    rm -f /tmp/ollama-build.log /tmp/ollama-list.log; \
+    du -sh "${OLLAMA_MODELS}" || true
 
 # pod-worker port (controller talks to it via the Runpod proxy URL).
 EXPOSE 8000
