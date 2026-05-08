@@ -23,23 +23,24 @@ so cloud GPU + local Ollama on that GPU is the only viable path.
 
 In order of importance for getting current:
 
-1. **`TOMORROW.md`** — current state, what's open, where the operator
-   wants to go next. Updated at the end of each session. Read this
-   first to know what's already done and what's contemplated.
-2. **`AGENT_CONTEXT_2026-05-06_CLOUD_EDITION.md`** — comprehensive
+1. **`AGENT_CONTEXT_CURRENT.md`** — current state, live infrastructure,
+   unpushed work, validation status, and exact next steps. Read this first.
+2. **`TOMORROW.md`** — short next-day/operator reminder. It may lag the
+   current context if the session is still in progress.
+3. **`AGENT_CONTEXT_2026-05-06_CLOUD_EDITION.md`** — comprehensive
    handoff for the cloud edition (Hetzner + Runpod + GHA). Architecture,
    bug graveyard from the cutover session, recovery procedures.
-3. **`SESSION_NOTES_2026-05-06.md`** (or the latest dated equivalent)
+4. **`SESSION_NOTES_2026-05-06.md`** (or the latest dated equivalent)
    — conversational context that the git log + commit messages don't
    capture (rejected proposals, misdiagnoses, design discussions).
-4. **`docs/cloud_edition_runbook.md`** — the deployment runbook
+5. **`docs/cloud_edition_runbook.md`** — the deployment runbook
    (Hetzner setup, Caddy + Let's Encrypt, GHCR, systemd, secrets).
-5. **`docs/WINDOWS_G14_SETUP.md`** — only relevant if you're on the
+6. **`docs/WINDOWS_G14_SETUP.md`** — only relevant if you're on the
    Windows G14 machine and need to recreate dev environment context.
-6. **`CLAUDE.md`** — standing project guide written for AI agents.
+7. **`CLAUDE.md`** — standing project guide written for AI agents.
    Architecture, conventions, what NOT to do. Originally written
    for Claude Code but the content is tool-agnostic.
-7. **`CLAUDE_CODE_HANDOFF.md`** — the operator's strategic brief.
+8. **`CLAUDE_CODE_HANDOFF.md`** — the operator's strategic brief.
    Business context, locked decisions, v11.2 regression history, what's
    deferred and why. Pre-dates the cloud pivot but the working
    agreements still apply.
@@ -48,7 +49,7 @@ The 2026-05-04-era docs (`AGENT_CONTEXT_2026-05-04_LATEST.md`,
 `SESSION_NOTES_2026-05-04.md`) describe local-only training/scoring
 work. That work is paused but valid — read those if Mario wants to
 resume that branch.
-5. **`README.md`** — user-facing setup + usage. Read this if you need
+9. **`README.md`** — user-facing setup + usage. Read this if you need
    to know how `amg verify` works or which env vars Ollama needs.
 
 ## Hard rules (apply tool-agnostically)

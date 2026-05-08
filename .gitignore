@@ -16,6 +16,10 @@ htmlcov/
 .eggs/
 build/
 dist/
+tmp/
+tmp_*.py
+tmp_*.json
+debug-*.log
 
 # Virtual environment
 venv/

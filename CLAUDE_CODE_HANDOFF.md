@@ -1,5 +1,12 @@
 # AMG OS — Context Handoff for Claude Code
 
+> **Archive note (2026-05-08):** this is historical context from the
+> local-first era. Read `AGENT_CONTEXT_CURRENT.md` first for the current
+> cloud-hosted production state, live image tags, validation status, and next
+> steps. This file is still useful for business background and the v11.2
+> regression story, but its local-only/Tauri/GPU-rental assumptions are
+> superseded where they conflict with the current handoff.
+
 **Written:** 2026-05-04 (early morning, post-v11.2 regression)
 **Operator:** Mario Rivera
 **Owner:** Amy (AMG founder)

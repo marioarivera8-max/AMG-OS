@@ -1,5 +1,9 @@
 # AMG OS Agent Context (Latest)
 
+> **Archive note (2026-05-08):** this is no longer the latest default context.
+> Read `AGENT_CONTEXT_CURRENT.md` first. Use this file only when resuming the
+> paused local training/scoring branch from 2026-05-04.
+
 Updated: 2026-05-04 (late session, Cursor)
 
 ## Executive state

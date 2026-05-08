@@ -1,5 +1,8 @@
 # Session notes — 2026-05-06
 
+> **Archive note (2026-05-08):** read `AGENT_CONTEXT_CURRENT.md` first for the
+> current state. These notes are retained for cloud-cutover narrative context.
+
 This file captures conversational context from the 2026-05-06 session
 that the commit log + AGENT_CONTEXT_2026-05-06_CLOUD_EDITION.md don't
 fully capture: the rejected proposals, the misdiagnoses, the ordering

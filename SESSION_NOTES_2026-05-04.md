@@ -1,5 +1,9 @@
 # Session Notes — 2026-05-04
 
+> **Archive note (2026-05-08):** read `AGENT_CONTEXT_CURRENT.md` first for the
+> current state. These notes are retained for the paused local training/scoring
+> branch and v11.1/v11.2 quality history.
+
 Conversational context from this session that the git log + commit
 messages don't fully capture. Things tried and rejected, misdiagnoses,
 design discussions, the operator's reactions to specific outputs.

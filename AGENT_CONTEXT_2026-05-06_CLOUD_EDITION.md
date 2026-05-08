@@ -1,5 +1,9 @@
 # AMG OS — Cloud Edition: Agent Context
 
+> **Archive note (2026-05-08):** read `AGENT_CONTEXT_CURRENT.md` first. This
+> file remains valuable for cloud-cutover history and recovery details, but its
+> "next step" and image/status notes may be stale.
+
 **Updated:** 2026-05-06 (mid-day, after ~12h pivot to cloud-hosted edition)
 **Supersedes:** `AGENT_CONTEXT_2026-05-04_LATEST.md` (which is about local-only
 training/scoring work; that work is paused but valid).
