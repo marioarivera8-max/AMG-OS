@@ -15,6 +15,23 @@ def test_healthz_route_returns_ok():
     assert "snapshot" in payload
 
 
+def test_healthz_reports_runpod_parallel(monkeypatch):
+    import amg.ui.app as app_module
+    from amg.ui.app import create_app
+
+    monkeypatch.setenv("AMG_JOB_BACKEND", "runpod")
+    monkeypatch.setenv("AMG_RUNPOD_AI_PARALLEL_WORKERS", "6")
+    app_module._health_cache = {}
+    app_module._health_ts = 0.0
+
+    app = create_app()
+    client = TestClient(app)
+    res = client.get("/healthz")
+
+    assert res.status_code == 200
+    assert res.json()["snapshot"]["parallel"] == "6"
+
+
 def test_create_job_rejects_invalid_path():
     from amg.ui.app import create_app
 

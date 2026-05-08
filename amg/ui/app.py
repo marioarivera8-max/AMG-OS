@@ -1884,6 +1884,22 @@ def _disk_free_gb(p: Path) -> int:
         return 0
 
 
+def _parallel_status_label() -> str:
+    if os.environ.get("AMG_JOB_BACKEND", "").lower() == "runpod":
+        return (
+            os.environ.get("AMG_RUNPOD_AI_PARALLEL_WORKERS")
+            or os.environ.get("AMG_RUNPOD_OLLAMA_NUM_PARALLEL")
+            or os.environ.get("AMG_AI_PARALLEL_WORKERS")
+            or os.environ.get("OLLAMA_NUM_PARALLEL")
+            or "4"
+        )
+    return (
+        os.environ.get("AMG_AI_PARALLEL_WORKERS")
+        or os.environ.get("OLLAMA_NUM_PARALLEL")
+        or "4"
+    )
+
+
 def _health_snapshot() -> dict:
     """Cheap, ~5s cached."""
     global _health_cache, _health_ts
@@ -1893,7 +1909,7 @@ def _health_snapshot() -> dict:
         snap = {
             "ollama_ok": _ollama_ok(),
             "model": VISION_MODEL,
-            "parallel": "4",
+            "parallel": _parallel_status_label(),
             "kv_cache": "MLX · q8_0",
             "disk_free_gb": _disk_free_gb(Path.home()),
             "scenes_total": len(list(DECISION_LOGS_DIR.glob("*.json"))) if DECISION_LOGS_DIR.exists() else 0,
