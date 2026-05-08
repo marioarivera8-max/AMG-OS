@@ -273,6 +273,8 @@ def test_runpod_backend_forwards_processing_profile_env(runpod_backend, tmp_path
     import amg.cloud.job_backend as jb
     monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
     monkeypatch.setenv("AMG_PROCESSING_PROFILE", "fast")
+    monkeypatch.setenv("AMG_CALIBRATION_SAMPLE_COUNT", "20")
+    monkeypatch.setenv("AMG_CALIBRATION_MAX_DURATION_SEC", "480")
     monkeypatch.setenv("AMG_TIER_SCAN_MODE", "single_pass")
     monkeypatch.setenv("AMG_SINGLE_PASS_MAX_AI_FRAMES", "24")
     monkeypatch.setenv("AMG_ENABLE_CLUSTER_EXPANSION", "0")
@@ -289,6 +291,8 @@ def test_runpod_backend_forwards_processing_profile_env(runpod_backend, tmp_path
     backend.run_job(video, on_log=lambda _: None, on_progress=lambda _: None)
     env = client.provisioned[0].env
     assert env["AMG_PROCESSING_PROFILE"] == "fast"
+    assert env["AMG_CALIBRATION_SAMPLE_COUNT"] == "20"
+    assert env["AMG_CALIBRATION_MAX_DURATION_SEC"] == "480"
     assert env["AMG_TIER_SCAN_MODE"] == "single_pass"
     assert env["AMG_SINGLE_PASS_MAX_AI_FRAMES"] == "24"
     assert env["AMG_ENABLE_CLUSTER_EXPANSION"] == "0"

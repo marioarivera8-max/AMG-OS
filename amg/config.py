@@ -194,7 +194,22 @@ AI_SCORING_SEED = 42
 ANALYSIS_FRAME_SIZE = (640, 360)
 
 # Calibration sample count (for adaptive Tier 1 threshold)
-CALIBRATION_SAMPLE_COUNT = 100
+CALIBRATION_SAMPLE_COUNT = _profile_int(
+    "AMG_CALIBRATION_SAMPLE_COUNT",
+    100,
+    balanced=64,
+    fast=24,
+    turbo=16,
+)
+# Optional cap on how far into the scene calibration probes frames.
+# 0 means "use full scene duration".
+CALIBRATION_MAX_DURATION_SEC = _profile_float(
+    "AMG_CALIBRATION_MAX_DURATION_SEC",
+    0.0,
+    balanced=1200.0,
+    fast=600.0,
+    turbo=300.0,
+)
 
 # Tier 1 floor = this percentile of calibration samples
 TIER_1_PERCENTILE = 75

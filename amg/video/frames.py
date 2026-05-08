@@ -13,6 +13,7 @@ from typing import Tuple
 from amg.config import (
     ANALYSIS_FRAME_SIZE,
     CALIBRATION_SAMPLE_COUNT,
+    CALIBRATION_MAX_DURATION_SEC,
     TIER_1_PERCENTILE,
     TIER_2_PERCENTILE,
     TIER_3_PERCENTILE,
@@ -91,9 +92,14 @@ def calibrate_thresholds(video_path: Path, duration_sec: float) -> dict:
     """
     sharpnesses = []
 
+    effective_duration = float(duration_sec)
+    if CALIBRATION_MAX_DURATION_SEC > 0:
+        effective_duration = min(effective_duration, float(CALIBRATION_MAX_DURATION_SEC))
+    sample_count = max(1, int(CALIBRATION_SAMPLE_COUNT))
+
     with VideoReader(video_path) as vr:
-        sample_interval = duration_sec / CALIBRATION_SAMPLE_COUNT
-        timestamps = [i * sample_interval for i in range(CALIBRATION_SAMPLE_COUNT)]
+        sample_interval = effective_duration / sample_count if sample_count > 0 else effective_duration
+        timestamps = [i * sample_interval for i in range(sample_count)]
         frames = vr.get_frames_at(timestamps)
 
         for frame in frames:

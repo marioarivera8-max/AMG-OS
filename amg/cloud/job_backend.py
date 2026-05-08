@@ -501,6 +501,8 @@ class RunpodBackend(JobBackend):
         spec_env.setdefault("AMG_VIDEO_BACKEND", video_backend)
         forwarded_env = [
             "AMG_PROCESSING_PROFILE",
+            "AMG_CALIBRATION_SAMPLE_COUNT",
+            "AMG_CALIBRATION_MAX_DURATION_SEC",
             "AMG_TIER_SCAN_MODE",
             "AMG_TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER",
             "AMG_TIER_SCAN_MAX_AI_FRAMES_PER_TIER",

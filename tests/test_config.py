@@ -196,6 +196,8 @@ class TestProcessingProfile:
             assert reloaded.PROCESSING_PROFILE == "fast"
             assert reloaded.TIER_SCAN_MODE == "single_pass"
             assert reloaded.TIER_SCAN_MAX_AI_FRAMES_PER_TIER < 80
+            assert reloaded.CALIBRATION_SAMPLE_COUNT < 100
+            assert reloaded.CALIBRATION_MAX_DURATION_SEC > 0
             assert reloaded.ENABLE_CLUSTER_EXPANSION is False
             assert reloaded.SOFT_THUMB_ENABLED is False
         finally:
