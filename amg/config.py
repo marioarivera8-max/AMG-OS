@@ -30,12 +30,12 @@ DATA_DIR = Path(
 def _resolve_incoming_roots() -> list:
     """
     Search paths for scene work-dir lookup (CLI resume, UI scene detail,
-    review form). AMG_INCOMING_ROOTS env var is colon-separated; falls
+    review form). AMG_INCOMING_ROOTS uses the platform path separator; falls
     back to the historical defaults when unset.
     """
     raw = os.environ.get("AMG_INCOMING_ROOTS")
     if raw:
-        return [Path(p).expanduser().resolve() for p in raw.split(":") if p.strip()]
+        return [Path(p).expanduser().resolve() for p in raw.split(os.pathsep) if p.strip()]
     home = Path.home()
     return [home / "AMG_Processing", home / "AMG_OS" / "incoming"]
 
@@ -55,6 +55,10 @@ TRAINING_REGISTRY_PATH = TRAINING_DIR / "registry.jsonl"
 TRAINING_FLAGS_PATH = TRAINING_DIR / "flags.jsonl"
 TRAINING_RETRAIN_RUNS_DIR = TRAINING_DIR / "retrain_runs"
 TRAINING_ACTIVE_SCORER_PATH = TRAINING_DIR / "active_scorer.json"
+TRAINING_RULE_PACKS_DIR = TRAINING_DIR / "rule_packs"
+TRAINING_RULE_RUNS_DIR = TRAINING_DIR / "rule_runs"
+TRAINING_ACTIVE_RULE_PACK_PATH = TRAINING_DIR / "active_rule_pack.json"
+RULE_CANARY_PCT = float(os.environ.get("AMG_RULE_CANARY_PCT", "35"))
 
 # Optional global config
 GLOBAL_CONFIG_PATH = AMG_OS_ROOT / "config.yaml"
@@ -86,7 +90,8 @@ OLLAMA_BASE_URL = _build_ollama_base_url(OLLAMA_HOST)
 OLLAMA_API_URL = f"{OLLAMA_BASE_URL}/api/chat"
 
 VISION_MODEL = "qwen2.5vl:7b"
-TEXT_MODEL = "qwen2.5:14b-instruct"
+TEXT_MODEL = "qwen2.5:32b-instruct"
+TEXT_MODEL_FALLBACK = "qwen2.5:14b-instruct"
 FALLBACK_MODEL = "qwen2.5vl:3b"  # If memory pressure
 LEGACY_MODEL = "llava:13b"        # For comparison testing only
 
@@ -116,7 +121,7 @@ AI_CALL_RETRY_DELAYS = [1, 3, 5]  # Seconds between retries
 # Parallel scoring (matches OLLAMA_NUM_PARALLEL).
 # Override via AMG_AI_PARALLEL_WORKERS env var for empirical scaling tests.
 # Must match OLLAMA_NUM_PARALLEL on the Ollama server to avoid request queuing.
-AI_PARALLEL_WORKERS = int(os.environ.get("AMG_AI_PARALLEL_WORKERS", "4"))
+AI_PARALLEL_WORKERS = int(os.environ.get("AMG_AI_PARALLEL_WORKERS", "6"))
 
 # Service-level failure threshold
 AI_SERVICE_FAIL_THRESHOLD = 3  # Consecutive failures before pausing batch
@@ -156,6 +161,18 @@ TIER_3_INTERVAL = 0.25  # 1 every 4 sec
 TIER_1_INTERVAL_MAX = 3.0
 TIER_2_INTERVAL_MAX = 1.5
 TIER_3_INTERVAL_MAX = 1.0
+
+# Per-tier guardrails to prevent long-tail scans from monopolizing runtime.
+# Set to <=0 via env to disable a specific cap.
+TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER = int(
+    os.environ.get("AMG_TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER", "220")
+)
+TIER_SCAN_MAX_AI_FRAMES_PER_TIER = int(
+    os.environ.get("AMG_TIER_SCAN_MAX_AI_FRAMES_PER_TIER", "80")
+)
+TIER_SCAN_MAX_WALL_SEC_PER_TIER = float(
+    os.environ.get("AMG_TIER_SCAN_MAX_WALL_SEC_PER_TIER", "420")
+)
 
 # Duration-adaptive sampling scale (efficiency for long-form scenes).
 # Tuple format: (min_duration_sec, max_duration_sec, interval_scale)

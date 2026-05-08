@@ -30,6 +30,9 @@ from amg.config import (
     SCORE_TIER_2_SUCCESS_FLOOR,
     SCORE_TIER_3_SUCCESS_FLOOR,
     MIN_CANDIDATES_PER_TIER,
+    TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER,
+    TIER_SCAN_MAX_AI_FRAMES_PER_TIER,
+    TIER_SCAN_MAX_WALL_SEC_PER_TIER,
     get_adaptive_interval,
 )
 from amg.video.reader import VideoReader
@@ -81,6 +84,7 @@ def run_tiered_scan(
 
     all_scored = []
     seen_timestamps = set()
+    tier_stats = {}
     tier_1_interval = get_adaptive_interval(TIER_1_INTERVAL, duration_sec, TIER_1_INTERVAL_MAX)
     tier_2_interval = get_adaptive_interval(TIER_2_INTERVAL, duration_sec, TIER_2_INTERVAL_MAX)
     tier_3_interval = get_adaptive_interval(TIER_3_INTERVAL, duration_sec, TIER_3_INTERVAL_MAX)
@@ -98,6 +102,7 @@ def run_tiered_scan(
         deadline_sec=deadline_sec,
         tier_name="tier_1",
     )
+    tier_stats["tier_1"] = _tier_stat_payload(tier_1)
     all_scored.extend(tier_1["scored_frames"])
 
     if tier_1.get("aborted"):
@@ -107,6 +112,7 @@ def run_tiered_scan(
             "all_scored": all_scored,
             "aborted": True,
             "abort_reason": tier_1.get("abort_reason"),
+            "tier_stats": tier_stats,
         }
 
     if count_successes(tier_1["scored_frames"], SCORE_TIER_1_SUCCESS_FLOOR) >= MIN_CANDIDATES_PER_TIER:
@@ -116,6 +122,7 @@ def run_tiered_scan(
             "candidates": _filter_passing(all_scored, SCORE_TIER_1_SUCCESS_FLOOR),
             "all_scored": all_scored,
             "aborted": False,
+            "tier_stats": tier_stats,
         }
 
     # Tier 2
@@ -132,6 +139,7 @@ def run_tiered_scan(
         deadline_sec=deadline_sec,
         tier_name="tier_2",
     )
+    tier_stats["tier_2"] = _tier_stat_payload(tier_2)
     all_scored.extend(tier_2["scored_frames"])
 
     if tier_2.get("aborted"):
@@ -141,6 +149,7 @@ def run_tiered_scan(
             "all_scored": all_scored,
             "aborted": True,
             "abort_reason": tier_2.get("abort_reason"),
+            "tier_stats": tier_stats,
         }
 
     total_passing = count_successes(all_scored, SCORE_TIER_2_SUCCESS_FLOOR)
@@ -151,6 +160,7 @@ def run_tiered_scan(
             "candidates": _filter_passing(all_scored, SCORE_TIER_2_SUCCESS_FLOOR),
             "all_scored": all_scored,
             "aborted": False,
+            "tier_stats": tier_stats,
         }
 
     # Tier 3
@@ -167,6 +177,7 @@ def run_tiered_scan(
         deadline_sec=deadline_sec,
         tier_name="tier_3",
     )
+    tier_stats["tier_3"] = _tier_stat_payload(tier_3)
     all_scored.extend(tier_3["scored_frames"])
 
     return {
@@ -175,6 +186,7 @@ def run_tiered_scan(
         "all_scored": all_scored,
         "aborted": tier_3.get("aborted", False),
         "abort_reason": tier_3.get("abort_reason"),
+        "tier_stats": tier_stats,
     }
 
 
@@ -194,12 +206,39 @@ def _run_tier(
     """Run one tier: extract candidates, dedupe, score in parallel."""
     candidates = []
     prev_gray = None
+    tier_started = time.time()
+    extracted_capped = False
+    ai_capped = False
 
     log.info(f"{tier_name}: extracting candidates",
              sharp_floor=sharpness_floor, motion_cap=motion_cap, interval=interval)
 
     with VideoReader(video_path) as vr:
         for ts, frame in vr.iter_frames_sequential(0, duration_sec, interval):
+            # Tier hard wall timeout guard (separate from whole-scene deadline).
+            if (
+                TIER_SCAN_MAX_WALL_SEC_PER_TIER > 0
+                and (time.time() - tier_started) > TIER_SCAN_MAX_WALL_SEC_PER_TIER
+            ):
+                log.warn(
+                    f"{tier_name}: tier wall-time cap exceeded",
+                    wall_sec=round(time.time() - tier_started, 2),
+                    cap_sec=TIER_SCAN_MAX_WALL_SEC_PER_TIER,
+                )
+                return {
+                    "scored_frames": [],
+                    "aborted": True,
+                    "abort_reason": "E_TIER_SCAN_TIMEOUT",
+                    "frames_extracted": len(candidates),
+                    "candidates_after_cv": len(candidates),
+                    "candidates_after_dedup": 0,
+                    "ai_scored_count": 0,
+                    "passing_count": 0,
+                    "extracted_capped": extracted_capped,
+                    "ai_capped": ai_capped,
+                    "wall_sec": round(time.time() - tier_started, 3),
+                }
+
             # Deadline check
             if deadline_sec and time.time() > deadline_sec:
                 log.warn(f"{tier_name}: deadline exceeded during extraction",
@@ -208,6 +247,14 @@ def _run_tier(
                     "scored_frames": [],
                     "aborted": True,
                     "abort_reason": "E_TIMEOUT_HARD",
+                    "frames_extracted": len(candidates),
+                    "candidates_after_cv": len(candidates),
+                    "candidates_after_dedup": 0,
+                    "ai_scored_count": 0,
+                    "passing_count": 0,
+                    "extracted_capped": extracted_capped,
+                    "ai_capped": ai_capped,
+                    "wall_sec": round(time.time() - tier_started, 3),
                 }
 
             # Skip if we've already seen this timestamp (from prior tier)
@@ -245,6 +292,17 @@ def _run_tier(
             })
             seen_timestamps.add(ts_key)
 
+            if (
+                TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER > 0
+                and len(candidates) >= TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER
+            ):
+                extracted_capped = True
+                log.warn(
+                    f"{tier_name}: extracted-frame cap hit",
+                    cap=TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER,
+                )
+                break
+
     log.info(f"{tier_name}: post-CV-gate candidates", count=len(candidates))
 
     # Deduplicate before AI scoring (saves AI calls)
@@ -252,14 +310,70 @@ def _run_tier(
     log.info(f"{tier_name}: post-dedup candidates", count=len(deduped))
 
     if not deduped:
-        return {"scored_frames": [], "aborted": False}
+        return {
+            "scored_frames": [],
+            "aborted": False,
+            "frames_extracted": len(candidates),
+            "candidates_after_cv": len(candidates),
+            "candidates_after_dedup": len(deduped),
+            "ai_scored_count": 0,
+            "passing_count": 0,
+            "extracted_capped": extracted_capped,
+            "ai_capped": ai_capped,
+            "wall_sec": round(time.time() - tier_started, 3),
+        }
+
+    ai_batch = deduped
+    if TIER_SCAN_MAX_AI_FRAMES_PER_TIER > 0 and len(ai_batch) > TIER_SCAN_MAX_AI_FRAMES_PER_TIER:
+        ai_capped = True
+        ai_batch = sorted(
+            ai_batch,
+            key=lambda x: (
+                -float(x.get("sharpness") or 0.0),
+                float(x.get("timestamp_sec") or 0.0),
+            ),
+        )[:TIER_SCAN_MAX_AI_FRAMES_PER_TIER]
+        log.warn(
+            f"{tier_name}: AI scoring cap hit",
+            deduped=len(deduped),
+            ai_scored=len(ai_batch),
+            cap=TIER_SCAN_MAX_AI_FRAMES_PER_TIER,
+        )
 
     # Score in parallel
-    scored = score_frames_parallel(deduped, prompt, system_prompt=system_prompt)
-    log.info(f"{tier_name}: AI-scored", count=len(scored),
-             passing=count_successes(scored, score_floor))
+    scored = score_frames_parallel(ai_batch, prompt, system_prompt=system_prompt)
+    passing_count = count_successes(scored, score_floor)
+    log.info(f"{tier_name}: AI-scored", count=len(scored), passing=passing_count)
 
-    return {"scored_frames": scored, "aborted": False}
+    return {
+        "scored_frames": scored,
+        "aborted": False,
+        "frames_extracted": len(candidates),
+        "candidates_after_cv": len(candidates),
+        "candidates_after_dedup": len(deduped),
+        "ai_scored_count": len(ai_batch),
+        "passing_count": passing_count,
+        "extracted_capped": extracted_capped,
+        "ai_capped": ai_capped,
+        "wall_sec": round(time.time() - tier_started, 3),
+    }
+
+
+def _tier_stat_payload(tier_result: dict) -> dict:
+    if not isinstance(tier_result, dict):
+        return {}
+    return {
+        "aborted": bool(tier_result.get("aborted", False)),
+        "abort_reason": tier_result.get("abort_reason"),
+        "frames_extracted": int(tier_result.get("frames_extracted", 0) or 0),
+        "candidates_after_cv": int(tier_result.get("candidates_after_cv", 0) or 0),
+        "candidates_after_dedup": int(tier_result.get("candidates_after_dedup", 0) or 0),
+        "ai_scored_count": int(tier_result.get("ai_scored_count", 0) or 0),
+        "passing_count": int(tier_result.get("passing_count", 0) or 0),
+        "extracted_capped": bool(tier_result.get("extracted_capped", False)),
+        "ai_capped": bool(tier_result.get("ai_capped", False)),
+        "wall_sec": float(tier_result.get("wall_sec", 0.0) or 0.0),
+    }
 
 
 def _filter_passing(scored_frames, min_score):

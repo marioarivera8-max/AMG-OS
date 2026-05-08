@@ -174,6 +174,9 @@ def runpod_backend(tmp_path, monkeypatch):
     monkeypatch.setenv("AMG_RUNPOD_API_KEY", "rk_test")
     monkeypatch.setenv("AMG_RUNPOD_IMAGE", "ghcr.io/test/amg:latest")
     monkeypatch.setenv("AMG_POD_AUTH_TOKEN", "x" * 48)
+    # Keep classic per-job teardown semantics for these tests unless a test
+    # explicitly sets a warm-pod timeout.
+    monkeypatch.setenv("AMG_RUNPOD_IDLE_TERMINATE_SEC", "0")
     # Avoid real waits in tests.
     monkeypatch.setenv("AMG_JOB_POLL_INTERVAL_SEC", "0")
 
@@ -248,6 +251,9 @@ def test_runpod_backend_full_happy_path(runpod_backend, tmp_path, monkeypatch):
     # Pod env should include the auth token from RunpodBackend so the worker
     # accepts the controller's bearer requests.
     assert client.provisioned[0].env.get("AMG_POD_AUTH_TOKEN") == "x" * 48
+    assert client.provisioned[0].env.get("OLLAMA_NUM_PARALLEL") == "6"
+    assert client.provisioned[0].env.get("AMG_AI_PARALLEL_WORKERS") == "6"
+    assert client.provisioned[0].env.get("AMG_VIDEO_BACKEND") == "pyav"
     # Artifacts extracted to work_dirs/<scene_id>/ (v0 layout: flat zip)
     extracted = work_root / "work_dirs" / "scene-42"
     assert (extracted / "out" / "cover_001.jpg").read_bytes() == b"jpg"

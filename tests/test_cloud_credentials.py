@@ -262,6 +262,8 @@ class TestMaterializeConfig:
             assert "ya29.fake" in text
 
     def test_temp_file_is_0600(self, store, sample_config):
+        if os.name != "posix":
+            pytest.skip("permissions check is POSIX-only")
         store.add_remote(sample_config)
         with store.materialize_config(names=["gdrive_amy"]) as cfg_path:
             mode = stat.S_IMODE(os.stat(cfg_path).st_mode)

@@ -15,6 +15,7 @@ authors = [
 
 dependencies = [
     "opencv-python==4.10.0.84",
+    "av",
     # "decord==0.6.0",  # Optional, no Python 3.14 wheels
     "ffmpeg-python==0.2.0",
     "requests==2.32.3",

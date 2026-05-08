@@ -110,6 +110,9 @@ def _build_record(
             "operator_notes": None,
             "platform_uploaded_to": None,
             "platform_performance_30d": None,
+            "rule_pack_id": None,
+            "rule_pack_applied": None,
+            "rule_pack_mode": None,
         },
     }
 
@@ -140,13 +143,13 @@ def _summarize_execution(total_duration_sec, calibration, phase_results, error_c
     phases = {}
     for name, result in (phase_results or {}).items():
         if isinstance(result, dict):
-            phases[name] = {
-                "duration_sec": result.get("duration_sec", 0),
-                "candidates_found": result.get("candidates_found", 0),
-                "frames_scored": result.get("frames_scored", 0),
-                "passing_count": result.get("passing_count", 0),
-                "aborted": result.get("aborted", False),
-            }
+            phase_payload = dict(result)
+            phase_payload.setdefault("duration_sec", 0)
+            phase_payload.setdefault("candidates_found", 0)
+            phase_payload.setdefault("frames_scored", 0)
+            phase_payload.setdefault("passing_count", 0)
+            phase_payload.setdefault("aborted", False)
+            phases[name] = phase_payload
 
     return {
         "total_duration_sec": round(total_duration_sec, 2),
@@ -207,10 +210,28 @@ def _summarize_resources(phase_results):
     for name, result in (phase_results or {}).items():
         if not isinstance(result, dict):
             continue
-        total_ai_calls += result.get("ai_calls_total", 0)
+        ai_calls = result.get("ai_calls_total")
+        if ai_calls is None:
+            ai_calls = result.get("ai_scored_count", result.get("frames_scored", 0))
+        total_ai_calls += int(ai_calls or 0)
         total_ai_succeeded += result.get("ai_calls_succeeded", 0)
         total_ai_retries += result.get("ai_calls_retried", 0)
-        total_frames_extracted += result.get("frames_extracted", 0)
+        frames_extracted = result.get("frames_extracted")
+        if frames_extracted is None:
+            frames_extracted = 0
+        total_frames_extracted += int(frames_extracted or 0)
+
+        tier_breakdown = result.get("tier_breakdown")
+        if isinstance(tier_breakdown, dict) and result.get("ai_scored_count") is None:
+            for tier_result in tier_breakdown.values():
+                if not isinstance(tier_result, dict):
+                    continue
+                total_ai_calls += int(tier_result.get("ai_scored_count", 0) or 0)
+        if isinstance(tier_breakdown, dict) and result.get("frames_extracted") is None:
+            for tier_result in tier_breakdown.values():
+                if not isinstance(tier_result, dict):
+                    continue
+                total_frames_extracted += int(tier_result.get("frames_extracted", 0) or 0)
 
     return {
         "ai_calls_total": total_ai_calls,

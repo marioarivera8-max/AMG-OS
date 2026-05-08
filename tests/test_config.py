@@ -1,5 +1,7 @@
 """Tests for config helpers — cover caps, cluster windows, interval scaling."""
 
+import os
+
 from amg.config import (
     get_cover_cap,
     get_cluster_window,
@@ -151,13 +153,16 @@ class TestIncomingRoots:
         b = tmp_path / "b"
         a.mkdir()
         b.mkdir()
-        monkeypatch.setenv("AMG_INCOMING_ROOTS", f"{a}:{b}")
+        monkeypatch.setenv("AMG_INCOMING_ROOTS", os.pathsep.join([str(a), str(b)]))
         from amg.config import _resolve_incoming_roots
         roots = _resolve_incoming_roots()
         assert roots == [a.resolve(), b.resolve()]
 
     def test_empty_segments_dropped(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("AMG_INCOMING_ROOTS", f":{tmp_path}::")
+        monkeypatch.setenv(
+            "AMG_INCOMING_ROOTS",
+            os.pathsep.join(["", str(tmp_path), "", ""]),
+        )
         from amg.config import _resolve_incoming_roots
         roots = _resolve_incoming_roots()
         assert roots == [tmp_path.resolve()]

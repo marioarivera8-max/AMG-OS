@@ -325,7 +325,7 @@ class RunpodBackend(JobBackend):
         self._auth_token = (auth_token or os.environ.get("AMG_POD_AUTH_TOKEN", "")).strip()
         self._idle_terminate_sec = float(
             idle_terminate_sec if idle_terminate_sec is not None
-            else os.environ.get("AMG_RUNPOD_IDLE_TERMINATE_SEC", "0")
+            else os.environ.get("AMG_RUNPOD_IDLE_TERMINATE_SEC", "900")
         )
         self._lifecycle_lock = threading.RLock()
         self._active_jobs = 0
@@ -491,8 +491,16 @@ class RunpodBackend(JobBackend):
             return pod_id
         on_log(f"[runpod] provisioning GPU pod (gpu={self._spec.gpu_type})")
         spec = self._spec
+        ollama_parallel = str(os.environ.get("AMG_RUNPOD_OLLAMA_NUM_PARALLEL", "6"))
+        worker_parallel = str(os.environ.get("AMG_RUNPOD_AI_PARALLEL_WORKERS", ollama_parallel))
+        video_backend = str(os.environ.get("AMG_RUNPOD_VIDEO_BACKEND", "pyav"))
         # Pass the shared secret into pod env so worker accepts controller requests.
-        spec.env = {**spec.env, "AMG_POD_AUTH_TOKEN": self._auth_token}
+        spec_env = dict(spec.env or {})
+        spec_env.setdefault("OLLAMA_NUM_PARALLEL", ollama_parallel)
+        spec_env.setdefault("AMG_AI_PARALLEL_WORKERS", worker_parallel)
+        spec_env.setdefault("AMG_VIDEO_BACKEND", video_backend)
+        spec_env["AMG_POD_AUTH_TOKEN"] = self._auth_token
+        spec.env = spec_env
         pod = self._client.provision_pod(
             spec,
             ready_timeout=self._provision_timeout_sec,

@@ -274,6 +274,17 @@ def process_scene(
             video_path, duration_sec, calibration, prompt,
             system_prompt=SYSTEM_PROMPT, deadline_sec=deadline,
         )
+    tier_stats = tier_result.get("tier_stats") if isinstance(tier_result.get("tier_stats"), dict) else {}
+    frames_extracted = sum(
+        int((v or {}).get("frames_extracted", 0) or 0)
+        for v in tier_stats.values()
+        if isinstance(v, dict)
+    )
+    ai_scored = sum(
+        int((v or {}).get("ai_scored_count", 0) or 0)
+        for v in tier_stats.values()
+        if isinstance(v, dict)
+    )
     phase_results["tier_scan"] = {
         "duration_sec": t.elapsed,
         "tier_used": tier_result["tier_used"],
@@ -281,6 +292,10 @@ def process_scene(
         "frames_scored": len(tier_result["all_scored"]),
         "passing_count": len(tier_result["candidates"]),
         "aborted": tier_result.get("aborted", False),
+        "abort_reason": tier_result.get("abort_reason"),
+        "frames_extracted": frames_extracted,
+        "ai_scored_count": ai_scored,
+        "tier_breakdown": tier_stats,
     }
     if tier_result.get("aborted"):
         error_codes.append(tier_result.get("abort_reason", "E_TIMEOUT_HARD"))
