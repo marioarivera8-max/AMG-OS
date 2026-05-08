@@ -320,6 +320,15 @@ class RunpodBackend(JobBackend):
             run_timeout_sec if run_timeout_sec is not None
             else os.environ.get("AMG_JOB_RUN_TIMEOUT_SEC", str(4 * 60 * 60))
         )
+        # Time budget for the pod's FastAPI worker to come up AND for the
+        # vision model to be loaded into Ollama. Default 900s (15 min) is
+        # sized for cold pulls on H100 SXM, which has no network volume in
+        # EU-RO-1 and pays the full ~5 GB qwen2.5vl:7b download every cold
+        # boot. Warm pods (network volume attached) typically reach ready
+        # in <60s and never come close to this ceiling.
+        self._pod_ready_timeout_sec = float(
+            os.environ.get("AMG_JOB_POD_READY_TIMEOUT_SEC", "900")
+        )
         self._work_dirs_root = Path(work_dirs_root) if work_dirs_root else DATA_DIR / "work_dirs"
         self._session = http_session or requests.Session()
         self._auth_token = (auth_token or os.environ.get("AMG_POD_AUTH_TOKEN", "")).strip()
@@ -444,7 +453,11 @@ class RunpodBackend(JobBackend):
         try:
             on_log(f"[runpod] pod {pod_id} RUNNING; waiting for pod-worker /healthz")
             on_progress(12)
-            self._wait_for_pod_worker_ready(pod_id, on_log=on_log)
+            self._wait_for_pod_worker_ready(
+                pod_id,
+                on_log=on_log,
+                timeout_sec=self._pod_ready_timeout_sec,
+            )
             on_log(f"[runpod] pod-worker ready; submitting job")
             on_progress(15)
             job_id = submit(pod_id)
@@ -637,16 +650,19 @@ class RunpodBackend(JobBackend):
         pod_id: str,
         *,
         on_log: LogHook,
-        timeout_sec: float = 600.0,
+        timeout_sec: float = 900.0,
         poll_interval_sec: float = 5.0,
     ) -> None:
         """Poll until the pod-worker FastAPI app is actually taking requests.
 
-        Runpod marks a pod RUNNING the moment its container starts, but our
-        pod entrypoint then has to (a) start ollama, (b) wait for it to be
-        ready, (c) pre-pull qwen2.5vl on first boot (~5 min cold), then
-        (d) exec ``amg pod-worker``. Until step (d), TCP connects may succeed
-        at the proxy but no routes exist yet.
+        Runpod marks a pod RUNNING the moment its container starts. The pod
+        entrypoint then (a) starts ollama, (b) waits for it to respond, and
+        (c) execs ``amg pod-worker`` so uvicorn binds :8000. The vision-
+        model pull (``ollama pull qwen2.5vl:7b``, ~5 GB) runs in the
+        BACKGROUND so the worker can serve ``/healthz`` immediately and
+        the controller doesn't time out waiting for the pull. ``/readyz``
+        is the gate that ensures the pull has finished before we submit
+        work.
 
         ``/healthz`` alone is insufficient — some proxies can satisfy probes
         before uvicorn mounts our routes (brief window where POST
@@ -658,6 +674,11 @@ class RunpodBackend(JobBackend):
             auth middleware agree with the controller's secret),
           * GET ``/readyz`` with our bearer token → 200 (proves Ollama and the
             configured vision model are available).
+
+        The default timeout is 15 min so cold H100 pods (no network volume
+        in EU-RO-1, fresh model pull on every cold-start) can finish their
+        ~5 GB ``ollama pull`` before the controller gives up. Override via
+        ``AMG_JOB_POD_READY_TIMEOUT_SEC`` if needed.
         """
         base = self._pod_base_url(pod_id)
         health_url = f"{base}/healthz"
@@ -666,9 +687,12 @@ class RunpodBackend(JobBackend):
         deadline = time.monotonic() + float(timeout_sec)
         last_log_at = 0.0
         attempts = 0
+        last_phase = "starting"
+        last_readyz_payload: Dict[str, Any] = {}
         while time.monotonic() < deadline:
             attempts += 1
             cache_buster = f"?attempt={attempts}&t={int(time.time() * 1000)}"
+            current_phase = "starting"
             try:
                 h = self._session.get(
                     f"{health_url}{cache_buster}",
@@ -681,6 +705,7 @@ class RunpodBackend(JobBackend):
                 if h.status_code != 200:
                     pass
                 else:
+                    current_phase = "fastapi-up"
                     try:
                         ping = self._session.get(
                             f"{jobs_ping_url}{cache_buster}",
@@ -697,6 +722,7 @@ class RunpodBackend(JobBackend):
                                 "injected into the pod env."
                             )
                         if ping.status_code == 200:
+                            current_phase = "auth-ok"
                             try:
                                 ready = self._session.get(
                                     f"{ready_url}{cache_buster}",
@@ -713,28 +739,68 @@ class RunpodBackend(JobBackend):
                                     "AMG_POD_AUTH_TOKEN on the controller must match the value "
                                     "injected into the pod env."
                                 )
-                            elif ready.status_code == 200:
+                            else:
+                                # /readyz body is JSON in both 200 and 503 cases —
+                                # 503 carries `{ok, ollama_ok, model_ok, ...}` as
+                                # the HTTPException detail, which is exactly what
+                                # we want to surface to the operator.
                                 try:
                                     payload = ready.json() or {}
                                 except Exception:  # noqa: BLE001 - readiness body is diagnostic only
                                     payload = {}
-                                on_log(
-                                    f"[runpod] pod-worker ready (/healthz + /jobs + /readyz OK "
-                                    f"after {attempts} attempt(s); model={payload.get('vision_model', '?')} "
-                                    f"workers={payload.get('ai_parallel_workers', '?')})"
-                                )
-                                return
+                                if isinstance(payload, dict) and "detail" in payload and isinstance(payload["detail"], dict):
+                                    payload = payload["detail"]
+                                last_readyz_payload = payload if isinstance(payload, dict) else {}
+                                if ready.status_code == 200:
+                                    on_log(
+                                        f"[runpod] pod-worker ready (/healthz + /jobs + /readyz OK "
+                                        f"after {attempts} attempt(s); model={last_readyz_payload.get('vision_model', '?')} "
+                                        f"workers={last_readyz_payload.get('ai_parallel_workers', '?')})"
+                                    )
+                                    return
+                                # 503 means worker is up but Ollama / model is not
+                                # yet ready (background pull still running).
+                                if last_readyz_payload.get("ollama_ok") and not last_readyz_payload.get("model_ok"):
+                                    current_phase = "model-pull"
+                                elif not last_readyz_payload.get("ollama_ok"):
+                                    current_phase = "waiting-on-ollama"
             now = time.monotonic()
-            # Throttle progress logs so a 5-minute model pull doesn't spam.
-            if now - last_log_at >= 30.0:
-                on_log(f"[runpod] pod-worker not ready yet (attempt {attempts}); still waiting...")
+            # Throttle progress logs so a multi-minute model pull doesn't spam,
+            # and surface phase transitions (starting → fastapi-up → model-pull
+            # → ready) so the operator sees movement instead of a stuck "not
+            # ready yet" loop.
+            if current_phase != last_phase or now - last_log_at >= 30.0:
+                if current_phase == "model-pull":
+                    on_log(
+                        f"[runpod] pod-worker FastAPI is up, Ollama is pulling "
+                        f"{last_readyz_payload.get('vision_model', 'qwen2.5vl:7b')} (attempt {attempts}); "
+                        "this is normal on the first H100 cold-start"
+                    )
+                elif current_phase == "fastapi-up":
+                    on_log(f"[runpod] pod-worker /healthz OK (attempt {attempts}); auth check pending")
+                elif current_phase == "auth-ok":
+                    on_log(f"[runpod] pod-worker auth OK (attempt {attempts}); waiting on /readyz")
+                elif current_phase == "waiting-on-ollama":
+                    on_log(f"[runpod] pod-worker FastAPI is up but Ollama is not yet reachable (attempt {attempts})")
+                else:
+                    on_log(f"[runpod] pod-worker not ready yet (attempt {attempts}); still waiting...")
                 last_log_at = now
+                last_phase = current_phase
             time.sleep(poll_interval_sec)
+        # Surface the last /readyz payload in the timeout error so the operator
+        # knows whether it timed out on FastAPI startup, Ollama startup, or the
+        # model pull — three very different failure modes.
+        diag = ""
+        if last_readyz_payload:
+            diag = (
+                f" Last /readyz: ollama_ok={last_readyz_payload.get('ollama_ok')} "
+                f"model_ok={last_readyz_payload.get('model_ok')} "
+                f"model={last_readyz_payload.get('vision_model')}"
+            )
         raise RuntimeError(
             f"pod {pod_id} did not become ready within {timeout_sec:.0f}s "
-            f"(after {attempts} readiness checks). Likely Ollama failed to start "
-            "or the model pull stalled — check the pod's container logs in the "
-            "Runpod console."
+            f"(after {attempts} readiness checks; final phase={last_phase}).{diag} "
+            "Check the pod's container logs in the Runpod console."
         )
 
     def _submit_job(self, pod_id: str, video_path: Path) -> str:
