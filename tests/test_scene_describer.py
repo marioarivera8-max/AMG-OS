@@ -156,3 +156,68 @@ class TestGenerateTitlesWithInsight:
         assert "intimate bath" in result["long_description"].lower()
         assert "POV" in result["categories"]
         assert "pov" in result["tags"]
+
+    def test_live_response_dedupes_near_duplicate_titles(self):
+        client = MagicMock()
+        client.is_alive.return_value = True
+        client.generate_text.return_value = AIResponse(
+            success=True,
+            raw_text=(
+                "TITLE_1: Yasmina Bath Tease POV\n"
+                "STYLE_1: performer_led\n\n"
+                "TITLE_2: Yasmina Bath Tease POV Scene\n"
+                "STYLE_2: scene_descriptive\n\n"
+                "TITLE_3: Candlelit Tub Seduction with Yasmina\n"
+                "STYLE_3: narrative_hook\n\n"
+                "LONG_DESCRIPTION: Yasmina and Brady share an intimate bath sequence.\n"
+                "CATEGORY_SUGGESTIONS: Amateur, Verified Models, HD Porn, POV\n"
+                "TAG_SUGGESTIONS: pov, eye contact, bathtub, teasing\n"
+                "END\n"
+            ),
+        )
+        result = generate_titles_with_insight(
+            studio="YasminaBrady",
+            performers=["Yasmina Khan"],
+            scene_type="COUPLE",
+            genres=["BATH"],
+            description="bath teasing scene",
+            insight=SceneInsight(setting="bathtub", mood="intimate"),
+            position_summary={"NUDE": 3},
+            ai_client=client,
+            n_suggestions=3,
+        )
+        texts = [t["text"] for t in result["titles"]]
+        similar = [t for t in texts if "bath tease pov" in t.lower()]
+        assert len(similar) <= 1
+
+    def test_long_description_strips_overused_terms(self):
+        client = MagicMock()
+        client.is_alive.return_value = True
+        client.generate_text.return_value = AIResponse(
+            success=True,
+            raw_text=(
+                "TITLE_1: Bath Tease with Yasmina\n"
+                "STYLE_1: performer_led\n\n"
+                "TITLE_2: Couple Bath Scene with Yasmina\n"
+                "STYLE_2: scene_descriptive\n\n"
+                "LONG_DESCRIPTION: A wild and naughty setup gets crazy fast. A wild and naughty setup gets crazy fast.\n"
+                "CATEGORY_SUGGESTIONS: Amateur, Verified Models, HD Porn, POV\n"
+                "TAG_SUGGESTIONS: pov, eye contact, bathtub, teasing\n"
+                "END\n"
+            ),
+        )
+        result = generate_titles_with_insight(
+            studio="YasminaBrady",
+            performers=["Yasmina Khan"],
+            scene_type="COUPLE",
+            genres=["BATH"],
+            description="bath teasing scene",
+            insight=SceneInsight(setting="bathtub", mood="intimate"),
+            position_summary={"NUDE": 3},
+            ai_client=client,
+            n_suggestions=2,
+        )
+        desc = result["long_description"].lower()
+        assert "wild" not in desc
+        assert "naughty" not in desc
+        assert "crazy" not in desc

@@ -126,6 +126,7 @@ def generate_titles_with_insight(
     n_suggestions: int = 5,
     language: str = "en",
     ai_client: Optional[AIClient] = None,
+    rule_pack: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Generate richer titles using vision insight + position rollup.
 
@@ -157,6 +158,7 @@ def generate_titles_with_insight(
             scene_type=scene_type,
             genres=genres,
             insight=insight_dict,
+            position_summary=position_summary,
         )
         return {
             "titles": titles,
@@ -165,6 +167,9 @@ def generate_titles_with_insight(
             "tags": tags,
             "title_tone": title_tone,
             "ai_used": False,
+            "text_model_effective": None,
+            "text_model_fallback_used": False,
+            "text_model_fallback_model": None,
         }
 
     seed_taxonomy = build_seed_taxonomy(genres, position_summary)
@@ -195,6 +200,7 @@ def generate_titles_with_insight(
             scene_type=scene_type,
             genres=genres,
             insight=insight_dict,
+            position_summary=position_summary,
         )
         return {
             "titles": titles,
@@ -203,8 +209,12 @@ def generate_titles_with_insight(
             "tags": tags,
             "title_tone": title_tone,
             "ai_used": False,
+            "text_model_effective": None,
+            "text_model_fallback_used": False,
+            "text_model_fallback_model": None,
         }
 
+    response_meta = response.extras or {}
     parsed = _parse_enriched_response(response.raw_text)
     titles = parsed["titles"] if parsed["titles"] else _fallback_titles(
         studio, performers, scene_type, genres, n_suggestions
@@ -216,6 +226,12 @@ def generate_titles_with_insight(
     lead = _lead_performer_name(performers)
     titles = _enforce_lead_performer_in_titles(titles, lead)
     titles = _sanitize_title_candidates(titles)
+    titles = _rank_and_balance_titles(
+        titles,
+        lead=lead,
+        insight=insight_dict,
+        n_suggestions=n_suggestions,
+    )
     if not titles:
         titles = _fallback_titles(studio, performers, scene_type, genres, n_suggestions)
     long_desc = _normalize_long_description(
@@ -225,11 +241,25 @@ def generate_titles_with_insight(
         scene_type=scene_type,
         genres=genres,
         insight=insight_dict,
+        position_summary=position_summary,
     )
     long_desc = _enforce_lead_performer_in_description(long_desc, lead)
     titles = _annotate(titles)
     categories = _normalize_categories(parsed.get("categories", []), seed_taxonomy.get("categories", []))
     tags = _normalize_tags(parsed.get("tags", []), seed_taxonomy.get("tags", []))
+    constraints = ((rule_pack or {}).get("constraints") or {}) if isinstance(rule_pack, dict) else {}
+    titles = _apply_rule_pack_to_titles(titles, constraints)
+    long_desc = _apply_rule_pack_to_description(long_desc, constraints)
+    categories = _apply_rule_pack_priority(categories, constraints.get("category_boost"))
+    tags = _apply_rule_pack_priority(tags, constraints.get("tag_boost"))
+    if constraints.get("description_min_chars"):
+        min_chars = int(constraints.get("description_min_chars") or 0)
+        while min_chars > 0 and len(long_desc) < min_chars:
+            long_desc = (long_desc + " " + "Optimized for shelf clarity and searchable scene context.").strip()
+    if constraints.get("description_max_chars"):
+        max_chars = int(constraints.get("description_max_chars") or 0)
+        if max_chars > 0 and len(long_desc) > max_chars:
+            long_desc = long_desc[:max_chars].rstrip()
     return {
         "titles": titles[:n_suggestions],
         "long_description": long_desc,
@@ -237,6 +267,10 @@ def generate_titles_with_insight(
         "tags": tags,
         "title_tone": title_tone,
         "ai_used": True,
+        "text_model_effective": response_meta.get("model_used") or getattr(ai_client, "text_model", None),
+        "text_model_fallback_used": bool(response_meta.get("fallback_model_used")),
+        "text_model_fallback_model": response_meta.get("fallback_model_used"),
+        "rule_pack_id": (rule_pack or {}).get("rule_pack_id") if isinstance(rule_pack, dict) else None,
     }
 
 
@@ -246,9 +280,13 @@ def _sanitize_title_candidates(titles: List[Dict[str, Any]]) -> List[Dict[str, A
     """
     out: List[Dict[str, Any]] = []
     seen = set()
+    seen_word_sets: List[set[str]] = []
+    seen_prefixes: set[str] = set()
     for t in titles or []:
         raw = (t.get("text") or "").strip()
         text = re.sub(r"\s+", " ", raw).strip(" \"'")
+        text = _strip_avoid_terms(text)
+        text = re.sub(r"\s+", " ", text).strip(" \"'")
         if not text:
             continue
         lower = text.lower()
@@ -270,13 +308,92 @@ def _sanitize_title_candidates(titles: List[Dict[str, Any]]) -> List[Dict[str, A
                     run = 1
             if max_run >= 4:
                 continue
-        if len(text) < 12:
+        if len(text) < 18:
             continue
         if len(text) > 110:
             text = text[:110].rstrip()
+
+        # Reject near-duplicate variants ("same title with one extra word").
+        prefix = " ".join(words[:4]) if words else ""
+        if prefix and prefix in seen_prefixes:
+            continue
+        current_words = set(words)
+        is_near_dup = False
+        for prev_words in seen_word_sets:
+            union = current_words | prev_words
+            if len(union) < 4:
+                continue
+            overlap = len(current_words & prev_words) / max(1, len(union))
+            if overlap >= 0.72:
+                is_near_dup = True
+                break
+        if is_near_dup:
+            continue
+
         seen.add(lower)
+        if prefix:
+            seen_prefixes.add(prefix)
+        if current_words:
+            seen_word_sets.append(current_words)
         out.append({**t, "text": text})
     return out
+
+
+def _rank_and_balance_titles(
+    titles: List[Dict[str, Any]],
+    *,
+    lead: str,
+    insight: Dict[str, Any],
+    n_suggestions: int,
+) -> List[Dict[str, Any]]:
+    if not titles:
+        return []
+    scored: List[tuple[int, Dict[str, Any], set[str]]] = []
+    for t in titles:
+        text = str((t or {}).get("text") or "").strip()
+        words = _title_wordset(text)
+        if not words:
+            continue
+        score = 0
+        if lead and lead.lower() in text.lower():
+            score += 3
+        if words & _ACTION_HINT_WORDS:
+            score += 2
+        if words & _insight_hint_words(insight):
+            score += 2
+        if words & _GENERIC_TITLE_WORDS:
+            score -= 2
+        score += max(0, min(2, len(words) // 6))
+        scored.append((score, t, words))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    picked: List[Dict[str, Any]] = []
+    picked_words: List[set[str]] = []
+    for _score, t, words in scored:
+        too_close = False
+        for prev in picked_words:
+            union = words | prev
+            if not union:
+                continue
+            overlap = len(words & prev) / max(1, len(union))
+            if overlap >= 0.68:
+                too_close = True
+                break
+        if too_close:
+            continue
+        picked.append(t)
+        picked_words.append(words)
+        if len(picked) >= n_suggestions:
+            break
+
+    if len(picked) < n_suggestions:
+        for _score, t, _words in scored:
+            if t in picked:
+                continue
+            picked.append(t)
+            if len(picked) >= n_suggestions:
+                break
+    return picked
 
 
 def summarize_positions(saved_covers: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -431,6 +548,10 @@ def _normalize_tags(values: List[str], seed_values: List[str]) -> List[str]:
     merged = list(values or []) + list(seed_values or [])
     cleaned: List[str] = []
     avoid = {t.lower() for t in MARKET_TERMS_TO_AVOID}
+    generic_noise = {
+        "porn", "sex", "video", "scene", "adult", "hot", "sexy",
+        "beautiful", "amazing", "intense", "hardcore",
+    }
     for token in merged:
         t = re.sub(r"\s+", " ", str(token or "").strip().lower())
         if not t:
@@ -442,6 +563,8 @@ def _normalize_tags(values: List[str], seed_values: List[str]) -> List[str]:
             continue
         t = TAG_ALIASES.get(t, t)
         if len(t) < 3 or len(t) > 32:
+            continue
+        if t in generic_noise:
             continue
         cleaned.append(t)
     prioritized = _prioritize_tokens(cleaned, MARKET_TAG_PRIORITIES)
@@ -462,8 +585,11 @@ def _normalize_long_description(
     scene_type: str,
     genres: List[str],
     insight: Dict[str, Any],
+    position_summary: Optional[Dict[str, int]] = None,
 ) -> str:
     text = re.sub(r"\s+", " ", (raw or "").strip())
+    text = _strip_avoid_terms(text)
+    text = _dedupe_description_sentences(text)
     if text:
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
         if len(sentences) > 4:
@@ -482,7 +608,84 @@ def _normalize_long_description(
         )
         if action:
             text += f" {action}"
+    action_hint = _description_action_hint(genres, position_summary or {})
+    if action_hint and action_hint.lower() not in text.lower():
+        text = (text.rstrip(".!?") + f". {action_hint}.").strip()
+    minimum_chars = 170
+    if len(text) < minimum_chars:
+        lead = (performers[0] if performers else "The lead performer").strip() or "The lead performer"
+        setting = (insight.get("setting") or "a private setting").strip()
+        mood = (insight.get("mood") or "confident").strip()
+        filler = (
+            f" {lead} keeps the pace {mood} in {setting}, with clean retail framing and clear action continuity."
+        )
+        while len(text) < minimum_chars:
+            text = (text + filler).strip()
+    text = _strip_avoid_terms(text)
+    text = _dedupe_description_sentences(text)
     return text[:520].strip()
+
+
+def _strip_avoid_terms(text: str) -> str:
+    out = str(text or "")
+    for term in MARKET_TERMS_TO_AVOID:
+        pat = re.compile(rf"\b{re.escape(term)}\b", re.IGNORECASE)
+        out = pat.sub("", out)
+    out = re.sub(r"\s+", " ", out)
+    out = re.sub(r"\s+([,.;:!?])", r"\1", out)
+    return out.strip()
+
+
+def _dedupe_description_sentences(text: str) -> str:
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", str(text or "")) if s.strip()]
+    out: List[str] = []
+    seen: set[str] = set()
+    for s in sentences:
+        key = re.sub(r"[^a-z0-9 ]+", "", s.lower()).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return " ".join(out).strip()
+
+
+def _description_action_hint(genres: List[str], position_summary: Dict[str, int]) -> str:
+    g = {str(x).upper() for x in (genres or [])}
+    p = {str(k).upper() for k in (position_summary or {}).keys()}
+    if "ANAL" in g:
+        return "Action focus includes explicit anal beats and sustained POV readability"
+    if "SQUIRT" in g:
+        return "Action focus includes squirting cues with strong close-up continuity"
+    if "POV" in g:
+        return "Action focus includes direct POV framing and eye-contact-forward moments"
+    if "DOGGY" in p:
+        return "Action focus includes doggy-style sequences with clear composition"
+    if "MISSIONARY" in p:
+        return "Action focus includes missionary sequences with readable framing"
+    return "Action focus stays explicit, varied, and commercially clear across the scene"
+
+
+def _title_wordset(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9']+", str(text or "").lower()) if w}
+
+
+def _insight_hint_words(insight: Dict[str, Any]) -> set[str]:
+    bits: List[str] = []
+    for key in ("setting", "location_hint", "action_summary", "mood"):
+        bits.append(str((insight or {}).get(key) or ""))
+    for f in (insight or {}).get("notable_features") or []:
+        bits.append(str(f))
+    return _title_wordset(" ".join(bits))
+
+
+_ACTION_HINT_WORDS = {
+    "pov", "anal", "blowjob", "deepthroat", "doggy", "cowgirl",
+    "missionary", "rimjob", "creampie", "squirting", "threesome", "solo",
+}
+
+_GENERIC_TITLE_WORDS = {
+    "hot", "sexy", "amazing", "intense", "wild", "crazy", "naughty",
+}
 
 
 def _lead_performer_name(performers: List[str]) -> str:
@@ -543,6 +746,52 @@ def _prioritize_tokens(values: List[str], priority: List[str]) -> List[str]:
         key=lambda v: (prio_index.get(v.lower(), 10_000), v.lower()),
     )
     return ranked
+
+
+def _apply_rule_pack_to_titles(titles: List[Dict[str, Any]], constraints: Dict[str, Any]) -> List[Dict[str, Any]]:
+    banned = {str(x).strip().lower() for x in (constraints.get("banned_title_terms") or []) if str(x).strip()}
+    prefixes = [str(x).strip() for x in (constraints.get("title_prefixes") or []) if str(x).strip()]
+    suffixes = [str(x).strip() for x in (constraints.get("title_suffixes") or []) if str(x).strip()]
+    required_tokens = [str(x).strip() for x in (constraints.get("required_title_tokens") or []) if str(x).strip()]
+    out: List[Dict[str, Any]] = []
+    for t in titles or []:
+        text = str((t or {}).get("text") or "").strip()
+        if not text:
+            continue
+        low = text.lower()
+        if any(term in low for term in banned):
+            continue
+        if required_tokens and not any(tok.lower() in low for tok in required_tokens):
+            # nudge, don't replace: append first required token if room exists
+            add = required_tokens[0]
+            if add.lower() not in low and len(text) + len(add) + 3 <= 110:
+                text = f"{text} - {add}"
+        if prefixes:
+            pref = prefixes[0]
+            if pref.lower() not in low and len(pref) + len(text) + 2 <= 110:
+                text = f"{pref}: {text}"
+        if suffixes:
+            suf = suffixes[0]
+            if suf.lower() not in text.lower() and len(text) + len(suf) + 3 <= 110:
+                text = f"{text} - {suf}"
+        out.append({**t, "text": text})
+    return _annotate(_sanitize_title_candidates(out))
+
+
+def _apply_rule_pack_to_description(description: str, constraints: Dict[str, Any]) -> str:
+    text = str(description or "").strip()
+    boost = [str(x).strip() for x in (constraints.get("description_phrase_boost") or []) if str(x).strip()]
+    for phrase in boost[:2]:
+        if phrase.lower() not in text.lower():
+            text = (text + " " + phrase).strip()
+    return text
+
+
+def _apply_rule_pack_priority(values: List[str], priority_tokens: Any) -> List[str]:
+    priority = [str(x).strip() for x in (priority_tokens or []) if str(x).strip()]
+    if not priority:
+        return values
+    return _prioritize_tokens(values, priority)
 
 
 def _annotate(titles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
