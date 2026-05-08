@@ -482,6 +482,15 @@ class RunpodBackend(JobBackend):
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self._auth_token}"}
 
+    def _readiness_headers(self, *, authenticated: bool) -> Dict[str, str]:
+        headers = {
+            "Cache-Control": "no-cache, no-store, max-age=0",
+            "Pragma": "no-cache",
+        }
+        if authenticated:
+            headers.update(self._headers())
+        return headers
+
     def _acquire_pod(self, *, on_log: LogHook) -> str:
         with self._lifecycle_lock:
             self._cancel_idle_timer()
@@ -645,8 +654,13 @@ class RunpodBackend(JobBackend):
         attempts = 0
         while time.monotonic() < deadline:
             attempts += 1
+            cache_buster = f"?attempt={attempts}&t={int(time.time() * 1000)}"
             try:
-                h = self._session.get(health_url, timeout=10.0)
+                h = self._session.get(
+                    f"{health_url}{cache_buster}",
+                    headers=self._readiness_headers(authenticated=False),
+                    timeout=10.0,
+                )
             except requests.RequestException:
                 pass
             else:
@@ -655,7 +669,9 @@ class RunpodBackend(JobBackend):
                 else:
                     try:
                         ping = self._session.get(
-                            jobs_ping_url, headers=self._headers(), timeout=10.0
+                            f"{jobs_ping_url}{cache_buster}",
+                            headers=self._readiness_headers(authenticated=True),
+                            timeout=10.0,
                         )
                     except requests.RequestException:
                         ping = None
@@ -669,7 +685,9 @@ class RunpodBackend(JobBackend):
                         if ping.status_code == 200:
                             try:
                                 ready = self._session.get(
-                                    ready_url, headers=self._headers(), timeout=10.0
+                                    f"{ready_url}{cache_buster}",
+                                    headers=self._readiness_headers(authenticated=True),
+                                    timeout=10.0,
                                 )
                             except requests.RequestException:
                                 ready = None

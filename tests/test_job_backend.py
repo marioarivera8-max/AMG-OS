@@ -127,10 +127,10 @@ class _FakeHttpSession:
         # /healthz is the TCP/proxy readiness probe. /jobs proves FastAPI/auth
         # are mounted, and /readyz proves Ollama/model readiness. Auto-respond
         # so queue-based tests only model POST/poll/zip traffic.
-        if self._auto_healthz_ok and url.endswith("/healthz"):
+        path = urlparse(url).path.rstrip("/")
+        if self._auto_healthz_ok and path == "/healthz":
             return _FakePodResponse(200, {"status": "ok"})
         if self._auto_healthz_ok:
-            path = urlparse(url).path.rstrip("/")
             if path == "/jobs":
                 return _FakePodResponse(200, {"job_ids": []})
             if path == "/readyz":
@@ -585,10 +585,11 @@ def test_runpod_backend_waits_for_pod_worker_healthz(runpod_backend, tmp_path, m
     video.write_bytes(b"v")
     backend.run_job(video)
 
-    healthz_calls = [c for c in session.calls if c["url"].endswith("/healthz")]
+    healthz_calls = [c for c in session.calls if urlparse(c["url"]).path.endswith("/healthz")]
     assert len(healthz_calls) == 3, f"expected 3 /healthz polls, got {len(healthz_calls)}: {healthz_calls}"
-    readyz_calls = [c for c in session.calls if c["url"].endswith("/readyz")]
+    readyz_calls = [c for c in session.calls if urlparse(c["url"]).path.endswith("/readyz")]
     assert len(readyz_calls) == 1
+    assert all("attempt=" in c["url"] for c in healthz_calls + readyz_calls)
 
 
 def test_runpod_backend_pod_worker_readiness_timeout(runpod_backend, tmp_path, monkeypatch):
@@ -643,7 +644,7 @@ def test_runpod_backend_requires_model_readyz(runpod_backend, monkeypatch):
             poll_interval_sec=0,
         )
 
-    assert any(c["url"].endswith("/readyz") for c in session.calls)
+    assert any(urlparse(c["url"]).path.endswith("/readyz") for c in session.calls)
 
 
 # --- cloud-source jobs ------------------------------------------------------
