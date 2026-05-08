@@ -68,6 +68,35 @@ def run_floor_enforcement_cascade(
     candidates = list(current_candidates)
     fallbacks_used = []
 
+    def _run_d_rescue(reason: str, deadline_overrun: bool = False) -> dict:
+        # Fallback D is deliberately CV-only. It is the emergency path when AI
+        # scanning has already burned the budget but we still need a reviewable
+        # package instead of a one-cover failure.
+        log.warn(
+            "Running Fallback D (pure CV rescue)",
+            current=len(candidates),
+            reason=reason,
+            deadline_overrun=deadline_overrun,
+        )
+        d_added = _fallback_d(
+            video_path, duration_sec,
+            exclude_timestamps={c["timestamp_sec"] for c in candidates},
+            target_count=target_count - len(candidates),
+        )
+        candidates.extend(d_added)
+        if d_added:
+            fallbacks_used.append("D")
+            log.warn("Fallback D added candidates", added=len(d_added), total=len(candidates))
+
+        floor_met = len(candidates) >= target_count
+        return {
+            "final_candidates": candidates[:target_count + 5],
+            "fallbacks_used": fallbacks_used,
+            "floor_met": floor_met,
+            "aborted": deadline_overrun and not floor_met,
+            "deadline_overrun": deadline_overrun,
+        }
+
     if len(candidates) >= target_count:
         log.info("Floor already met, no fallback needed", count=len(candidates))
         return {
@@ -93,13 +122,8 @@ def run_floor_enforcement_cascade(
             "aborted": False,
         }
 
-    if deadline_sec and time.time() > deadline_sec:
-        return {
-            "final_candidates": candidates,
-            "fallbacks_used": fallbacks_used,
-            "floor_met": False,
-            "aborted": True,
-        }
+    if deadline_sec is not None and time.time() > deadline_sec:
+        return _run_d_rescue("deadline_before_fallback_c", deadline_overrun=True)
 
     # === FALLBACK B: wider cluster expansion on existing high scorers ===
     # (We could implement this but it's similar to cluster.py with wider windows.
@@ -125,33 +149,11 @@ def run_floor_enforcement_cascade(
             "aborted": False,
         }
 
-    if deadline_sec and time.time() > deadline_sec:
-        return {
-            "final_candidates": candidates,
-            "fallbacks_used": fallbacks_used,
-            "floor_met": False,
-            "aborted": True,
-        }
+    if deadline_sec is not None and time.time() > deadline_sec:
+        return _run_d_rescue("deadline_after_fallback_c", deadline_overrun=True)
 
     # === FALLBACK D: pure CV, no AI ===
-    log.warn("Running Fallback D (pure CV rescue)", current=len(candidates))
-    d_added = _fallback_d(
-        video_path, duration_sec,
-        exclude_timestamps={c["timestamp_sec"] for c in candidates},
-        target_count=target_count - len(candidates),
-    )
-    candidates.extend(d_added)
-    if d_added:
-        fallbacks_used.append("D")
-        log.warn("Fallback D added candidates", added=len(d_added), total=len(candidates))
-
-    floor_met = len(candidates) >= target_count
-    return {
-        "final_candidates": candidates[:target_count + 5],
-        "fallbacks_used": fallbacks_used,
-        "floor_met": floor_met,
-        "aborted": False,
-    }
+    return _run_d_rescue("normal_floor_enforcement")
 
 
 def _fallback_a(all_scored: List[dict], exclude: List[dict]) -> List[dict]:

@@ -382,8 +382,14 @@ def process_scene(
 
     # --- PHASE 9: FLOOR ENFORCEMENT ---
     fallbacks_used = []
-    if len(candidates) < COVER_FLOOR and time.time() < deadline:
-        log.warn(f"Floor not met ({len(candidates)} < {COVER_FLOOR}), running cascade")
+    if len(candidates) < COVER_FLOOR:
+        if time.time() >= deadline:
+            log.warn(
+                f"Floor not met ({len(candidates)} < {COVER_FLOOR}) after deadline, "
+                "running emergency cascade"
+            )
+        else:
+            log.warn(f"Floor not met ({len(candidates)} < {COVER_FLOOR}), running cascade")
         with phase_timer("floor_enforcement") as t:
             cascade_result = run_floor_enforcement_cascade(
                 video_path, duration_sec, candidates, all_scored, calibration,
@@ -393,6 +399,9 @@ def process_scene(
             "duration_sec": t.elapsed,
             "fallbacks_used": cascade_result["fallbacks_used"],
             "floor_met": cascade_result["floor_met"],
+            "aborted": cascade_result.get("aborted", False),
+            "deadline_overrun": cascade_result.get("deadline_overrun", False),
+            "final_count": len(cascade_result["final_candidates"]),
         }
         candidates = cascade_result["final_candidates"]
         fallbacks_used = cascade_result["fallbacks_used"]
