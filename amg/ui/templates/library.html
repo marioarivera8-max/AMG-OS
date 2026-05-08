@@ -39,12 +39,18 @@
     <div class="sidenav-section">Smart filters</div>
     <a href="/library?sort=highest_score">Top-scored</a>
     <a href="/library?status=failed">No covers / failed</a>
+    <a href="/library?sort=newest&text_fallback=1">Text fallback used</a>
   </aside>
 
   <div>
     {% if delete_notice %}
       <div class="card" style="margin-bottom: 12px; border-color: color-mix(in oklab, var(--warn) 40%, var(--line));">
         <div class="muted" style="font-size: 12px;">{{ delete_notice }}</div>
+      </div>
+    {% endif %}
+    {% if rerun_notice %}
+      <div class="card" style="margin-bottom: 12px; border-color: color-mix(in oklab, var(--ok) 35%, var(--line));">
+        <div class="muted" style="font-size: 12px;">{{ rerun_notice }}</div>
       </div>
     {% endif %}
     {% if stats.review > 0 %}
@@ -88,20 +94,57 @@
           <option value="highest_score" {% if filter.sort == 'highest_score' %}selected{% endif %}>Sort: Highest score</option>
           <option value="lowest_score" {% if filter.sort == 'lowest_score' %}selected{% endif %}>Sort: Lowest score</option>
         </select>
+        <label class="row" style="gap: 6px; font-size: 12px;">
+          <input
+            type="checkbox"
+            name="text_fallback"
+            value="1"
+            {% if filter.text_fallback in ['1', 'true', 'yes', 'on'] %}checked{% endif %}
+          />
+          Text fallback used
+        </label>
         <input type="hidden" name="limit" value="{{ filter.limit or '24' }}" />
         <button type="submit" class="btn">Filter</button>
-        {% if filter.q or filter.studio or filter.status or (filter.sort and filter.sort != 'newest') %}
+        {% if filter.q or filter.studio or filter.status or filter.text_fallback or (filter.sort and filter.sort != 'newest') %}
           <a href="/library" class="btn btn-ghost">Clear</a>
         {% endif %}
       </div>
     </form>
 
     <div class="row library-sort-tabs" style="margin-bottom: 10px;">
-      <a class="pill {% if filter.sort == 'newest' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&sort=newest&limit={{ filter.limit or '24' }}">Newest</a>
-      <a class="pill {% if filter.sort == 'action_queue' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&sort=action_queue&limit={{ filter.limit or '24' }}">Action queue</a>
-      <a class="pill {% if filter.sort == 'highest_score' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&sort=highest_score&limit={{ filter.limit or '24' }}">Highest score</a>
-      <a class="pill {% if filter.sort == 'lowest_score' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&sort=lowest_score&limit={{ filter.limit or '24' }}">Lowest score</a>
+      <a class="pill {% if filter.sort == 'newest' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&text_fallback={{ filter.text_fallback or '' }}&sort=newest&limit={{ filter.limit or '24' }}">Newest</a>
+      <a class="pill {% if filter.sort == 'action_queue' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&text_fallback={{ filter.text_fallback or '' }}&sort=action_queue&limit={{ filter.limit or '24' }}">Action queue</a>
+      <a class="pill {% if filter.sort == 'highest_score' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&text_fallback={{ filter.text_fallback or '' }}&sort=highest_score&limit={{ filter.limit or '24' }}">Highest score</a>
+      <a class="pill {% if filter.sort == 'lowest_score' %}info{% endif %}" href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&text_fallback={{ filter.text_fallback or '' }}&sort=lowest_score&limit={{ filter.limit or '24' }}">Lowest score</a>
     </div>
+
+    {% if filter.text_fallback in ['1', 'true', 'yes', 'on'] and total_filtered > 0 %}
+      <div class="card" style="margin-bottom: 12px;">
+        <div class="between">
+          <div>
+            <h3 class="card-section-title" style="margin: 0;">Bulk rerun fallback-filtered scenes</h3>
+            <div class="muted" style="font-size: 12px; margin-top: 4px;">
+              This will queue reruns for all {{ total_filtered }} filtered scene(s) with source paths available.
+            </div>
+          </div>
+          <button type="button" class="btn" data-rerun-start>Re-run all filtered scenes</button>
+        </div>
+        <form method="post" action="/library/rerun-filtered" data-rerun-confirm hidden style="margin-top: 10px; border: 1px solid color-mix(in oklab, var(--warn) 35%, var(--line)); border-radius: 8px; padding: 10px;">
+          <input type="hidden" name="q" value="{{ filter.q or '' }}" />
+          <input type="hidden" name="studio" value="{{ filter.studio or '' }}" />
+          <input type="hidden" name="status" value="{{ filter.status or '' }}" />
+          <input type="hidden" name="sort" value="{{ filter.sort or 'newest' }}" />
+          <input type="hidden" name="text_fallback" value="{{ filter.text_fallback or '' }}" />
+          <div class="muted" style="font-size: 12px; margin-bottom: 8px;">
+            Queue reruns now? This can consume GPU time if many scenes are queued.
+          </div>
+          <div class="row" style="gap: 8px;">
+            <button type="submit" class="btn">Yes, queue all filtered reruns</button>
+            <button type="button" class="btn btn-ghost" data-rerun-cancel>Cancel</button>
+          </div>
+        </form>
+      </div>
+    {% endif %}
 
     <div class="muted" style="font-size: 12px; margin-bottom: 10px;">
       Showing {{ scenes | length }} of {{ total_filtered }} matches
@@ -136,6 +179,16 @@
               <div class="cover-meta">
                 {% if s.studio %}{{ s.studio }} · {% endif %}{{ s.covers }} covers{% if s.duration_str %} · {{ s.duration_str }}{% endif %}
               </div>
+              {% if s.rule_pack_id %}
+                <div style="margin-top: 4px;">
+                  <span class="pill neutral">rule {{ s.rule_pack_id }}{% if s.rule_pack_mode %} · {{ s.rule_pack_mode }}{% endif %}</span>
+                </div>
+              {% endif %}
+              {% if s.text_model_fallback_used %}
+                <div style="margin-top: 4px;">
+                  <span class="pill warn">text fallback used</span>
+                </div>
+              {% endif %}
               {% if s.title %}
                 <div class="muted ellipsis" style="font-size: 11px;" title="{{ s.title }}">{{ s.title }}</div>
               {% else %}
@@ -173,7 +226,7 @@
         <div style="margin-top: 12px;">
           <a
             class="btn"
-            href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&sort={{ filter.sort or 'newest' }}&limit={{ next_limit }}"
+            href="/library?q={{ filter.q or '' }}&studio={{ filter.studio or '' }}&status={{ filter.status or '' }}&text_fallback={{ filter.text_fallback or '' }}&sort={{ filter.sort or 'newest' }}&limit={{ next_limit }}"
           >
             Load more
           </a>
@@ -187,6 +240,20 @@
 
 <script>
   (function() {
+    var rerunStart = document.querySelector('[data-rerun-start]');
+    var rerunCancel = document.querySelector('[data-rerun-cancel]');
+    var rerunConfirm = document.querySelector('[data-rerun-confirm]');
+    if (rerunStart && rerunCancel && rerunConfirm) {
+      rerunStart.addEventListener('click', function() {
+        rerunConfirm.hidden = false;
+        rerunStart.hidden = true;
+      });
+      rerunCancel.addEventListener('click', function() {
+        rerunConfirm.hidden = true;
+        rerunStart.hidden = false;
+      });
+    }
+
     document.querySelectorAll('.library-scene-card').forEach(function(card) {
       var startBtn = card.querySelector('[data-delete-start]');
       var cancelBtn = card.querySelector('[data-delete-cancel]');

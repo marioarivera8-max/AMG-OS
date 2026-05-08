@@ -54,7 +54,7 @@
       }
 
       /* === Layout === */
-      .wrap { max-width: 1440px; margin: 0 auto; padding: 0 24px 84px; }
+      .wrap { max-width: 1440px; margin: 0 auto; padding: 0 18px 84px; }
       .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
       .col { display: flex; flex-direction: column; gap: 12px; }
       .grid { display: grid; gap: 14px; }
@@ -88,20 +88,22 @@
         background: linear-gradient(135deg, var(--accent), var(--accent-ink));
         clip-path: polygon(50% 0, 100% 100%, 0 100%);
       }
-      .nav { display: flex; gap: 4px; }
+      .nav {
+        display: flex;
+        gap: 2px;
+        border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
+        border-radius: 999px;
+        padding: 2px;
+      }
       .nav a {
         color: var(--muted);
         text-decoration: none;
-        padding: 8px 12px;
-        border-radius: 8px;
+        padding: 7px 12px;
+        border-radius: 999px;
         font-size: 14px;
       }
       .nav a:hover { color: var(--text); background: var(--bg-2); }
-      .nav a.active { color: var(--text); position: relative; }
-      .nav a.active::after {
-        content: ""; position: absolute; left: 12px; right: 12px; bottom: 2px;
-        height: 2px; background: var(--accent); border-radius: var(--radius-sm);
-      }
+      .nav a.active { color: var(--paper); background: var(--ink); }
       .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
       .avatar {
         width: 28px; height: 28px; border-radius: 50%;

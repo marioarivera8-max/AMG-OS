@@ -44,8 +44,9 @@ def test_process_jobs_partial_returns_queues():
     res = client.get("/partials/process-jobs")
     assert res.status_code == 200
     body = res.text
-    assert 'id="active-jobs-stack"' in body
-    assert 'id="completed-jobs-stack"' in body
+    assert 'class="process-board"' in body
+    assert "RUNNING" in body
+    assert "QUEUED" in body
 
 
 def test_feedback_route_accepts_filter_params():

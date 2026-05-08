@@ -313,6 +313,8 @@ def build_enriched_title_prompt(
     title_tone: str = "edgy",
     language: str = "en",
     n_suggestions: int = 5,
+    top_examples: Optional[List[dict]] = None,
+    retrieval_scope: str = "titles",
 ) -> str:
     """Title-generation prompt enriched with vision insight + position rollup.
 
@@ -353,6 +355,8 @@ def build_enriched_title_prompt(
             "TONE PROFILE: Edgy — energetic, explicit, high-conversion retail voice while still factual "
             "to what is visible in-scene."
         )
+    retrieval_scope_note = _retrieval_scope_note(retrieval_scope)
+    examples_block = _format_top_examples(top_examples or [])
 
     return f"""Generate retail-optimized titles AND a marketing-ready long description for an adult VOD scene.
 
@@ -370,8 +374,11 @@ SCENE CONTEXT:
   Position rollup across selected covers: {pos_str}
   Seed categories from scene signals: {seed_categories}
   Seed tags from scene signals: {seed_tags}
+  Retrieval scope: {retrieval_scope}
   Requested title tone: {tone}
   Language: {language}
+  Top-K approved examples:
+{examples_block}
 
 REQUIREMENTS:
   - Each title 30-80 characters, in the requested language.
@@ -380,6 +387,9 @@ REQUIREMENTS:
   - Avoid clichéd words: "wild", "crazy", "naughty".
   - Do not repeat near-identical title phrasing across TITLE_1..TITLE_5.
   - Keep punctuation clean: no emoji, no all-caps shouting, no repeated exclamation marks.
+  - Example block is for style guidance only; never copy exact title or sentence fragments.
+  - Never reuse distinctive proper-noun combinations from examples unless present in this scene context.
+  - Rewrite in fresh phrasing and keep it scene-specific.
   - If a lead performer is provided, include that performer name in EVERY title.
   - The long description must mention the lead performer by name at least once.
   - Write with commercial energy (confident, explicit, sellable), not bland catalog prose.
@@ -400,6 +410,7 @@ REQUIREMENTS:
 
 {market_note}
 {tone_note}
+{retrieval_scope_note}
 
 OUTPUT FORMAT (REQUIRED, no preamble):
 
@@ -424,6 +435,35 @@ TAG_SUGGESTIONS: <comma-separated tags, 15-30 items>
 
 END
 """
+
+
+def _format_top_examples(rows: List[dict]) -> str:
+    if not rows:
+        return "  (none)"
+    lines: List[str] = []
+    for idx, row in enumerate(rows[:5], start=1):
+        title = str((row or {}).get("title") or "").strip() or "(no title)"
+        studio = str((row or {}).get("studio") or "").strip() or "unknown"
+        scene_type = str((row or {}).get("scene_type") or "").strip() or "STANDARD"
+        genres = ", ".join((row or {}).get("genres") or []) or "none"
+        desc = str((row or {}).get("long_description") or "").strip()
+        if len(desc) > 180:
+            desc = desc[:180].rstrip() + "..."
+        lines.append(
+            f"  EXAMPLE_{idx}: studio={studio}; type={scene_type}; genres={genres}; title={title}; description={desc}"
+        )
+    return "\n".join(lines)
+
+
+def _retrieval_scope_note(scope: str) -> str:
+    clean = str(scope or "titles").strip().lower()
+    if clean == "titles":
+        return "RETRIEVAL POLICY: Use retrieved examples only for title style and lexical specificity."
+    if clean == "titles_description":
+        return "RETRIEVAL POLICY: Use retrieved examples for titles and long-description structure."
+    if clean == "full":
+        return "RETRIEVAL POLICY: Use retrieved examples for titles, long description, tags, and categories."
+    return "RETRIEVAL POLICY: Use retrieval conservatively and prioritize the current scene context."
 
 
 def build_title_generation_prompt(

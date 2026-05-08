@@ -32,6 +32,7 @@ import cv2
 
 from amg.scoring.ai_client import AIClient
 from amg.config import TITLE_TONE_DEFAULT
+from amg.learning.example_bank import retrieve_top_k_examples
 from amg.scoring.prompt import build_scene_insight_prompt, build_enriched_title_prompt
 from amg.scoring.market_profile import (
     build_seed_taxonomy,
@@ -173,6 +174,17 @@ def generate_titles_with_insight(
         }
 
     seed_taxonomy = build_seed_taxonomy(genres, position_summary)
+    retrieval_stage = _resolve_retrieval_stage(rule_pack)
+    retrieval_scope = _retrieval_scope_for_stage(retrieval_stage)
+    retrieval_top_k = _resolve_retrieval_top_k(rule_pack)
+    top_examples = retrieve_top_k_examples(
+        studio=studio,
+        scene_type=scene_type,
+        genres=genres,
+        position_summary=position_summary,
+        performers=performers,
+        top_k=retrieval_top_k,
+    ) if retrieval_scope != "off" else []
 
     prompt = build_enriched_title_prompt(
         studio=studio,
@@ -186,6 +198,8 @@ def generate_titles_with_insight(
         title_tone=title_tone,
         language=language,
         n_suggestions=n_suggestions,
+        top_examples=top_examples,
+        retrieval_scope=retrieval_scope if retrieval_scope != "off" else "titles",
     )
     response = ai_client.generate_text(prompt)
     if not response.success:
@@ -271,6 +285,9 @@ def generate_titles_with_insight(
         "text_model_fallback_used": bool(response_meta.get("fallback_model_used")),
         "text_model_fallback_model": response_meta.get("fallback_model_used"),
         "rule_pack_id": (rule_pack or {}).get("rule_pack_id") if isinstance(rule_pack, dict) else None,
+        "retrieval_stage": retrieval_stage,
+        "retrieval_scope": retrieval_scope,
+        "retrieved_examples_count": len(top_examples),
     }
 
 
@@ -806,3 +823,29 @@ def _annotate(titles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "warnings": _check_warnings(text),
         })
     return out
+
+
+def _resolve_retrieval_stage(rule_pack: Optional[Dict[str, Any]]) -> str:
+    constraints = ((rule_pack or {}).get("constraints") or {}) if isinstance(rule_pack, dict) else {}
+    stage = str(constraints.get("retrieval_stage") or "").strip().lower()
+    if stage in {"off", "titles", "titles_description", "full"}:
+        return stage
+    if rule_pack:
+        return "titles"
+    return "off"
+
+
+def _resolve_retrieval_top_k(rule_pack: Optional[Dict[str, Any]]) -> int:
+    constraints = ((rule_pack or {}).get("constraints") or {}) if isinstance(rule_pack, dict) else {}
+    try:
+        value = int(constraints.get("retrieval_top_k", 3))
+    except (TypeError, ValueError):
+        value = 3
+    return max(1, min(value, 5))
+
+
+def _retrieval_scope_for_stage(stage: str) -> str:
+    s = str(stage or "off").strip().lower()
+    if s in {"off", "titles", "titles_description", "full"}:
+        return s
+    return "off"

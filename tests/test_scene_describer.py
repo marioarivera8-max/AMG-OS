@@ -221,3 +221,62 @@ class TestGenerateTitlesWithInsight:
         assert "wild" not in desc
         assert "naughty" not in desc
         assert "crazy" not in desc
+
+    def test_retrieval_examples_injected_into_prompt(self, monkeypatch):
+        import amg.scoring.scene_describer as sd
+
+        class _Client:
+            def __init__(self):
+                self.last_prompt = ""
+
+            def is_alive(self):
+                return True
+
+            def generate_text(self, prompt):
+                self.last_prompt = prompt
+                return AIResponse(
+                    success=True,
+                    raw_text=(
+                        "TITLE_1: Alice POV Bedroom Session\n"
+                        "STYLE_1: performer_led\n"
+                        "TITLE_2: Bedroom POV Focus with Alice\n"
+                        "STYLE_2: scene_descriptive\n"
+                        "LONG_DESCRIPTION: Alice leads a clear POV scene with bedroom framing.\n"
+                        "CATEGORY_SUGGESTIONS: POV, Blowjob, HD Porn\n"
+                        "TAG_SUGGESTIONS: pov, blowjob, eye contact, bedroom\n"
+                        "END\n"
+                    ),
+                )
+
+        monkeypatch.setattr(
+            sd,
+            "retrieve_top_k_examples",
+            lambda **_: [
+                {
+                    "scene_id": "scene_ref_1",
+                    "studio": "StudioX",
+                    "scene_type": "STANDARD",
+                    "genres": ["POV"],
+                    "title": "Reference Title",
+                    "long_description": "Reference long description.",
+                    "tags": ["pov"],
+                    "categories": ["POV"],
+                    "quality_score": 0.9,
+                }
+            ],
+        )
+        client = _Client()
+        out = sd.generate_titles_with_insight(
+            studio="StudioX",
+            performers=["Alice Blue"],
+            scene_type="STANDARD",
+            genres=["POV"],
+            description="desc",
+            insight=SceneInsight(setting="bedroom", mood="intense"),
+            position_summary={"DOGGY": 1},
+            ai_client=client,
+            rule_pack={"rule_pack_id": "pack_demo", "constraints": {"retrieval_stage": "titles"}},
+        )
+        assert "EXAMPLE_1:" in client.last_prompt
+        assert out["retrieved_examples_count"] == 1
+        assert out["retrieval_stage"] == "titles"

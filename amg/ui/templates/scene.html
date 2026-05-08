@@ -267,6 +267,16 @@
               <input form="review-form" type="number" name="soft_thumb_score" min="0" max="100" step="0.5" placeholder="0-100 (or 0-10)" value="{{ form_state.soft_thumb_score if form_state else '' }}" />
             </label>
           </div>
+          <label class="field" style="margin-top: 10px;">
+            <span>soft pick reason</span>
+            <input
+              form="review-form"
+              type="text"
+              name="soft_thumb_reason"
+              placeholder="optional reason for keep/reject"
+              value="{{ form_state.soft_thumb_reason if form_state else '' }}"
+            />
+          </label>
           <div class="muted" style="font-size: 12px; margin-top: 6px;">
             This writes explicit feedback for the auto-picked non-nude thumbnail.
           </div>
@@ -780,7 +790,11 @@
     });
 
     coverCards.forEach(function(card) {
-      card.addEventListener('click', function() {
+      card.addEventListener('click', function(e) {
+        // Do not steal focus from editable controls inside a card.
+        if (e.target && e.target.closest('input, textarea, select, button, a, label')) {
+          return;
+        }
         var idx = Number(card.getAttribute('data-cover-idx') || 0);
         setActiveIndex(idx);
       });

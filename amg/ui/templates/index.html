@@ -50,12 +50,8 @@
   </div>
 </form>
 
-<div class="grid grid-2 mt-24">
-  <div>
-    <div class="between process-panel-head">
-      <h3 class="card-section-title" style="margin: 0;">Live queue</h3>
-      <span class="muted" style="font-size: 12px;">One at a time, FIFO order</span>
-    </div>
+<div class="grid grid-2 mt-24 process-main-grid">
+  <div class="process-left-col">
     <div
       id="process-jobs-panel"
       hx-get="/partials/process-jobs"
@@ -66,7 +62,7 @@
     </div>
   </div>
 
-  <div>
+  <div class="process-right-col">
     <div class="between process-panel-head" style="margin-bottom: 10px;">
       <h3 class="card-section-title" style="margin: 0;">Recent Scenes</h3>
       <a href="/library" style="font-size: 12px;">All scenes →</a>

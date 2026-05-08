@@ -1,4 +1,4 @@
-<div id="job-{{ job.job_id }}" class="card process-job-card">
+<div id="job-{{ job.job_id }}" class="card process-job-card status-{{ job.status }}">
   <div class="between">
     <div style="display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1;">
       <strong class="ellipsis">{{ job.scene_id or "(resolving…)" }}</strong>
@@ -29,7 +29,7 @@
     </div>
   {% endif %}
 
-  {% if job.phases %}
+  {% if job.phases and job.status == "running" %}
     <div class="phase-row" style="margin-top: 10px;">
       {% for ph in job.phases %}
         <span class="phase {{ ph.cls }}">{{ ph.label }}{% if ph.cls == 'done' %} ✓{% endif %}</span>
@@ -39,7 +39,7 @@
 
   <div class="process-job-message" style="margin-top: 10px; font-size: 13px;">{{ job.message }}</div>
 
-  {% if job.log_tail %}
+  {% if job.log_tail and job.status == "running" %}
     <pre class="log" style="margin-top: 10px;">{% for ln in job.log_tail %}{{ ln }}
 {% endfor %}</pre>
   {% endif %}

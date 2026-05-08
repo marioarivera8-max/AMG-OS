@@ -25,6 +25,34 @@ from amg.learning.retrain_scoring import (
     list_retrain_runs,
     promote_score_candidate,
 )
+from amg.learning.rule_packs import (
+    save_rule_pack,
+    load_rule_pack,
+    list_rule_packs,
+    get_active_rule_pointer,
+    set_active_rule_pack,
+    deactivate_rule_pack,
+    resolve_rule_pack_for_scene,
+)
+from amg.learning.rule_lab import run_rule_research, generate_candidate_rule_pack
+from amg.learning.rule_evaluator import (
+    evaluate_rule_pack_kpis,
+    format_rule_kpi_report,
+    evaluate_rule_promotion_gates,
+)
+from amg.learning.rule_promotion import (
+    run_rule_eval,
+    list_rule_eval_runs,
+    promote_rule_pack_from_run,
+    rollback_active_rule_pack,
+    advance_rule_pack_retrieval_stage_from_run,
+)
+from amg.learning.example_bank import (
+    export_approved_example_bank,
+    retrieve_top_k_examples,
+)
+from amg.learning.doc_example_curator import curate_examples_document
+from amg.learning.vod_cover_seed_ingest import ingest_vod_cover_seed_zip
 
 __all__ = [
     "record_scene_outcome",
@@ -51,4 +79,25 @@ __all__ = [
     "evaluate_retrain_gates",
     "list_retrain_runs",
     "promote_score_candidate",
+    "save_rule_pack",
+    "load_rule_pack",
+    "list_rule_packs",
+    "get_active_rule_pointer",
+    "set_active_rule_pack",
+    "deactivate_rule_pack",
+    "resolve_rule_pack_for_scene",
+    "run_rule_research",
+    "generate_candidate_rule_pack",
+    "evaluate_rule_pack_kpis",
+    "format_rule_kpi_report",
+    "evaluate_rule_promotion_gates",
+    "run_rule_eval",
+    "list_rule_eval_runs",
+    "promote_rule_pack_from_run",
+    "rollback_active_rule_pack",
+    "advance_rule_pack_retrieval_stage_from_run",
+    "export_approved_example_bank",
+    "retrieve_top_k_examples",
+    "curate_examples_document",
+    "ingest_vod_cover_seed_zip",
 ]

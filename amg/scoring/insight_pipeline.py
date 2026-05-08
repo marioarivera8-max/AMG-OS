@@ -26,6 +26,7 @@ from amg.scoring.scene_describer import (
     generate_titles_with_insight,
     summarize_positions,
 )
+from amg.learning.rule_packs import resolve_rule_pack_for_scene
 from amg.review.distribution_gate import validate_metadata_for_platforms
 from amg.utils.logging import get_logger
 
@@ -69,6 +70,8 @@ def generate_scene_insight_payload(
     )
     contact_sheet = _resolve_contact_sheet(work_dir)
     cover_paths = [Path(c["path"]) for c in (saved_covers or []) if c.get("path")]
+    rule_resolution = resolve_rule_pack_for_scene(video_path.parent.name or video_path.stem)
+    active_rule_pack = rule_resolution.get("rule_pack") if isinstance(rule_resolution, dict) else None
 
     insight_obj = describe_scene_from_covers(
         contact_sheet_path=contact_sheet,
@@ -86,6 +89,7 @@ def generate_scene_insight_payload(
         position_summary=position_summary,
         title_tone=title_tone,
         ai_client=ai_client,
+        rule_pack=active_rule_pack,
     )
     target_platforms = list(PLATFORM_REQUIREMENTS.keys())
     metadata_initial = _validate_generated_metadata(
@@ -146,8 +150,24 @@ def generate_scene_insight_payload(
         "ai_categories": title_payload.get("categories", []),
         "ai_tags": title_payload.get("tags", []),
         "ai_used": title_payload.get("ai_used", False),
+        "text_model_primary": getattr(ai_client, "text_model", None) if ai_client else None,
         "vision_model_used": getattr(ai_client, "vision_model", None) if ai_client else None,
-        "text_model_used": getattr(ai_client, "text_model", None) if ai_client else None,
+        "text_model_used": title_payload.get("text_model_effective") or (getattr(ai_client, "text_model", None) if ai_client else None),
+        "text_model_fallback_used": bool(title_payload.get("text_model_fallback_used", False)),
+        "text_model_fallback_model": title_payload.get("text_model_fallback_model"),
+        "retrieval_stage": title_payload.get("retrieval_stage"),
+        "retrieval_scope": title_payload.get("retrieval_scope"),
+        "retrieved_examples_count": int(title_payload.get("retrieved_examples_count", 0) or 0),
+        "rule_pack_id": rule_resolution.get("rule_pack_id") if isinstance(rule_resolution, dict) else None,
+        "rule_pack_applied": bool(rule_resolution.get("applied")) if isinstance(rule_resolution, dict) else False,
+        "rule_pack_reason": rule_resolution.get("reason") if isinstance(rule_resolution, dict) else "unknown",
+        "rule_pack_mode": rule_resolution.get("mode") if isinstance(rule_resolution, dict) else "off",
+        "rule_pack_canary_pct": float(rule_resolution.get("canary_pct") or 0.0)
+        if isinstance(rule_resolution, dict)
+        else 0.0,
+        "rule_pack_canary_bucket": rule_resolution.get("canary_bucket")
+        if isinstance(rule_resolution, dict)
+        else None,
         "metadata_validation_passed": not bool(metadata_final.get("blockers")),
         "metadata_blockers_initial": metadata_initial.get("blockers", []),
         "metadata_blockers_final": metadata_final.get("blockers", []),

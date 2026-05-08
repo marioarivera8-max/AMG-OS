@@ -24,6 +24,7 @@ from amg.config import (
     OLLAMA_API_URL,
     VISION_MODEL,
     TEXT_MODEL,
+    TEXT_MODEL_FALLBACK,
     AI_IMAGE_SIZE,
     AI_CALL_TIMEOUT_SEC,
     AI_CALL_RETRY_COUNT,
@@ -59,6 +60,7 @@ class AIClient:
         api_url: str = OLLAMA_API_URL,
         model: Optional[str] = None,
         text_model: Optional[str] = None,
+        text_model_fallback: Optional[str] = None,
         timeout_sec: int = AI_CALL_TIMEOUT_SEC,
         text_timeout_sec: int = TEXT_GEN_TIMEOUT_SEC,
     ):
@@ -78,6 +80,11 @@ class AIClient:
             or model
             or os.environ.get("AMG_TEXT_MODEL_OVERRIDE")
             or TEXT_MODEL
+        )
+        self.text_model_fallback = (
+            text_model_fallback
+            or os.environ.get("AMG_TEXT_MODEL_FALLBACK_OVERRIDE")
+            or TEXT_MODEL_FALLBACK
         )
         # Keep legacy `model` attribute for older call sites/logging.
         self.model = self.vision_model
@@ -227,21 +234,65 @@ class AIClient:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        result = self._generate_text_with_model(
+            model_name=self.text_model,
+            messages=messages,
+            timeout=timeout_sec or self.text_timeout_sec,
+        )
+        if result.success:
+            result.duration_sec = time.time() - start
+            return result
+
+        fallback = (self.text_model_fallback or "").strip()
+        should_retry_fallback = (
+            bool(fallback)
+            and fallback != self.text_model
+            and result.error_code in {"E_AI_PARSE_FAIL", "E_AI_TIMEOUT", "E_AI_UNAVAILABLE"}
+        )
+        if should_retry_fallback:
+            second = self._generate_text_with_model(
+                model_name=fallback,
+                messages=messages,
+                timeout=timeout_sec or self.text_timeout_sec,
+            )
+            if second.success:
+                second.duration_sec = time.time() - start
+                second.extras = {
+                    **(second.extras or {}),
+                    "fallback_model_used": fallback,
+                    "primary_text_model_failed": self.text_model,
+                }
+                return second
+            result.extras = {
+                **(result.extras or {}),
+                "fallback_model_attempted": fallback,
+                "fallback_error_code": second.error_code,
+            }
+
+        result.duration_sec = time.time() - start
+        return result
+
+    def _generate_text_with_model(
+        self,
+        *,
+        model_name: str,
+        messages: list,
+        timeout: int,
+    ) -> AIResponse:
         payload = {
-            "model": self.text_model,
+            "model": model_name,
             "messages": messages,
             "stream": False,
             "options": {
-                "temperature": TEXT_GEN_TEMPERATURE,  # Higher temp for creative title generation
+                "temperature": TEXT_GEN_TEMPERATURE,
                 "num_predict": 400,
             },
         }
-
         try:
             response = self._session.post(
                 self.api_url,
                 json=payload,
-                timeout=timeout_sec or self.text_timeout_sec,
+                timeout=timeout,
             )
             if response.status_code == 200:
                 data = response.json()
@@ -249,27 +300,27 @@ class AIClient:
                 return AIResponse(
                     success=True,
                     raw_text=raw_text,
-                    duration_sec=time.time() - start,
+                    extras={"model_used": model_name},
                 )
             return AIResponse(
                 success=False,
                 error_code="E_AI_PARSE_FAIL",
                 error_message=f"HTTP {response.status_code}",
-                duration_sec=time.time() - start,
+                extras={"model_used": model_name, "status_code": response.status_code},
             )
         except requests.exceptions.Timeout:
             return AIResponse(
                 success=False,
                 error_code="E_AI_TIMEOUT",
-                error_message=f"Timeout after {timeout_sec or self.text_timeout_sec}s",
-                duration_sec=time.time() - start,
+                error_message=f"Timeout after {timeout}s",
+                extras={"model_used": model_name},
             )
         except Exception as e:
             return AIResponse(
                 success=False,
                 error_code="E_AI_UNAVAILABLE",
                 error_message=str(e),
-                duration_sec=time.time() - start,
+                extras={"model_used": model_name},
             )
 
     def is_alive(self) -> bool:

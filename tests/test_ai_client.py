@@ -23,6 +23,21 @@ class _Session:
         return _Resp(200, {"models": []})
 
 
+class _RetrySession:
+    def __init__(self, responses):
+        self.posts = []
+        self._responses = list(responses)
+
+    def post(self, _url, json=None, timeout=None):
+        self.posts.append({"json": json, "timeout": timeout})
+        if self._responses:
+            return self._responses.pop(0)
+        return _Resp()
+
+    def get(self, _url, timeout=None):
+        return _Resp(200, {"models": []})
+
+
 def test_ai_client_routes_vision_and_text_models_separately():
     from amg.scoring.ai_client import AIClient
 
@@ -49,3 +64,27 @@ def test_ai_client_uses_env_overrides_for_both_models(monkeypatch):
     client = AIClient()
     assert client.vision_model == "vision-env-model"
     assert client.text_model == "text-env-model"
+
+
+def test_ai_client_text_generation_falls_back_to_secondary_model():
+    from amg.scoring.ai_client import AIClient
+
+    client = AIClient(
+        model="vision-model-x",
+        text_model="text-primary",
+        text_model_fallback="text-fallback",
+    )
+    session = _RetrySession(
+        responses=[
+            _Resp(404, {"error": "model not found"}),
+            _Resp(200, {"message": {"content": "fallback output"}}),
+        ]
+    )
+    client._session = session
+
+    result = client.generate_text("write metadata")
+
+    assert result.success is True
+    assert result.raw_text == "fallback output"
+    assert session.posts[0]["json"]["model"] == "text-primary"
+    assert session.posts[1]["json"]["model"] == "text-fallback"

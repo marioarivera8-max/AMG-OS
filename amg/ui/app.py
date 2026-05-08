@@ -12,6 +12,7 @@ import uuid
 import zipfile
 from collections import deque
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import quote_plus
@@ -34,6 +35,7 @@ from amg.config import (
 )
 from amg.ingest.inventory import VIDEO_EXTENSIONS, discover_scenes
 from amg.learning.feedback_eval import evaluate_feedback, load_feedback_rows
+from amg.learning.example_bank import export_approved_example_bank
 from amg.scoring.insight_pipeline import generate_scene_insight_payload
 from amg.review.distribution_gate import validate_metadata_for_platforms
 from amg.utils.logging import get_logger
@@ -349,6 +351,7 @@ def _build_review_form_state(
             if (reviewed.get("soft_thumbnail_review") or {}).get("score_100") is not None
             else ""
         ),
+        "soft_thumb_reason": _str_or_empty(((reviewed.get("soft_thumbnail_review") or {}).get("reason")) or ""),
         "per_cover": {},
     }
 
@@ -487,6 +490,7 @@ def _persist_review_to_decision_log(
     rule_pack_id: Optional[str] = None,
     rule_pack_applied: Optional[bool] = None,
     rule_pack_mode: Optional[str] = None,
+    metadata_learning_signals: Optional[dict] = None,
 ) -> None:
     """
     Persist review choices back into decision log for downstream learning.
@@ -517,6 +521,9 @@ def _persist_review_to_decision_log(
         }
 
     review = dlog.get("review") if isinstance(dlog.get("review"), dict) else {}
+    metadata_learning_signals = (
+        metadata_learning_signals if isinstance(metadata_learning_signals, dict) else {}
+    )
     review.update(
         {
             "timestamp": _utc_now_isoz(),
@@ -533,6 +540,12 @@ def _persist_review_to_decision_log(
             "rule_pack_id": rule_pack_id or None,
             "rule_pack_applied": bool(rule_pack_applied) if rule_pack_applied is not None else None,
             "rule_pack_mode": rule_pack_mode or None,
+            "title_edit_distance": metadata_learning_signals.get("title_edit_distance"),
+            "description_edit_distance": metadata_learning_signals.get("description_edit_distance"),
+            "tags_edit_distance": metadata_learning_signals.get("tags_edit_distance"),
+            "categories_edit_distance": metadata_learning_signals.get("categories_edit_distance"),
+            "metadata_acceptance_label": metadata_learning_signals.get("metadata_acceptance_label"),
+            "metadata_edit_reason_codes": metadata_learning_signals.get("metadata_edit_reason_codes") or [],
         }
     )
     dlog["review"] = review
@@ -973,8 +986,9 @@ def _append_feedback_rows(
         # Optional feedback row for soft thumbnail auto-pick.
         soft_decision = (form.get("soft_thumb_decision") or "").strip().lower()
         soft_score_raw = (form.get("soft_thumb_score") or "").strip()
+        soft_reason = (form.get("soft_thumb_reason") or "").strip()
         soft_score_100 = _parse_user_score_100(soft_score_raw)
-        if soft_decision in {"keep", "reject"} or soft_score_raw:
+        if soft_decision in {"keep", "reject"} or soft_score_raw or soft_reason:
             soft_row = {
                 "timestamp": ts,
                 "scene_id": scene_id,
@@ -999,7 +1013,7 @@ def _append_feedback_rows(
                     "decision": soft_decision if soft_decision in {"keep", "reject"} else None,
                     "score_input": soft_score_raw or None,
                     "score_100": soft_score_100,
-                    "reason": None,
+                    "reason": soft_reason or None,
                     "title_override": title_override or None,
                     "title_tone": title_tone or None,
                     "notes": notes or None,
@@ -1512,6 +1526,89 @@ def _parse_csv_tokens(raw: str, *, title_case: bool = False, lowercase: bool = F
         seen.add(k)
         out.append(t)
     return out
+
+
+def _normalized_edit_distance(lhs: Optional[str], rhs: Optional[str]) -> float:
+    a = " ".join(str(lhs or "").strip().lower().split())
+    b = " ".join(str(rhs or "").strip().lower().split())
+    if not a and not b:
+        return 0.0
+    ratio = SequenceMatcher(a=a, b=b).ratio()
+    return round(max(0.0, min(1.0, 1.0 - float(ratio))), 4)
+
+
+def _sequence_edit_distance(lhs: List[str], rhs: List[str]) -> float:
+    a = [str(x).strip().lower() for x in (lhs or []) if str(x).strip()]
+    b = [str(x).strip().lower() for x in (rhs or []) if str(x).strip()]
+    if not a and not b:
+        return 0.0
+    ratio = SequenceMatcher(a="\n".join(a), b="\n".join(b)).ratio()
+    return round(max(0.0, min(1.0, 1.0 - float(ratio))), 4)
+
+
+def _parse_reason_codes(raw_codes: Optional[str], multi_values: Optional[List[str]] = None) -> List[str]:
+    values: List[str] = []
+    if raw_codes:
+        values.extend(re.split(r"[,;\n|]", str(raw_codes)))
+    for val in (multi_values or []):
+        values.extend(re.split(r"[,;\n|]", str(val)))
+    out: List[str] = []
+    seen = set()
+    for token in values:
+        t = re.sub(r"[^a-zA-Z0-9_ -]", "", str(token).strip().lower()).replace(" ", "_")
+        t = re.sub(r"_+", "_", t).strip("_")
+        if not t:
+            continue
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out[:12]
+
+
+def _build_metadata_learning_signals(
+    *,
+    insight: Optional[dict],
+    title_text: str,
+    long_description: str,
+    tags_csv: str,
+    categories_csv: str,
+    reason_codes: List[str],
+) -> dict:
+    insight = insight if isinstance(insight, dict) else {}
+    ai_titles = insight.get("ai_titles") if isinstance(insight.get("ai_titles"), list) else []
+    ai_primary_title = ""
+    if ai_titles and isinstance(ai_titles[0], dict):
+        ai_primary_title = str(ai_titles[0].get("text") or "").strip()
+    ai_desc = str(insight.get("long_description") or "").strip()
+    ai_tags = [str(x).strip().lower() for x in (insight.get("ai_tags") or []) if str(x).strip()]
+    ai_categories = [
+        " ".join(str(x).strip().split()).title()
+        for x in (insight.get("ai_categories") or [])
+        if str(x).strip()
+    ]
+    final_tags = _parse_csv_tokens(tags_csv or "", lowercase=True)
+    final_categories = _parse_csv_tokens(categories_csv or "", title_case=True)
+    title_dist = _normalized_edit_distance(ai_primary_title, title_text)
+    desc_dist = _normalized_edit_distance(ai_desc, long_description)
+    tags_dist = _sequence_edit_distance(ai_tags, final_tags)
+    categories_dist = _sequence_edit_distance(ai_categories, final_categories)
+    unchanged = (
+        title_dist == 0.0
+        and desc_dist == 0.0
+        and tags_dist == 0.0
+        and categories_dist == 0.0
+    )
+    return {
+        "ai_primary_title": ai_primary_title or None,
+        "ai_long_description": ai_desc or None,
+        "title_edit_distance": title_dist,
+        "description_edit_distance": desc_dist,
+        "tags_edit_distance": tags_dist,
+        "categories_edit_distance": categories_dist,
+        "metadata_acceptance_label": "unchanged" if unchanged else "edited",
+        "metadata_edit_reason_codes": reason_codes or [],
+    }
 
 
 def _platform_rules_snapshot() -> dict:
@@ -3164,6 +3261,14 @@ def create_app() -> FastAPI:
         long_description = (form.get("long_description") or "").strip()
         tags_csv = (form.get("tags_csv") or "").strip()
         categories_csv = (form.get("categories_csv") or "").strip()
+        metadata_reason_codes_raw = (form.get("metadata_reason_codes") or "").strip()
+        metadata_reason_codes = _parse_reason_codes(
+            metadata_reason_codes_raw,
+            multi_values=[
+                *[str(x) for x in form.getlist("metadata_reason_codes")],
+                *[str(x) for x in form.getlist("metadata_reason_codes[]")],
+            ],
+        )
         target_platforms = [
             p for p in [str(x).upper().strip() for x in form.getlist("target_platforms")]
             if p in PLATFORM_REQUIREMENTS
@@ -3247,6 +3352,7 @@ def create_app() -> FastAPI:
         )
         soft_decision = (form.get("soft_thumb_decision") or "").strip().lower()
         soft_score_raw = (form.get("soft_thumb_score") or "").strip()
+        soft_reason = (form.get("soft_thumb_reason") or "").strip()
         soft_score_100 = _parse_user_score_100(soft_score_raw)
         metadata_validation = validate_metadata_for_platforms(
             title_text=title,
@@ -3256,6 +3362,14 @@ def create_app() -> FastAPI:
             target_platforms=target_platforms,
             performers=[],
             decision_log=decision_log or {},
+        )
+        learning_signals = _build_metadata_learning_signals(
+            insight=insight,
+            title_text=title,
+            long_description=long_description,
+            tags_csv=tags_csv,
+            categories_csv=categories_csv,
+            reason_codes=metadata_reason_codes,
         )
 
         REVIEWED_DIR.mkdir(parents=True, exist_ok=True)
@@ -3282,7 +3396,14 @@ def create_app() -> FastAPI:
             "soft_thumbnail_review": {
                 "decision": soft_decision if soft_decision in {"keep", "reject"} else None,
                 "score_100": soft_score_100,
+                "reason": soft_reason or None,
             },
+            "title_edit_distance": learning_signals.get("title_edit_distance"),
+            "description_edit_distance": learning_signals.get("description_edit_distance"),
+            "tags_edit_distance": learning_signals.get("tags_edit_distance"),
+            "categories_edit_distance": learning_signals.get("categories_edit_distance"),
+            "metadata_acceptance_label": learning_signals.get("metadata_acceptance_label"),
+            "metadata_edit_reason_codes": learning_signals.get("metadata_edit_reason_codes"),
             "source": "amg_ui_v0",
             "feedback_rows_written": feedback_rows,
         }
@@ -3305,7 +3426,9 @@ def create_app() -> FastAPI:
             soft_thumbnail_review={
                 "decision": soft_decision if soft_decision in {"keep", "reject"} else None,
                 "score_100": soft_score_100,
+                "reason": soft_reason or None,
             },
+            metadata_learning_signals=learning_signals,
         )
         _build_kept_covers_package(
             scene_id=scene_id,
@@ -3313,6 +3436,11 @@ def create_app() -> FastAPI:
             cover_items=cover_items,
             kept_filenames=kept_only,
         )
+        try:
+            # Keep retrieval corpus warm as fresh operator-approved rows land.
+            export_approved_example_bank(days_back=365)
+        except Exception as e:
+            log.warn("Example-bank refresh failed after review save", scene_id=scene_id, error=str(e))
 
         return RedirectResponse(url=f"/scene/{scene_id}?saved=1", status_code=303)
 

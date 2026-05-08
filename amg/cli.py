@@ -36,6 +36,7 @@ Commands:
     amg cloud-remote <add|list|show|remove|test>  Manage encrypted rclone remotes
 """
 import argparse
+import json
 import os
 import sys
 import time
@@ -283,6 +284,65 @@ def main():
     )
     p_psc.add_argument("--run-id", type=str, required=True)
 
+    # rule-research
+    p_rr = subparsers.add_parser(
+        "rule-research",
+        help="Analyze reviewed metadata patterns for rule-lab suggestions",
+    )
+    p_rr.add_argument("--days", type=int, default=60)
+    p_rr.add_argument("--studio", type=str, default=None)
+    p_rr.add_argument("--min-rows", type=int, default=10)
+
+    # rule-candidate
+    p_rc = subparsers.add_parser(
+        "rule-candidate",
+        help="Generate a candidate rule pack from local research signals",
+    )
+    p_rc.add_argument("--rule-pack-id", type=str, required=True)
+    p_rc.add_argument("--description", type=str, default="")
+    p_rc.add_argument("--days", type=int, default=60)
+    p_rc.add_argument("--studio", type=str, default=None)
+    p_rc.add_argument("--min-rows", type=int, default=10)
+
+    # rule-activate
+    p_ra = subparsers.add_parser(
+        "rule-activate",
+        help="Activate a rule pack in canary or full mode",
+    )
+    p_ra.add_argument("--rule-pack-id", type=str, required=True)
+    p_ra.add_argument("--mode", type=str, default="canary", choices=["canary", "full"])
+    p_ra.add_argument("--canary-pct", type=float, default=35.0)
+
+    # rule-rollback
+    subparsers.add_parser(
+        "rule-rollback",
+        help="Disable active rule pack immediately",
+    )
+
+    # rule-status
+    p_rstatus = subparsers.add_parser(
+        "rule-status",
+        help="Show active rule pack pointer + recent rule packs/evals",
+    )
+    p_rstatus.add_argument("--limit", type=int, default=10)
+
+    # rule-eval
+    p_re = subparsers.add_parser(
+        "rule-eval",
+        help="Evaluate KPI deltas for a rule pack and write gate manifest",
+    )
+    p_re.add_argument("--rule-pack-id", type=str, required=True)
+    p_re.add_argument("--days", type=int, default=30)
+
+    # rule-promote
+    p_rp = subparsers.add_parser(
+        "rule-promote",
+        help="Promote a passed rule-eval run and activate rule pack",
+    )
+    p_rp.add_argument("--run-id", type=str, required=True)
+    p_rp.add_argument("--mode", type=str, default="canary", choices=["canary", "full"])
+    p_rp.add_argument("--canary-pct", type=float, default=35.0)
+
     # user (auth admin)
     p_user = subparsers.add_parser(
         "user",
@@ -426,6 +486,13 @@ def _dispatch(args):
     if cmd == "retrain-score": return cmd_retrain_score(args)
     if cmd == "retrain-status": return cmd_retrain_status(args)
     if cmd == "promote-score-candidate": return cmd_promote_score_candidate(args)
+    if cmd == "rule-research": return cmd_rule_research(args)
+    if cmd == "rule-candidate": return cmd_rule_candidate(args)
+    if cmd == "rule-activate": return cmd_rule_activate(args)
+    if cmd == "rule-rollback": return cmd_rule_rollback(args)
+    if cmd == "rule-status": return cmd_rule_status(args)
+    if cmd == "rule-eval": return cmd_rule_eval(args)
+    if cmd == "rule-promote": return cmd_rule_promote(args)
     if cmd == "user":      return cmd_user(args)
     if cmd == "pod-worker": return cmd_pod_worker(args)
     if cmd == "cloud-remote": return cmd_cloud_remote(args)
@@ -1392,6 +1459,165 @@ def cmd_promote_score_candidate(args):
     print(f"Run ID: {pointer.get('run_id')}")
     print(f"Dataset: {pointer.get('dataset_name')}")
     print(f"Pointer: {pointer.get('manifest_path')}")
+    return 0
+
+
+def cmd_rule_research(args):
+    """Run rule-lab research against reviewed metadata."""
+    from amg.learning.rule_lab import run_rule_research
+
+    init_logging()
+    result = run_rule_research(
+        days_back=int(args.days),
+        studio=args.studio,
+        min_rows=int(args.min_rows),
+    )
+    print("Rule research summary")
+    print("=" * 64)
+    print(f"Rows reviewed: {result.rows_reviewed}")
+    print(f"Rows with titles: {result.rows_with_titles}")
+    print(f"Rows with descriptions: {result.rows_with_description}")
+    if result.by_studio:
+        print("By studio:")
+        for studio, count in sorted(result.by_studio.items(), key=lambda x: x[1], reverse=True):
+            print(f"  - {studio}: {count}")
+    constraints = result.suggested_constraints
+    print("Suggested constraints:")
+    print(json.dumps(constraints, indent=2))
+    return 0
+
+
+def cmd_rule_candidate(args):
+    """Build and persist a candidate rule pack."""
+    from amg.learning.rule_lab import generate_candidate_rule_pack
+
+    init_logging()
+    result = generate_candidate_rule_pack(
+        rule_pack_id=args.rule_pack_id,
+        description=args.description or "",
+        days_back=int(args.days),
+        studio=args.studio,
+        min_rows=int(args.min_rows),
+    )
+    print("Rule candidate generated")
+    print("=" * 64)
+    print(f"Run ID: {result.run_id}")
+    print(f"Rule pack: {result.rule_pack_id}")
+    print(f"Rule pack path: {result.rule_pack_path}")
+    print(f"Research manifest: {result.research_manifest_path}")
+    print(f"Rows reviewed: {result.research_result.rows_reviewed}")
+    return 0
+
+
+def cmd_rule_activate(args):
+    """Activate a rule pack pointer."""
+    from amg.learning.rule_packs import set_active_rule_pack
+
+    init_logging()
+    try:
+        set_active_rule_pack(
+            rule_pack_id=args.rule_pack_id,
+            mode=args.mode,
+            canary_pct=float(args.canary_pct),
+        )
+    except Exception as e:
+        print(f"Rule activation failed: {e}")
+        return 1
+    print("Rule pack activated")
+    print("=" * 64)
+    print(f"Rule pack: {args.rule_pack_id}")
+    print(f"Mode: {args.mode}")
+    print(f"Canary pct: {float(args.canary_pct):.1f}")
+    return 0
+
+
+def cmd_rule_rollback(args):
+    """Disable active rule pack immediately."""
+    from amg.learning.rule_promotion import rollback_active_rule_pack
+
+    init_logging()
+    payload = rollback_active_rule_pack()
+    print("Rule pack rolled back")
+    print("=" * 64)
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_rule_status(args):
+    """Show current rule-pack status."""
+    from amg.learning.rule_packs import get_active_rule_pointer, list_rule_packs
+    from amg.learning.rule_promotion import list_rule_eval_runs
+
+    init_logging()
+    ptr = get_active_rule_pointer()
+    packs = list_rule_packs(limit=int(args.limit))
+    eval_runs = list_rule_eval_runs(limit=int(args.limit))
+    print("Rule status")
+    print("=" * 64)
+    print("Active pointer:")
+    print(json.dumps(ptr, indent=2))
+    print()
+    print("Recent rule packs:")
+    for p in packs:
+        print(f"- {p.get('rule_pack_id')} :: {p.get('created_at_utc')} :: {p.get('description') or '(no description)'}")
+    if not packs:
+        print("- none")
+    print()
+    print("Recent eval runs:")
+    for r in eval_runs:
+        gates = r.get("gates") if isinstance(r.get("gates"), dict) else {}
+        blocked = gates.get("blocked_reasons") or []
+        print(f"- {r.get('run_id')} :: {r.get('rule_pack_id')} :: {'PASS' if gates.get('pass') else 'BLOCKED'}")
+        if blocked:
+            print(f"    blocked: {', '.join(blocked)}")
+    if not eval_runs:
+        print("- none")
+    return 0
+
+
+def cmd_rule_eval(args):
+    """Run KPI-based gate evaluation for a rule pack."""
+    from amg.learning.rule_promotion import run_rule_eval
+
+    init_logging()
+    try:
+        result = run_rule_eval(
+            rule_pack_id=args.rule_pack_id,
+            days_back=int(args.days),
+        )
+    except Exception as e:
+        print(f"Rule eval failed: {e}")
+        return 1
+    print("Rule eval complete")
+    print("=" * 64)
+    print(f"Run ID: {result.run_id}")
+    print(f"Rule pack: {result.rule_pack_id}")
+    print(f"Manifest: {result.manifest_path}")
+    print(f"Gates: {'PASS' if result.gates_passed else 'BLOCKED'}")
+    if result.blocked_reasons:
+        print("Blocked reasons:")
+        for reason in result.blocked_reasons:
+            print(f"  - {reason}")
+    return 0 if result.gates_passed else 1
+
+
+def cmd_rule_promote(args):
+    """Promote evaluated rule run if gates pass."""
+    from amg.learning.rule_promotion import promote_rule_pack_from_run
+
+    init_logging()
+    try:
+        promotion = promote_rule_pack_from_run(
+            run_id=args.run_id,
+            mode=args.mode,
+            canary_pct=float(args.canary_pct),
+        )
+    except Exception as e:
+        print(f"Rule promotion failed: {e}")
+        return 1
+    print("Rule run promoted")
+    print("=" * 64)
+    print(json.dumps(promotion, indent=2))
     return 0
 
 

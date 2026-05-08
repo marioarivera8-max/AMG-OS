@@ -51,6 +51,9 @@ def test_generate_scene_insight_payload_includes_validation_telemetry(monkeypatc
             "tags": ["pov"],
             "title_tone": "edgy",
             "ai_used": True,
+            "retrieval_stage": "titles",
+            "retrieval_scope": "titles",
+            "retrieved_examples_count": 2,
         },
     )
 
@@ -68,6 +71,14 @@ def test_generate_scene_insight_payload_includes_validation_telemetry(monkeypatc
     )
     assert payload["vision_model_used"] == "vision-test"
     assert payload["text_model_used"] == "text-test"
+    assert payload["text_model_primary"] == "text-test"
+    assert payload["text_model_fallback_used"] is False
+    assert "rule_pack_id" in payload
+    assert "rule_pack_applied" in payload
+    assert "rule_pack_mode" in payload
     assert "metadata_blockers_initial" in payload
     assert "metadata_blockers_final" in payload
     assert "repair_attempts" in payload
+    assert payload["retrieval_stage"] == "titles"
+    assert payload["retrieval_scope"] == "titles"
+    assert payload["retrieved_examples_count"] == 2

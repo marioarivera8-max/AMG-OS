@@ -151,9 +151,9 @@ class TestCloudBrowsePartial:
         # query params is literal Jinja template text, NOT a {{ }} output,
         # so autoescape doesn't turn it into `&amp;`.
         assert "/partials/cloud-browse?remote=gdrive_amy&path=incoming/subdir" in body
-        # Video has a Process button + posts to /jobs/cloud.
-        assert "/jobs/cloud" in body
-        assert "Process" in body
+        # Video rows are added to the submit queue client-side.
+        assert 'data-cloud-add-file="1"' in body
+        assert "Add" in body
         # rclone wrapper called with videos_only=True so non-videos are filtered.
         assert instance.lsjson.call_args.kwargs.get("videos_only") is True
 
@@ -238,11 +238,9 @@ class TestCreateCloudJob:
             assert len(app_mod._jobs) == 1
             job = next(iter(app_mod._jobs.values()))
         assert job["source_mode"] == "cloud"
-        assert job["cloud_source"] == {
-            "remote": "gdrive_amy",
-            "path": "incoming/scene4.mp4",
-            "scene_id": "scene-4-cloud",
-        }
+        assert job["cloud_source"]["remote"] == "gdrive_amy"
+        assert job["cloud_source"]["path"] == "incoming/scene4.mp4"
+        assert job["cloud_source"]["scene_id"] == "scene-4-cloud"
         assert job["scene_id"] == "scene-4-cloud"
         assert job["status"] == "queued"
 

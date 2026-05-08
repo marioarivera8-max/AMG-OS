@@ -46,6 +46,18 @@
         <button class="btn btn-ghost" type="submit" hx-indicator="#insight-spinner">✨ Regenerate</button>
       </form>
     </div>
+    {% if insight %}
+      <div class="muted" style="font-size: 12px; margin-top: 4px;">
+        models in use · vision: {{ insight.vision_model_used or "unknown" }} · text: {{ insight.text_model_used or "unknown" }}
+        {% if insight.text_model_fallback_used %} (fallback from {{ insight.text_model_primary or "unknown" }}){% endif %}
+      </div>
+      {% if insight.rule_pack_id %}
+        <div class="muted" style="font-size: 12px; margin-top: 2px;">
+          rule pack · {{ insight.rule_pack_id }}{% if insight.rule_pack_mode %} · {{ insight.rule_pack_mode }}{% endif %}
+          {% if insight.rule_pack_applied is not none %} · {{ "applied" if insight.rule_pack_applied else "not applied" }}{% endif %}
+        </div>
+      {% endif %}
+    {% endif %}
     <span id="insight-spinner" class="muted htmx-indicator" style="font-size: 12px;">regenerating…</span>
     {% if insight and insight.long_description %}
       <div style="font-size: 13px; line-height: 1.55; margin-top: 8px;">{{ insight.long_description }}</div>

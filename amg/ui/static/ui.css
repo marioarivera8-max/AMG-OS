@@ -49,6 +49,10 @@
   align-items: start;
 }
 
+.scene-parity-shell {
+  display: block;
+}
+
 .scene-side-rail {
   position: sticky;
   top: 76px;
@@ -113,6 +117,40 @@
   margin-bottom: 10px;
 }
 
+.process-main-grid {
+  grid-template-columns: 42% 58%;
+  align-items: start;
+}
+
+.process-board {
+  border: 1.5px solid color-mix(in oklab, var(--line) 18%, transparent);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: color-mix(in oklab, var(--bg-2) 92%, transparent);
+}
+
+.process-board-top {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
+.process-lane {
+  border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
+  border-radius: 8px;
+  margin-bottom: 10px;
+  padding: 8px;
+}
+
+.process-lane h3 {
+  margin: 0 0 8px;
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
 .process-recent-scene {
   border-color: color-mix(in oklab, var(--line) 16%, transparent);
 }
@@ -127,6 +165,8 @@
 
 .process-jobs-stack .process-job-card {
   border: 1.5px solid color-mix(in oklab, var(--line) 18%, transparent);
+  padding: 10px;
+  margin-bottom: 8px;
 }
 
 .process-job-path {
@@ -140,6 +180,18 @@
 .process-job-meta {
   border-top: 1px dashed color-mix(in oklab, var(--line) 12%, transparent);
   padding-top: 8px;
+}
+
+.process-job-card.status-queued .progress,
+.process-job-card.status-done .phase-row,
+.process-job-card.status-queued .log,
+.process-job-card.status-done .log {
+  display: none;
+}
+
+.process-job-card.status-done .process-job-path,
+.process-job-card.status-queued .process-job-path {
+  display: none;
 }
 
 /* PR4: feedback + login consistency */
@@ -207,6 +259,9 @@
 }
 
 @media (max-width: 1100px) {
+  .process-main-grid {
+    grid-template-columns: 1fr;
+  }
   .scene-head-row {
     gap: 14px;
   }

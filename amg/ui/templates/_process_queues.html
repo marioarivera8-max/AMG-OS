@@ -1,33 +1,47 @@
 {# Active + completed job stacks for Process page. Swapped by HTMX (POST /jobs + polling). #}
-<div class="between process-queue-head" style="margin-bottom: 10px;">
-  <h3 class="card-section-title" style="margin: 0;">
-    Queue &amp; active
-    <span class="muted">
-      {% if running_count or queued_count %}
-        · {% if running_count %}{{ running_count }} running{% endif %}{% if running_count and queued_count %} · {% endif %}{% if queued_count %}{{ queued_count }} waiting{% endif %}
-      {% endif %}
-    </span>
-  </h3>
-  <span class="muted" style="font-size: 12px;">Runs one job at a time · FIFO · auto-refresh</span>
-</div>
-<div id="active-jobs-stack" class="stack process-jobs-stack">
-  {% for job in active_jobs %}
-    {% include "_job_card.html" %}
-  {% else %}
-    <div class="empty">Nothing running or queued — add jobs above (they line up for overnight runs).</div>
-  {% endfor %}
-</div>
+<div class="process-board">
+  <div class="process-board-top">
+    <span class="pill ok">{{ running_count }} running</span>
+    <span class="pill">{{ queued_count }} queued</span>
+    <span class="pill neutral">avg 134s/scene</span>
+  </div>
 
-<div class="between process-queue-head" style="margin: 16px 0 10px;">
-  <h3 class="card-section-title" style="margin: 0;">
-    Recent completed <span class="muted">{% if completed_jobs %}· {{ completed_jobs | length }}{% endif %}</span>
-  </h3>
-  <span class="muted" style="font-size: 12px;">Latest finished in this session</span>
-</div>
-<div id="completed-jobs-stack" class="stack process-jobs-stack">
-  {% for job in completed_jobs %}
-    {% include "_job_card.html" %}
-  {% else %}
-    <div class="empty">No completed jobs in this session yet.</div>
-  {% endfor %}
+  <div class="process-lane">
+    <h3>RUNNING{% if running_count %} <span class="muted">· started {{ active_jobs[0].elapsed_str if active_jobs and active_jobs[0].elapsed_str else "just now" }} ago</span>{% endif %}</h3>
+    {% set running_ns = namespace(has=false) %}
+    {% for job in active_jobs %}
+      {% if job.status == "running" %}
+        {% set running_ns.has = true %}
+        {% include "_job_card.html" %}
+      {% endif %}
+    {% endfor %}
+    {% if not running_ns.has %}
+      <div class="empty">No running job right now.</div>
+    {% endif %}
+  </div>
+
+  <div class="process-lane">
+    <h3>QUEUED <span class="muted">· {{ queued_count }} waiting</span></h3>
+    {% set queued_ns = namespace(has=false) %}
+    {% for job in active_jobs %}
+      {% if job.status != "running" %}
+        {% set queued_ns.has = true %}
+        {% include "_job_card.html" %}
+      {% endif %}
+    {% endfor %}
+    {% if not queued_ns.has %}
+      <div class="empty">No queued jobs.</div>
+    {% endif %}
+  </div>
+
+  <div class="process-lane">
+    <h3>Just finished <span class="muted">· this session</span></h3>
+    {% if completed_jobs %}
+      {% for job in completed_jobs %}
+        {% include "_job_card.html" %}
+      {% endfor %}
+    {% else %}
+      <div class="empty">No completed jobs in this session yet.</div>
+    {% endif %}
+  </div>
 </div>
