@@ -259,3 +259,44 @@ def test_latest_cloud_source_falls_back_to_persisted_registry(tmp_path, monkeypa
     got = app_mod._latest_cloud_source_for_scene("demo_scene")
     assert isinstance(got, dict)
     assert got.get("remote") == "gdrive_amy"
+
+
+def test_scene_rerun_falls_back_to_local_video_path_when_cloud_missing(monkeypatch):
+    import amg.ui.app as app_mod
+
+    with app_mod._jobs_lock:
+        app_mod._jobs.clear()
+        app_mod._job_fifo.clear()
+        app_mod._job_seq_counter = 0
+        app_mod._jobs["j_done_local"] = {
+            "job_id": "j_done_local",
+            "status": "done",
+            "scene_id": "demo_scene",
+            "video_path": "/tmp/demo_scene.mp4",
+            "result": {"scene_id": "demo_scene"},
+        }
+
+    monkeypatch.setattr(
+        app_mod,
+        "_load_decision_log",
+        lambda _sid: {"scene_id": "demo_scene", "scene_path": "/missing/path.mp4"},
+    )
+    monkeypatch.setattr(
+        app_mod,
+        "_resolve_video_path",
+        lambda p: Path("/tmp/demo_scene.mp4") if "demo_scene.mp4" in str(p).replace("\\", "/") else None,
+    )
+    monkeypatch.setattr(app_mod, "_start_dispatcher_if_needed", lambda: None)
+
+    app = app_mod.create_app()
+    client = TestClient(app, follow_redirects=False)
+    res = client.post("/scene/demo_scene/rerun")
+    assert res.status_code == 303
+    assert res.headers.get("location", "").startswith("/?job_id=")
+
+    with app_mod._jobs_lock:
+        queued = [j for j in app_mod._jobs.values() if j.get("status") == "queued"]
+    assert queued, "expected queued rerun job"
+    q = queued[-1]
+    assert q["source_mode"] == "path"
+    assert str(q["video_path"]).replace("\\", "/") == "/tmp/demo_scene.mp4"

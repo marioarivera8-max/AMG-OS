@@ -1259,6 +1259,10 @@ def _run_job(job_id: str) -> None:
             resolved_scene = str((result or {}).get("scene_id") or job.get("scene_id") or "").strip()
             if resolved_scene:
                 _persist_rerun_cloud_source(resolved_scene, cloud_source)
+        else:
+            resolved_scene = str((result or {}).get("scene_id") or job.get("scene_id") or "").strip()
+            if resolved_scene:
+                _persist_rerun_video_path(resolved_scene, str(job.get("video_path") or ""))
     except Exception as e:
         with _jobs_lock:
             job = _jobs[job_id]
@@ -1297,6 +1301,34 @@ def _latest_cloud_source_for_scene(scene_id: str) -> Optional[dict]:
     return None
 
 
+def _latest_video_path_for_scene(scene_id: str) -> Optional[str]:
+    target = _safe_scene_id((scene_id or "").strip())
+    if not target:
+        return None
+    with _jobs_lock:
+        candidates = list(_jobs.values())
+    for job in reversed(candidates):
+        raw_scene = str(job.get("scene_id") or (job.get("result") or {}).get("scene_id") or "").strip()
+        if _safe_scene_id(raw_scene) != target:
+            continue
+        video_path = str(job.get("video_path") or "").strip()
+        if video_path:
+            return video_path
+    persisted = _load_persisted_rerun_video_path(target)
+    if persisted:
+        # #region agent log
+        _debug_log_dbg_mode(
+            "post-fix-rerun",
+            "H9",
+            "amg/ui/app.py:_latest_video_path_for_scene:persisted_hit",
+            "using persisted local rerun path",
+            {"scene_id": target, "video_path": persisted},
+        )
+        # #endregion
+        return persisted
+    return None
+
+
 def _load_persisted_rerun_cloud_source(scene_id: str) -> Optional[dict]:
     try:
         if not RERUN_SOURCES_PATH.exists():
@@ -1306,6 +1338,21 @@ def _load_persisted_rerun_cloud_source(scene_id: str) -> Optional[dict]:
         row = (payload or {}).get(_safe_scene_id(scene_id))
         if isinstance(row, dict) and row.get("remote") and row.get("path"):
             return row
+    except Exception:
+        return None
+    return None
+
+
+def _load_persisted_rerun_video_path(scene_id: str) -> Optional[str]:
+    try:
+        if not RERUN_SOURCES_PATH.exists():
+            return None
+        with open(RERUN_SOURCES_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        row = (payload or {}).get(_safe_scene_id(scene_id))
+        video_path = str((row or {}).get("video_path") or "").strip()
+        if video_path:
+            return video_path
     except Exception:
         return None
     return None
@@ -1341,6 +1388,39 @@ def _persist_rerun_cloud_source(scene_id: str, cloud_source: dict) -> None:
             "amg/ui/app.py:_persist_rerun_cloud_source:write",
             "persisted cloud rerun source",
             {"scene_id": sid, "remote": row["remote"], "path": row["path"]},
+        )
+        # #endregion
+    except Exception:
+        return
+
+
+def _persist_rerun_video_path(scene_id: str, video_path: str) -> None:
+    sid = _safe_scene_id(scene_id)
+    vp = str(video_path or "").strip()
+    if not sid or not vp:
+        return
+    try:
+        data = {}
+        if RERUN_SOURCES_PATH.exists():
+            with open(RERUN_SOURCES_PATH, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        row = data.get(sid)
+        if not isinstance(row, dict):
+            row = {}
+        row["video_path"] = vp
+        data[sid] = row
+        RERUN_SOURCES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(RERUN_SOURCES_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        # #region agent log
+        _debug_log_dbg_mode(
+            "post-fix-rerun",
+            "H9",
+            "amg/ui/app.py:_persist_rerun_video_path:write",
+            "persisted local rerun path",
+            {"scene_id": sid, "video_path": vp},
         )
         # #endregion
     except Exception:
@@ -2854,6 +2934,7 @@ def create_app() -> FastAPI:
 
     @app.post("/scene/{scene_id}/rerun")
     async def rerun_scene(scene_id: str):
+        global _job_seq_counter
         target_scene = _safe_scene_id((scene_id or "").strip())
         # #region agent log
         _debug_log_dbg_mode(
@@ -2917,13 +2998,59 @@ def create_app() -> FastAPI:
             )
             # #endregion
             if not cloud_source:
+                video_path_hint = _latest_video_path_for_scene(target_scene)
+                # #region agent log
+                _debug_log_dbg_mode(
+                    "post-fix-rerun",
+                    "H9",
+                    "amg/ui/app.py:rerun_scene:local_fallback_lookup",
+                    "cloud fallback missing; local rerun-path lookup",
+                    {"scene_id": target_scene, "video_path_hint": video_path_hint},
+                )
+                # #endregion
+                if video_path_hint:
+                    resolved_hint = _resolve_video_path(Path(video_path_hint))
+                    # #region agent log
+                    _debug_log_dbg_mode(
+                        "post-fix-rerun",
+                        "H9",
+                        "amg/ui/app.py:rerun_scene:local_fallback_resolve",
+                        "resolved local rerun-path hint",
+                        {
+                            "scene_id": target_scene,
+                            "video_path_hint": video_path_hint,
+                            "resolved_hint": str(resolved_hint) if resolved_hint else None,
+                        },
+                    )
+                    # #endregion
+                    if resolved_hint is not None:
+                        job_id = uuid.uuid4().hex[:10]
+                        with _jobs_lock:
+                            _job_seq_counter += 1
+                            queue_seq = _job_seq_counter
+                            _jobs[job_id] = {
+                                "job_id": job_id,
+                                "status": "queued",
+                                "scene_id": target_scene,
+                                "video_path": str(resolved_hint),
+                                "created_at": datetime.now().isoformat(),
+                                "message": f"Queued · rerun(path-fallback) · {target_scene} · priority #{queue_seq}",
+                                "result": None,
+                                "source_mode": "path",
+                                "log_tail": [],
+                                "current_phase": None,
+                                "progress_pct": 0,
+                                "queue_seq": queue_seq,
+                            }
+                            _job_fifo.append(job_id)
+                        _start_dispatcher_if_needed()
+                        return RedirectResponse(url=f"/?job_id={job_id}", status_code=303)
                 return RedirectResponse(
                     url=f"/scene/{target_scene}?rerun_error={quote_plus('source path is missing or inaccessible')}",
                     status_code=303,
                 )
 
             job_id = uuid.uuid4().hex[:10]
-            global _job_seq_counter
             with _jobs_lock:
                 _job_seq_counter += 1
                 queue_seq = _job_seq_counter
