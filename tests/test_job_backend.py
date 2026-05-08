@@ -826,7 +826,8 @@ class TestRunpodBackendCloud:
 
         # Verify the cloud path hit POST /jobs/cloud (not /jobs).
         cloud_post = next(c for c in session.calls if c.get("method") == "POST")
-        assert cloud_post["url"].endswith("/jobs/cloud")
+        assert urlparse(cloud_post["url"]).path == "/jobs/cloud"
+        assert "cycle=" in cloud_post["url"]
 
         # Artifacts extracted under work_dirs/<scene_id>/.
         extracted = work_root / "work_dirs" / "scene-cloud"
@@ -867,8 +868,8 @@ class TestRunpodBackendCloud:
         assert result["covers_saved"] == 3
         posts = [c for c in session.calls if c.get("method") == "POST"]
         assert len(posts) == 2
-        assert posts[0]["url"].endswith("/jobs/cloud")
-        assert posts[1]["url"].endswith("/jobs-cloud")
+        assert urlparse(posts[0]["url"]).path == "/jobs/cloud"
+        assert urlparse(posts[1]["url"]).path == "/jobs-cloud"
 
         extracted = work_root / "work_dirs" / "scene-hy"
         assert (extracted / "out" / "x.jpg").read_bytes() == b"x"
@@ -963,3 +964,88 @@ class TestRunpodBackendCloud:
         assert "ya29.fake" in body["rclone_config"]
         # Bearer token present.
         assert captured_body["headers"]["Authorization"].startswith("Bearer ")
+        # No-cache headers are critical: Runpod/Cloudflare can otherwise serve
+        # stale 404s from the pod's boot window even after /readyz is green.
+        assert captured_body["headers"]["Cache-Control"] == "no-cache, no-store, max-age=0"
+        assert captured_body["headers"]["Pragma"] == "no-cache"
+
+    def test_runpod_cloud_job_retries_through_cached_404(
+        self, runpod_backend, populated_credential_store, monkeypatch
+    ):
+        """Stale-cached 404s on BOTH /jobs/cloud and /jobs-cloud should
+        recover via cache-busting retries, not crash the controller."""
+        backend, _client, session, _ = runpod_backend
+        import amg.cloud.job_backend as jb
+        monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+        session.queue(
+            _FakePodResponse(404, {"detail": "not found"}),  # cycle 1: /jobs/cloud
+            _FakePodResponse(404, {"detail": "not found"}),  # cycle 1: /jobs-cloud
+            _FakePodResponse(404, {"detail": "not found"}),  # cycle 2: /jobs/cloud
+            _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),  # cycle 2: /jobs-cloud
+            _FakePodResponse(200, {
+                "status": "done",
+                "log_tail": [],
+                "progress_pct": 100,
+                "result": {"success": True, "scene_id": "scene-r", "covers_saved": 2},
+            }),
+            _FakePodResponse(200, content=_make_zip_bytes({"out/x.jpg": b"x"})),
+        )
+
+        from amg.cloud.job_backend import CloudSource
+
+        result = backend.run_cloud_job(
+            CloudSource(remote="gdrive_amy", path="x.mp4", scene_id="scene-r")
+        )
+        assert result["covers_saved"] == 2
+
+        posts = [c for c in session.calls if c.get("method") == "POST"]
+        assert len(posts) == 4
+        # Cycle 1 + 2 each tried both routes, then succeeded on /jobs-cloud
+        # cycle 2.
+        assert urlparse(posts[0]["url"]).path == "/jobs/cloud"
+        assert urlparse(posts[1]["url"]).path == "/jobs-cloud"
+        assert urlparse(posts[2]["url"]).path == "/jobs/cloud"
+        assert urlparse(posts[3]["url"]).path == "/jobs-cloud"
+        # Each retry cycle uses a different cache-buster so the proxy is forced
+        # past any previously cached 404 response. The path itself
+        # differentiates /jobs/cloud vs /jobs-cloud within a cycle.
+        cycles = {c["url"].split("?", 1)[1].split("&", 1)[0] for c in posts}
+        assert cycles == {"cycle=1", "cycle=2"}
+
+    def test_runpod_cloud_job_no_controller_rclone_fallback_by_default(
+        self, runpod_backend, populated_credential_store, monkeypatch
+    ):
+        """A persistently-404 cloud submit must NOT silently trigger a
+        controller-side rclone download — the 4 GB Hetzner CX21 cannot
+        stage multi-GB scenes without OOM-killing the controller."""
+        backend, client, session, _ = runpod_backend
+        import amg.cloud.job_backend as jb
+        monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+
+        # 4 cycles × 2 routes = 8 forced 404s.
+        session.queue(*[_FakePodResponse(404, {}) for _ in range(8)])
+
+        called = {"download": False}
+
+        def _explode_if_called(*_args, **_kwargs):
+            called["download"] = True
+            raise AssertionError(
+                "controller-side rclone fallback must be opt-in via "
+                "AMG_RUNPOD_ALLOW_CONTROLLER_RCLONE_FALLBACK; running it on a "
+                "small controller VM has historically OOM-killed the service."
+            )
+
+        monkeypatch.setattr(
+            backend, "_download_cloud_source_for_upload", _explode_if_called
+        )
+
+        from amg.cloud.job_backend import CloudSource
+
+        with pytest.raises(RuntimeError, match="no cloud submit route"):
+            backend.run_cloud_job(
+                CloudSource(remote="gdrive_amy", path="big_scene.mp4")
+            )
+        assert called["download"] is False
+        # Pod still terminated despite the failure.
+        assert client.terminated == ["pod_test"]

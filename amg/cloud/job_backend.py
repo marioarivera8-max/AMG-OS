@@ -327,6 +327,13 @@ class RunpodBackend(JobBackend):
             idle_terminate_sec if idle_terminate_sec is not None
             else os.environ.get("AMG_RUNPOD_IDLE_TERMINATE_SEC", "900")
         )
+        # Controller-side rclone fallback is a foot-gun on small VMs (4 GB
+        # Hetzner CX21 OOM-kills on multi-GB downloads). Disabled by default;
+        # operator must explicitly opt in.
+        self._allow_controller_rclone_fallback = (
+            os.environ.get("AMG_RUNPOD_ALLOW_CONTROLLER_RCLONE_FALLBACK", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         self._lifecycle_lock = threading.RLock()
         self._active_jobs = 0
         self._warm_pod_id: Optional[str] = None
@@ -388,6 +395,13 @@ class RunpodBackend(JobBackend):
                 msg = str(exc)
                 if "no cloud submit route" not in msg:
                     raise
+                if not self._allow_controller_rclone_fallback:
+                    raise RuntimeError(
+                        f"{msg} | controller-side rclone fallback is disabled "
+                        "(set AMG_RUNPOD_ALLOW_CONTROLLER_RCLONE_FALLBACK=1 to "
+                        "enable it; only safe on controllers with enough RAM "
+                        "and disk to stage the source video locally)."
+                    ) from exc
                 on_log(
                     "[runpod] pod lacks cloud-submit routes; "
                     "falling back to controller-side rclone download + /jobs upload"
@@ -772,23 +786,39 @@ class RunpodBackend(JobBackend):
             body["download_root"] = download_root
         if relative_path:
             body["relative_path"] = relative_path
-        hdrs = {**self._headers(), "Content-Type": "application/json"}
+        hdrs = {
+            **self._headers(),
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, max-age=0",
+            "Pragma": "no-cache",
+        }
+        # Each cycle tries /jobs/cloud first, then /jobs-cloud (the alias for
+        # proxies that mishandle nested /jobs/...). If both return 404 — which
+        # happens when Runpod's proxy is serving stale cached 404s from when
+        # the pod-worker was still booting — we sleep and retry. Cache-busters
+        # force the proxy to revalidate against origin.
         last_txt = ""
-        for path_suffix in ("/jobs/cloud", "/jobs-cloud"):
-            url = f"{base}{path_suffix}"
-            resp = self._session.post(url, headers=hdrs, json=body, timeout=60.0)
-            last_txt = resp.text[:300]
-            if resp.status_code == 404:
-                continue
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    f"pod {pod_id} rejected cloud submit ({path_suffix}): "
-                    f"HTTP {resp.status_code} {last_txt}"
-                )
-            return resp.json()["job_id"]
+        last_status = 0
+        for cycle in range(1, 5):
+            for path_suffix in ("/jobs/cloud", "/jobs-cloud"):
+                cache_buster = f"?cycle={cycle}&t={int(time.time() * 1000)}"
+                url = f"{base}{path_suffix}{cache_buster}"
+                resp = self._session.post(url, headers=hdrs, json=body, timeout=60.0)
+                last_txt = resp.text[:300]
+                last_status = resp.status_code
+                if resp.status_code == 404:
+                    continue  # try the other route
+                if resp.status_code != 200:
+                    raise RuntimeError(
+                        f"pod {pod_id} rejected cloud submit ({path_suffix}): "
+                        f"HTTP {resp.status_code} {last_txt}"
+                    )
+                return resp.json()["job_id"]
+            # Both routes returned 404. Sleep before retrying both again.
+            time.sleep(min(2.0 * cycle, 6.0))
         raise RuntimeError(
-            f"pod {pod_id} has no cloud submit route (HTTP 404 on /jobs/cloud "
-            f"and /jobs-cloud). Body: {last_txt}"
+            f"pod {pod_id} has no cloud submit route (HTTP {last_status} on "
+            f"/jobs/cloud and /jobs-cloud after retries). Body: {last_txt}"
         )
 
     def _download_cloud_source_for_upload(
