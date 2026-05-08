@@ -33,6 +33,14 @@ from amg.config import (
     SCORE_TIER_3_SUCCESS_FLOOR,
     TITLE_TONE_DEFAULT,
     SOFT_THUMB_ENABLED,
+    PROCESSING_PROFILE,
+    TIER_SCAN_MODE,
+    ENABLE_FINISH_HUNTER,
+    ENABLE_BUILDUP_HUNTER,
+    ENABLE_CLUSTER_EXPANSION,
+    ENABLE_POSITION_CLASSIFIER,
+    ENABLE_SCENE_INSIGHT,
+    ENABLE_PROVIDED_THUMBNAIL_SCORING,
     SOFT_THUMB_SAMPLE_COUNT,
     SOFT_THUMB_MIN_SCORE,
     SOFT_THUMB_FILENAME,
@@ -125,6 +133,7 @@ def process_scene(
     log.info("=" * 64)
     log.info(f"Scene: {scene_id}")
     log.info(f"Path: {video_path}")
+    log.info("Processing profile", profile=PROCESSING_PROFILE, tier_scan_mode=TIER_SCAN_MODE)
     if dry_run:
         log.info("DRY RUN MODE — no files will be saved")
 
@@ -296,6 +305,8 @@ def process_scene(
         "frames_extracted": frames_extracted,
         "ai_scored_count": ai_scored,
         "tier_breakdown": tier_stats,
+        "scan_mode": tier_result.get("scan_mode", TIER_SCAN_MODE),
+        "processing_profile": PROCESSING_PROFILE,
     }
     if tier_result.get("aborted"):
         error_codes.append(tier_result.get("abort_reason", "E_TIMEOUT_HARD"))
@@ -305,7 +316,7 @@ def process_scene(
     _emit_progress(45)
 
     # --- PHASE 6: FINISH HUNTER ---
-    if time.time() < deadline and not quota_satisfied(candidates):
+    if ENABLE_FINISH_HUNTER and time.time() < deadline and not quota_satisfied(candidates):
         with phase_timer("finish_hunter") as t:
             finish_result = run_finish_hunter(
                 video_path, duration_sec, calibration, prompt,
@@ -322,13 +333,13 @@ def process_scene(
         phase_results["finish_hunter"] = {
             "duration_sec": 0.0,
             "skipped": True,
-            "reason": "quota_satisfied",
+            "reason": "disabled" if not ENABLE_FINISH_HUNTER else "quota_satisfied",
             "quota_progress": quota_progress(candidates),
         }
     _emit_progress(60)
 
     # --- PHASE 7: BUILDUP HUNTER ---
-    if time.time() < deadline and not quota_satisfied(candidates):
+    if ENABLE_BUILDUP_HUNTER and time.time() < deadline and not quota_satisfied(candidates):
         with phase_timer("buildup_hunter") as t:
             buildup_result = run_buildup_hunter(
                 video_path, duration_sec, calibration, prompt,
@@ -345,13 +356,13 @@ def process_scene(
         phase_results["buildup_hunter"] = {
             "duration_sec": 0.0,
             "skipped": True,
-            "reason": "quota_satisfied",
+            "reason": "disabled" if not ENABLE_BUILDUP_HUNTER else "quota_satisfied",
             "quota_progress": quota_progress(candidates),
         }
     _emit_progress(72)
 
     # --- PHASE 8: CLUSTER EXPANSION ---
-    if time.time() < deadline and candidates and not quota_satisfied(candidates):
+    if ENABLE_CLUSTER_EXPANSION and time.time() < deadline and candidates and not quota_satisfied(candidates):
         seen_ts = {round(c["timestamp_sec"], 1) for c in candidates}
         with phase_timer("cluster") as t:
             cluster_result = expand_clusters(
@@ -376,7 +387,7 @@ def process_scene(
         phase_results["cluster"] = {
             "duration_sec": 0.0,
             "skipped": True,
-            "reason": "quota_satisfied",
+            "reason": "disabled" if not ENABLE_CLUSTER_EXPANSION else "quota_satisfied",
             "quota_progress": quota_progress(candidates),
         }
 
@@ -419,10 +430,16 @@ def process_scene(
 
     # Position classifier pass (bounded): attach `position_label` to top
     # position-like candidates so quota-fill can target 3-per-position.
-    if candidates and time.time() < deadline:
+    if ENABLE_POSITION_CLASSIFIER and candidates and time.time() < deadline:
         with phase_timer("position_classifier") as t:
             pos_stats = classify_candidate_positions(candidates, ai_client=ai_client)
         phase_results["position_classifier"] = {"duration_sec": t.elapsed, **pos_stats}
+    elif candidates:
+        phase_results["position_classifier"] = {
+            "duration_sec": 0.0,
+            "skipped": True,
+            "reason": "disabled" if not ENABLE_POSITION_CLASSIFIER else "deadline",
+        }
 
     # v11.1.5+: quota-fill selection. This is a v0 version that uses existing
     # scoring metadata (tier + TYPE) and keeps a minimum time gap between picks.
@@ -459,16 +476,19 @@ def process_scene(
 
             # Optional: if creator/agency supplied thumbnails in the scene folder,
             # score them with AI and import only strong ones.
-            imported_from_provided, provided_thumb_stats = score_and_save_provided_thumbnails(
-                video_path=video_path,
-                output_dir=covers_dir,
-                ai_client=ai_client,
-                search_root=folder_ctx.source_folder or video_path.parent,
-                performer_name=performer_name,
-                performer_code=code_info.get("code", "") if code_info else "",
-                rank_start=len(saved_covers) + 1,
-                cover_cap=cover_cap,
-            )
+            if ENABLE_PROVIDED_THUMBNAIL_SCORING:
+                imported_from_provided, provided_thumb_stats = score_and_save_provided_thumbnails(
+                    video_path=video_path,
+                    output_dir=covers_dir,
+                    ai_client=ai_client,
+                    search_root=folder_ctx.source_folder or video_path.parent,
+                    performer_name=performer_name,
+                    performer_code=code_info.get("code", "") if code_info else "",
+                    rank_start=len(saved_covers) + 1,
+                    cover_cap=cover_cap,
+                )
+            else:
+                imported_from_provided, provided_thumb_stats = ([], {"skipped": True, "reason": "disabled"})
             if imported_from_provided:
                 saved_covers.extend(imported_from_provided)
                 log.info(
@@ -521,7 +541,7 @@ def process_scene(
     # Best-effort. Always degrades safely on AI offline / parse fail.
     insight_dict = None
     title_payload = None
-    if not dry_run and saved_covers:
+    if not dry_run and saved_covers and ENABLE_SCENE_INSIGHT:
         try:
             with phase_timer("scene_insight") as t_ins:
                 insight_dict, title_payload = _generate_scene_insight_and_titles(
@@ -540,6 +560,8 @@ def process_scene(
         except Exception as e:
             log.warn(f"[scene_insight] failed: {e}")
             phase_results["scene_insight"] = {"duration_sec": 0, "error": str(e)}
+    elif not dry_run and saved_covers:
+        phase_results["scene_insight"] = {"duration_sec": 0.0, "skipped": True, "reason": "disabled"}
 
     # --- PHASE 12: OPTIONAL SOFT THUMBNAIL (NON-NUDE) ---
     soft_thumb_info = None

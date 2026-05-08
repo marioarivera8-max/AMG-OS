@@ -499,6 +499,35 @@ class RunpodBackend(JobBackend):
         spec_env.setdefault("OLLAMA_NUM_PARALLEL", ollama_parallel)
         spec_env.setdefault("AMG_AI_PARALLEL_WORKERS", worker_parallel)
         spec_env.setdefault("AMG_VIDEO_BACKEND", video_backend)
+        forwarded_env = [
+            "AMG_PROCESSING_PROFILE",
+            "AMG_TIER_SCAN_MODE",
+            "AMG_TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER",
+            "AMG_TIER_SCAN_MAX_AI_FRAMES_PER_TIER",
+            "AMG_TIER_SCAN_MAX_WALL_SEC_PER_TIER",
+            "AMG_SINGLE_PASS_SCAN_INTERVAL_SEC",
+            "AMG_SINGLE_PASS_MAX_AI_FRAMES",
+            "AMG_SINGLE_PASS_MIN_GAP_SEC",
+            "AMG_CLUSTER_HUNTER_TOP_N",
+            "AMG_FINISH_HUNTER_TOP_N",
+            "AMG_BUILDUP_HUNTER_TOP_N",
+            "AMG_POSITION_CLASSIFIER_MAX_CANDIDATES",
+            "AMG_ENABLE_FINISH_HUNTER",
+            "AMG_ENABLE_BUILDUP_HUNTER",
+            "AMG_ENABLE_CLUSTER_EXPANSION",
+            "AMG_ENABLE_POSITION_CLASSIFIER",
+            "AMG_ENABLE_SCENE_INSIGHT",
+            "AMG_ENABLE_PROVIDED_THUMBNAIL_SCORING",
+            "AMG_SOFT_THUMB_ENABLED",
+            "AMG_SOFT_THUMB_SAMPLE_COUNT",
+            "AMG_COVER_NEARBY_POLISH_ENABLED",
+            "AMG_PROVIDED_THUMB_MAX_SCAN",
+            "AMG_PROVIDED_THUMB_MAX_ACCEPT",
+            "AMG_VISION_MODEL_OVERRIDE",
+        ]
+        for env_name in forwarded_env:
+            if env_name in os.environ:
+                spec_env.setdefault(env_name, os.environ[env_name])
         spec_env["AMG_POD_AUTH_TOKEN"] = self._auth_token
         spec.env = spec_env
         pod = self._client.provision_pod(

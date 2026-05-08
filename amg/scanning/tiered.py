@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from amg.config import (
+    PROCESSING_PROFILE,
+    TIER_SCAN_MODE,
     TIER_1_INTERVAL,
     TIER_2_INTERVAL,
     TIER_3_INTERVAL,
@@ -33,6 +35,9 @@ from amg.config import (
     TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER,
     TIER_SCAN_MAX_AI_FRAMES_PER_TIER,
     TIER_SCAN_MAX_WALL_SEC_PER_TIER,
+    SINGLE_PASS_SCAN_INTERVAL_SEC,
+    SINGLE_PASS_MAX_AI_FRAMES,
+    SINGLE_PASS_MIN_GAP_SEC,
     get_adaptive_interval,
 )
 from amg.video.reader import VideoReader
@@ -78,9 +83,21 @@ def run_tiered_scan(
         }
     """
     log.info("Starting tiered scan",
+             mode=TIER_SCAN_MODE,
+             processing_profile=PROCESSING_PROFILE,
              tier_1_floor=calibration["tier_1_floor"],
              tier_2_floor=calibration["tier_2_floor"],
              tier_3_floor=calibration["tier_3_floor"])
+
+    if TIER_SCAN_MODE == "single_pass":
+        return _run_single_pass_scan(
+            video_path=video_path,
+            duration_sec=duration_sec,
+            calibration=calibration,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            deadline_sec=deadline_sec,
+        )
 
     all_scored = []
     seen_timestamps = set()
@@ -188,6 +205,175 @@ def run_tiered_scan(
         "abort_reason": tier_3.get("abort_reason"),
         "tier_stats": tier_stats,
     }
+
+
+def _run_single_pass_scan(
+    video_path,
+    duration_sec,
+    calibration,
+    prompt,
+    system_prompt,
+    deadline_sec,
+):
+    """Run one decode pass and bucket candidates by all tier thresholds."""
+    scan_started = time.time()
+    candidates = []
+    seen_timestamps = set()
+    prev_gray = None
+    aborted = False
+    abort_reason = None
+    wall_capped = False
+    extracted_capped = False
+    ai_capped = False
+
+    interval = get_adaptive_interval(
+        SINGLE_PASS_SCAN_INTERVAL_SEC,
+        duration_sec,
+        max(TIER_1_INTERVAL_MAX, SINGLE_PASS_SCAN_INTERVAL_SEC),
+    )
+    max_extracted = TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER
+    max_wall = TIER_SCAN_MAX_WALL_SEC_PER_TIER
+
+    with VideoReader(video_path) as vr:
+        for ts, frame in vr.iter_frames_sequential(0, duration_sec, interval):
+            if max_wall > 0 and (time.time() - scan_started) > max_wall:
+                aborted = True
+                abort_reason = "E_TIER_SCAN_TIMEOUT"
+                wall_capped = True
+                break
+            if deadline_sec and time.time() > deadline_sec:
+                aborted = True
+                abort_reason = "E_TIMEOUT_HARD"
+                break
+
+            ts_key = round(ts, 1)
+            if ts_key in seen_timestamps or is_frame_too_dark(frame):
+                continue
+
+            sharp = measure_sharpness(frame)
+            if sharp < calibration["tier_3_floor"]:
+                continue
+
+            small = cv2.resize(frame, (640, 360))
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            motion = None
+            if prev_gray is not None:
+                motion = measure_motion(prev_gray, gray)
+            prev_gray = gray
+
+            tier_name = None
+            score_floor = SCORE_TIER_3_SUCCESS_FLOOR
+            if sharp >= calibration["tier_1_floor"] and (motion is None or motion <= MOTION_CAP_TIER_1):
+                tier_name = "tier_1"
+                score_floor = SCORE_TIER_1_SUCCESS_FLOOR
+            elif sharp >= calibration["tier_2_floor"] and (motion is None or motion <= MOTION_CAP_TIER_2):
+                tier_name = "tier_2"
+                score_floor = SCORE_TIER_2_SUCCESS_FLOOR
+            elif motion is None or motion <= MOTION_CAP_TIER_3:
+                tier_name = "tier_3"
+
+            if tier_name is None:
+                continue
+
+            candidates.append({
+                "timestamp_sec": ts,
+                "frame": frame,
+                "sharpness": sharp,
+                "motion": motion,
+                "tier": tier_name,
+                "_score_floor": score_floor,
+            })
+            seen_timestamps.add(ts_key)
+
+            if max_extracted > 0 and len(candidates) >= max_extracted:
+                extracted_capped = True
+                break
+
+    deduped = deduplicate_frames(candidates)
+    ai_batch = _select_single_pass_ai_batch(deduped, SINGLE_PASS_MAX_AI_FRAMES)
+    if SINGLE_PASS_MAX_AI_FRAMES > 0 and len(deduped) > len(ai_batch):
+        ai_capped = True
+
+    scored = score_frames_parallel(ai_batch, prompt, system_prompt=system_prompt)
+    for entry in scored:
+        entry.pop("_score_floor", None)
+
+    passing = [
+        f for f in scored
+        if f.get("scored_frame")
+        and f["scored_frame"].parse_succeeded
+        and f["scored_frame"].score >= _score_floor_for_tier(f.get("tier"))
+    ]
+    tier_used = _worst_tier_used(scored)
+
+    tier_stats = {
+        "single_pass": {
+            "aborted": aborted,
+            "abort_reason": abort_reason,
+            "frames_extracted": len(candidates),
+            "candidates_after_cv": len(candidates),
+            "candidates_after_dedup": len(deduped),
+            "ai_scored_count": len(ai_batch),
+            "passing_count": len(passing),
+            "extracted_capped": extracted_capped,
+            "ai_capped": ai_capped,
+            "wall_capped": wall_capped,
+            "interval_sec": interval,
+            "wall_sec": round(time.time() - scan_started, 3),
+        }
+    }
+
+    return {
+        "tier_used": tier_used,
+        "candidates": passing,
+        "all_scored": scored,
+        "aborted": aborted,
+        "abort_reason": abort_reason,
+        "tier_stats": tier_stats,
+        "scan_mode": "single_pass",
+    }
+
+
+def _select_single_pass_ai_batch(candidates, limit):
+    if limit <= 0 or len(candidates) <= limit:
+        return list(candidates)
+    tier_rank = {"tier_1": 0, "tier_2": 1, "tier_3": 2}
+    ranked = sorted(
+        candidates,
+        key=lambda x: (
+            tier_rank.get(x.get("tier"), 3),
+            -float(x.get("sharpness") or 0.0),
+            float(x.get("timestamp_sec") or 0.0),
+        ),
+    )
+    selected = []
+    for candidate in ranked:
+        ts = float(candidate.get("timestamp_sec") or 0.0)
+        if any(abs(ts - float(existing.get("timestamp_sec") or 0.0)) < SINGLE_PASS_MIN_GAP_SEC for existing in selected):
+            continue
+        selected.append(candidate)
+        if len(selected) >= limit:
+            return selected
+    for candidate in ranked:
+        if candidate not in selected:
+            selected.append(candidate)
+            if len(selected) >= limit:
+                break
+    return selected
+
+
+def _score_floor_for_tier(tier):
+    if tier == "tier_1":
+        return SCORE_TIER_1_SUCCESS_FLOOR
+    if tier == "tier_2":
+        return SCORE_TIER_2_SUCCESS_FLOOR
+    return SCORE_TIER_3_SUCCESS_FLOOR
+
+
+def _worst_tier_used(scored):
+    rank = {"tier_1": 1, "tier_2": 2, "tier_3": 3}
+    used = [rank.get(f.get("tier"), 3) for f in scored]
+    return max(used) if used else 1
 
 
 def _run_tier(

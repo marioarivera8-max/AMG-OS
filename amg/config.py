@@ -13,6 +13,61 @@ All numeric values here have research justification (see v11_final_specification
 from pathlib import Path
 import os
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return int(default)
+    return int(raw)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    return float(raw)
+
+
+def _resolve_processing_profile() -> str:
+    raw = os.environ.get("AMG_PROCESSING_PROFILE", "quality").strip().lower()
+    aliases = {
+        "default": "quality",
+        "safe": "quality",
+        "standard": "balanced",
+    }
+    profile = aliases.get(raw, raw)
+    if profile not in {"quality", "balanced", "fast", "turbo"}:
+        return "quality"
+    return profile
+
+
+def _profile_default(default, **overrides):
+    return overrides.get(PROCESSING_PROFILE, default)
+
+
+def _profile_int(name: str, default: int, **overrides) -> int:
+    return _env_int(name, _profile_default(default, **overrides))
+
+
+def _profile_float(name: str, default: float, **overrides) -> float:
+    return _env_float(name, _profile_default(default, **overrides))
+
+
+def _profile_bool(name: str, default: bool, **overrides) -> bool:
+    return _env_bool(name, _profile_default(default, **overrides))
+
+
+# Opt-in runtime speed profiles. "quality" preserves current behavior; the
+# other profiles tighten caps and disable optional passes to bound wall time.
+PROCESSING_PROFILE = _resolve_processing_profile()
+
 # ============================================================
 # PATHS
 # ============================================================
@@ -162,16 +217,56 @@ TIER_1_INTERVAL_MAX = 3.0
 TIER_2_INTERVAL_MAX = 1.5
 TIER_3_INTERVAL_MAX = 1.0
 
-# Per-tier guardrails to prevent long-tail scans from monopolizing runtime.
+# Scanner shape and guardrails to prevent long-tail scans from monopolizing runtime.
+TIER_SCAN_MODE = os.environ.get(
+    "AMG_TIER_SCAN_MODE",
+    _profile_default("classic", balanced="classic", fast="single_pass", turbo="single_pass"),
+).strip().lower()
+if TIER_SCAN_MODE not in {"classic", "single_pass"}:
+    TIER_SCAN_MODE = "classic"
+
 # Set to <=0 via env to disable a specific cap.
-TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER = int(
-    os.environ.get("AMG_TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER", "220")
+TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER = _profile_int(
+    "AMG_TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER",
+    220,
+    balanced=180,
+    fast=120,
+    turbo=80,
 )
-TIER_SCAN_MAX_AI_FRAMES_PER_TIER = int(
-    os.environ.get("AMG_TIER_SCAN_MAX_AI_FRAMES_PER_TIER", "80")
+TIER_SCAN_MAX_AI_FRAMES_PER_TIER = _profile_int(
+    "AMG_TIER_SCAN_MAX_AI_FRAMES_PER_TIER",
+    80,
+    balanced=60,
+    fast=36,
+    turbo=24,
 )
-TIER_SCAN_MAX_WALL_SEC_PER_TIER = float(
-    os.environ.get("AMG_TIER_SCAN_MAX_WALL_SEC_PER_TIER", "420")
+TIER_SCAN_MAX_WALL_SEC_PER_TIER = _profile_float(
+    "AMG_TIER_SCAN_MAX_WALL_SEC_PER_TIER",
+    420.0,
+    balanced=240.0,
+    fast=150.0,
+    turbo=90.0,
+)
+SINGLE_PASS_SCAN_INTERVAL_SEC = _profile_float(
+    "AMG_SINGLE_PASS_SCAN_INTERVAL_SEC",
+    1.0,
+    balanced=1.0,
+    fast=1.5,
+    turbo=2.0,
+)
+SINGLE_PASS_MAX_AI_FRAMES = _profile_int(
+    "AMG_SINGLE_PASS_MAX_AI_FRAMES",
+    TIER_SCAN_MAX_AI_FRAMES_PER_TIER,
+    balanced=60,
+    fast=36,
+    turbo=24,
+)
+SINGLE_PASS_MIN_GAP_SEC = _profile_float(
+    "AMG_SINGLE_PASS_MIN_GAP_SEC",
+    20.0,
+    balanced=20.0,
+    fast=25.0,
+    turbo=30.0,
 )
 
 # Duration-adaptive sampling scale (efficiency for long-form scenes).
@@ -226,7 +321,13 @@ CLUSTER_WINDOWS = [
 # lets cluster balloon — scene 10 produced 145 post-gate candidates that
 # would have taken ~15 min to AI-score. Default 30 keeps cluster
 # contribution roughly in line with finish (8) + buildup (10) + tier_2 (17).
-CLUSTER_HUNTER_TOP_N = 30
+CLUSTER_HUNTER_TOP_N = _profile_int(
+    "AMG_CLUSTER_HUNTER_TOP_N",
+    30,
+    balanced=18,
+    fast=0,
+    turbo=0,
+)
 
 # ============================================================
 # FLOOR ENFORCEMENT (Cover Count)
@@ -250,7 +351,13 @@ QUOTA_POSITION_MAX_LABELS = 4
 QUOTA_MIN_GAP_SEC = 20.0
 
 # Position classifier: classify only top candidates to avoid extra AI load.
-POSITION_CLASSIFIER_MAX_CANDIDATES = 40
+POSITION_CLASSIFIER_MAX_CANDIDATES = _profile_int(
+    "AMG_POSITION_CLASSIFIER_MAX_CANDIDATES",
+    40,
+    balanced=24,
+    fast=0,
+    turbo=0,
+)
 POSITION_CLASSIFIER_MIN_SCORE = 60.0
 POSITION_CLASSIFIER_MIN_PEN_CONF = 0.60
 POSITION_CLASSIFIER_MIN_LABEL_CONF = 0.60
@@ -316,7 +423,13 @@ PHASE_HARD_TIMEOUT_SEC = {
 # FINISH HUNTER (Last 20% of Video)
 # ============================================================
 FINISH_HUNTER_ZONE_START_PCT = 0.80  # Last 20%
-FINISH_HUNTER_TOP_N = 8              # Score top 8 candidates
+FINISH_HUNTER_TOP_N = _profile_int(
+    "AMG_FINISH_HUNTER_TOP_N",
+    8,
+    balanced=6,
+    fast=5,
+    turbo=0,
+)              # Score top candidates
 FINISH_HUNTER_INTERVAL_BASE = 1.0
 FINISH_HUNTER_INTERVAL_MAX = 3.0
 
@@ -328,7 +441,13 @@ BUILDUP_HUNTER_ZONE_END_PCT = 0.50
 # v11.1.2: bumped from 6 → 10. The cap was never the bottleneck — dedup was —
 # but once dedup is loosened (below) we want enough headroom to score the variety
 # we now get out. Adds ~30-40s to scene wall time at the parallelism we're seeing.
-BUILDUP_HUNTER_TOP_N = 10
+BUILDUP_HUNTER_TOP_N = _profile_int(
+    "AMG_BUILDUP_HUNTER_TOP_N",
+    10,
+    balanced=6,
+    fast=4,
+    turbo=0,
+)
 BUILDUP_HUNTER_INTERVAL_BASE = 2.0
 BUILDUP_HUNTER_INTERVAL_MAX = 6.0
 # v11.1.2: stricter dedup just for buildup. Default DEDUP_HAMMING_THRESHOLD=5 is
@@ -348,7 +467,12 @@ ENHANCE_DEFAULT = True
 # If a selected frame is slightly blurry but otherwise high-value, sample a few
 # nearby timestamps and keep the sharpest close match. This improves "almost
 # perfect" picks without re-scoring the whole scene.
-COVER_NEARBY_POLISH_ENABLED = True
+COVER_NEARBY_POLISH_ENABLED = _profile_bool(
+    "AMG_COVER_NEARBY_POLISH_ENABLED",
+    True,
+    fast=False,
+    turbo=False,
+)
 COVER_NEARBY_POLISH_MIN_SCORE = 75.0
 COVER_NEARBY_POLISH_OFFSETS_SEC = (-0.30, -0.15, 0.15, 0.30)
 COVER_NEARBY_POLISH_MIN_SHARPNESS_GAIN = 35.0
@@ -373,8 +497,19 @@ CONTACT_SHEET_QUALITY = 92
 # Provided thumbnail grading/import
 # Some creators/agencies include cover candidates in the submission folder.
 # We score these with the same local vision model and import only the good ones.
-PROVIDED_THUMB_MAX_SCAN = 40
-PROVIDED_THUMB_MAX_ACCEPT = 4
+PROVIDED_THUMB_MAX_SCAN = _profile_int(
+    "AMG_PROVIDED_THUMB_MAX_SCAN",
+    40,
+    balanced=24,
+    fast=0,
+    turbo=0,
+)
+PROVIDED_THUMB_MAX_ACCEPT = _profile_int(
+    "AMG_PROVIDED_THUMB_MAX_ACCEPT",
+    4,
+    fast=0,
+    turbo=0,
+)
 PROVIDED_THUMB_MIN_SCORE = 80.0
 
 # Filename schema
@@ -605,8 +740,53 @@ TITLE_CORPUS_DIR = DATA_DIR / "title_corpus"
 
 # Optional "soft" (non-nude) thumbnail extraction for studios/platforms that
 # require safe cover art.
-SOFT_THUMB_ENABLED = True
-SOFT_THUMB_SAMPLE_COUNT = 24
+ENABLE_FINISH_HUNTER = _profile_bool(
+    "AMG_ENABLE_FINISH_HUNTER",
+    True,
+    turbo=False,
+)
+ENABLE_BUILDUP_HUNTER = _profile_bool(
+    "AMG_ENABLE_BUILDUP_HUNTER",
+    True,
+    turbo=False,
+)
+ENABLE_CLUSTER_EXPANSION = _profile_bool(
+    "AMG_ENABLE_CLUSTER_EXPANSION",
+    True,
+    fast=False,
+    turbo=False,
+)
+ENABLE_POSITION_CLASSIFIER = _profile_bool(
+    "AMG_ENABLE_POSITION_CLASSIFIER",
+    True,
+    fast=False,
+    turbo=False,
+)
+ENABLE_SCENE_INSIGHT = _profile_bool(
+    "AMG_ENABLE_SCENE_INSIGHT",
+    True,
+    turbo=False,
+)
+ENABLE_PROVIDED_THUMBNAIL_SCORING = _profile_bool(
+    "AMG_ENABLE_PROVIDED_THUMBNAIL_SCORING",
+    True,
+    fast=False,
+    turbo=False,
+)
+
+SOFT_THUMB_ENABLED = _profile_bool(
+    "AMG_SOFT_THUMB_ENABLED",
+    True,
+    fast=False,
+    turbo=False,
+)
+SOFT_THUMB_SAMPLE_COUNT = _profile_int(
+    "AMG_SOFT_THUMB_SAMPLE_COUNT",
+    24,
+    balanced=18,
+    fast=0,
+    turbo=0,
+)
 SOFT_THUMB_MIN_SCORE = 72.0
 SOFT_THUMB_FILENAME = "00_soft_thumbnail.jpg"
 

@@ -1,6 +1,7 @@
 """Tests for config helpers — cover caps, cluster windows, interval scaling."""
 
 import os
+import importlib
 
 from amg.config import (
     get_cover_cap,
@@ -173,3 +174,30 @@ class TestIncomingRoots:
         from pathlib import Path
         roots = _resolve_incoming_roots()
         assert roots == [(Path.home() / "some" / "place").resolve()]
+
+
+class TestProcessingProfile:
+    def test_unknown_profile_falls_back_to_quality(self, monkeypatch):
+        monkeypatch.setenv("AMG_PROCESSING_PROFILE", "nonsense")
+        import amg.config as config
+        reloaded = importlib.reload(config)
+        try:
+            assert reloaded.PROCESSING_PROFILE == "quality"
+            assert reloaded.TIER_SCAN_MODE == "classic"
+        finally:
+            monkeypatch.delenv("AMG_PROCESSING_PROFILE", raising=False)
+            importlib.reload(config)
+
+    def test_fast_profile_enables_single_pass_and_caps(self, monkeypatch):
+        monkeypatch.setenv("AMG_PROCESSING_PROFILE", "fast")
+        import amg.config as config
+        reloaded = importlib.reload(config)
+        try:
+            assert reloaded.PROCESSING_PROFILE == "fast"
+            assert reloaded.TIER_SCAN_MODE == "single_pass"
+            assert reloaded.TIER_SCAN_MAX_AI_FRAMES_PER_TIER < 80
+            assert reloaded.ENABLE_CLUSTER_EXPANSION is False
+            assert reloaded.SOFT_THUMB_ENABLED is False
+        finally:
+            monkeypatch.delenv("AMG_PROCESSING_PROFILE", raising=False)
+            importlib.reload(config)

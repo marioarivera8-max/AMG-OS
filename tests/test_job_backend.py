@@ -254,6 +254,7 @@ def test_runpod_backend_full_happy_path(runpod_backend, tmp_path, monkeypatch):
     assert client.provisioned[0].env.get("OLLAMA_NUM_PARALLEL") == "6"
     assert client.provisioned[0].env.get("AMG_AI_PARALLEL_WORKERS") == "6"
     assert client.provisioned[0].env.get("AMG_VIDEO_BACKEND") == "pyav"
+    assert "AMG_PROCESSING_PROFILE" not in client.provisioned[0].env
     # Artifacts extracted to work_dirs/<scene_id>/ (v0 layout: flat zip)
     extracted = work_root / "work_dirs" / "scene-42"
     assert (extracted / "out" / "cover_001.jpg").read_bytes() == b"jpg"
@@ -265,6 +266,33 @@ def test_runpod_backend_full_happy_path(runpod_backend, tmp_path, monkeypatch):
     assert any("[pod] three" in line for line in logs)
     # Progress should have advanced at least once and ended at 100.
     assert progresses[-1] == 100
+
+
+def test_runpod_backend_forwards_processing_profile_env(runpod_backend, tmp_path, monkeypatch):
+    backend, client, session, _work_root = runpod_backend
+    import amg.cloud.job_backend as jb
+    monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
+    monkeypatch.setenv("AMG_PROCESSING_PROFILE", "fast")
+    monkeypatch.setenv("AMG_TIER_SCAN_MODE", "single_pass")
+    monkeypatch.setenv("AMG_SINGLE_PASS_MAX_AI_FRAMES", "24")
+    monkeypatch.setenv("AMG_ENABLE_CLUSTER_EXPANSION", "0")
+    monkeypatch.setenv("AMG_VISION_MODEL_OVERRIDE", "qwen2.5vl:3b")
+
+    session.queue(
+        _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),
+        _FakePodResponse(200, {"status": "done", "progress_pct": 100, "result": {"success": True, "scene_id": "s", "covers_saved": 1}}),
+        _FakePodResponse(200, content=_make_zip_bytes({"decision_log.json": b"{}"})),
+    )
+    video = tmp_path / "s.mp4"
+    video.write_bytes(b"video")
+
+    backend.run_job(video, on_log=lambda _: None, on_progress=lambda _: None)
+    env = client.provisioned[0].env
+    assert env["AMG_PROCESSING_PROFILE"] == "fast"
+    assert env["AMG_TIER_SCAN_MODE"] == "single_pass"
+    assert env["AMG_SINGLE_PASS_MAX_AI_FRAMES"] == "24"
+    assert env["AMG_ENABLE_CLUSTER_EXPANSION"] == "0"
+    assert env["AMG_VISION_MODEL_OVERRIDE"] == "qwen2.5vl:3b"
 
 
 def test_runpod_backend_pipeline_error_propagates_and_terminates(runpod_backend, tmp_path, monkeypatch):
