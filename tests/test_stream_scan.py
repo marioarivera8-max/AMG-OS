@@ -287,3 +287,142 @@ class TestDeadline:
         assert result["aborted"] is True
         assert result["abort_reason"] == "E_STREAM_AI_CAP"
         assert result["stats"]["submitted"] == 3
+
+
+class TestInstrumentation:
+    """The 2026-05-09 measurement commit: decode-vs-AI wall-time split,
+    parse_failed/score_zero counters, and raw-AI-response sidecar.
+
+    The Y_B_003 regression that triggered this work showed completed=49,
+    selector_pool=0 — i.e. the AI returned successful HTTP responses but
+    every one parsed to score 0 or failed to parse, and the old stats
+    didn't surface that. These tests pin the new contract."""
+
+    def test_parse_failed_counter_and_raw_ai_capture(self, monkeypatch, tmp_path):
+        """AI returns success but parse_succeeded=False — counter ticks
+        and raw_ai_samples captures the response so the prompt can be
+        debugged from the decision log alone."""
+        import amg.scanning.stream as stream
+
+        frames = [(float(i), _frame(60)) for i in range(3)]
+        monkeypatch.setattr(stream, "VideoReader", _FakeVideoReader(frames))
+        monkeypatch.setattr(stream, "is_frame_too_dark", lambda _f: False)
+        monkeypatch.setattr(stream, "measure_sharpness", lambda f: float(f[0, 0, 0]) * 10.0)
+        monkeypatch.setattr(stream, "measure_motion", lambda *_a: 0.0)
+        monkeypatch.setattr(stream, "compute_perceptual_hash", lambda _f: None)
+        monkeypatch.setattr(stream, "are_near_duplicates", lambda *_a, **_k: False)
+
+        class _Client:
+            def __init__(self):
+                self.calls = 0
+
+            def score_frame(self, *_a, **_k):
+                self.calls += 1
+                # Looks-like-success HTTP response, garbage body — the
+                # exact failure mode the rubric prompt produces today.
+                return _FakeAIResponse(success=True, raw_text="garbage that won't parse")
+
+        monkeypatch.setattr(stream, "AIClient", lambda: _Client())
+        monkeypatch.setattr(stream, "parse_ai_response", lambda _r: _ScoredStub(False, 0.0))
+        monkeypatch.setattr(stream, "cap_score_for_excellence", lambda _r, s: float(s))
+
+        result = stream.run_stream_scan(
+            Path("dummy.mp4"),
+            duration_sec=5.0,
+            prompt="p",
+            target_count=1,
+            cover_cap=1,
+            on_log=_quiet_log,
+            on_progress=_quiet_progress,
+            max_workers=1,
+            interval_sec=1.0,
+            max_queued=10,
+            frame_cache_max_mb=64,
+            selector_overrides={"min_gap_sec": 0.5, "post_ai_sharp_percentile": 0.0},
+        )
+
+        # All three scores should land in parse_failed; selector pool empty.
+        assert result["stats"]["completed"] == 3
+        assert result["stats"]["parse_failed"] == 3
+        assert result["stats"]["score_zero"] == 0
+        assert result["selector_stats"]["scored_pool"] == 0
+        # Raw samples captured (capped at 8 by default — we sent 3).
+        samples = result["raw_ai_samples"]
+        assert len(samples) == 3
+        for s in samples:
+            assert s["reason"] == "parse_failed"
+            assert s["ai_success"] is True
+            assert "garbage" in s["raw_text_truncated"]
+            assert s["parse_succeeded"] is False
+
+    def test_score_zero_counter_separates_from_parse_failed(self, monkeypatch, tmp_path):
+        """parse_succeeded=True but score==0 must increment score_zero,
+        not parse_failed. Both lead to selector_pool=0 but tell us
+        different things about the prompt."""
+        import amg.scanning.stream as stream
+
+        frames = [(float(i), _frame(60)) for i in range(2)]
+        monkeypatch.setattr(stream, "VideoReader", _FakeVideoReader(frames))
+        monkeypatch.setattr(stream, "is_frame_too_dark", lambda _f: False)
+        monkeypatch.setattr(stream, "measure_sharpness", lambda f: float(f[0, 0, 0]) * 10.0)
+        monkeypatch.setattr(stream, "measure_motion", lambda *_a: 0.0)
+        monkeypatch.setattr(stream, "compute_perceptual_hash", lambda _f: None)
+        monkeypatch.setattr(stream, "are_near_duplicates", lambda *_a, **_k: False)
+
+        class _Client:
+            def score_frame(self, *_a, **_k):
+                return _FakeAIResponse(success=True, raw_text="parsed but rated 0")
+
+        monkeypatch.setattr(stream, "AIClient", lambda: _Client())
+        monkeypatch.setattr(stream, "parse_ai_response", lambda _r: _ScoredStub(True, 0.0))
+        monkeypatch.setattr(stream, "cap_score_for_excellence", lambda _r, s: float(s))
+
+        result = stream.run_stream_scan(
+            Path("dummy.mp4"),
+            duration_sec=3.0,
+            prompt="p",
+            target_count=1,
+            cover_cap=1,
+            on_log=_quiet_log,
+            on_progress=_quiet_progress,
+            max_workers=1,
+            interval_sec=1.0,
+            max_queued=10,
+            frame_cache_max_mb=64,
+            selector_overrides={"min_gap_sec": 0.5, "post_ai_sharp_percentile": 0.0},
+        )
+
+        assert result["stats"]["parse_failed"] == 0
+        assert result["stats"]["score_zero"] == 2
+        for s in result["raw_ai_samples"]:
+            assert s["reason"] == "score_zero"
+
+    def test_decode_and_cv_wall_are_tracked(self, monkeypatch, tmp_path):
+        """decode_wall_sec and cv_wall_sec must be present and >= 0
+        after any successful run. We can't pin exact values (timing
+        varies) but we can pin the contract."""
+        frames = [(float(i), _frame(60)) for i in range(3)]
+        stream, _client = _install_stream_stubs(monkeypatch, frames=frames)
+
+        result = stream.run_stream_scan(
+            Path("dummy.mp4"),
+            duration_sec=3.0,
+            prompt="p",
+            target_count=1,
+            cover_cap=1,
+            on_log=_quiet_log,
+            on_progress=_quiet_progress,
+            max_workers=1,
+            interval_sec=1.0,
+            max_queued=10,
+            frame_cache_max_mb=64,
+            selector_overrides={"min_gap_sec": 0.5, "post_ai_sharp_percentile": 0.0},
+        )
+
+        stats = result["stats"]
+        assert "decode_wall_sec" in stats
+        assert "cv_wall_sec" in stats
+        assert "ai_wall_sec" in stats
+        assert stats["decode_wall_sec"] >= 0.0
+        assert stats["cv_wall_sec"] >= 0.0
+        assert stats["ai_wall_sec"] >= 0.0

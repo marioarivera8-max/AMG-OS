@@ -318,6 +318,20 @@ def process_scene(
             "completed": stream_result["stats"].get("completed", 0),
             "skipped": stream_result["stats"].get("skipped", 0),
             "ai_failures": stream_result["stats"].get("ai_failures", 0),
+            # New (2026-05-09): wall-time split between CPU video decode,
+            # CV ops, and AI scoring inside the stream phase. The
+            # decode-vs-AI ratio is what tells us whether NVDEC will
+            # actually move the needle on the next iteration.
+            "decode_wall_sec": stream_result["stats"].get("decode_wall_sec", 0.0),
+            "cv_wall_sec": stream_result["stats"].get("cv_wall_sec", 0.0),
+            "ai_wall_sec": stream_result["stats"].get("ai_wall_sec", 0.0),
+            # New: silent-failure counters. parse_failed/score_zero
+            # explain why selector_pool can be 0 even when 'completed'
+            # is high — i.e. the AI returned successful HTTP responses
+            # but the rubric prompt produced unparseable / zero-score
+            # output. The classic stream_scan stats hid this case.
+            "parse_failed": stream_result["stats"].get("parse_failed", 0),
+            "score_zero": stream_result["stats"].get("score_zero", 0),
             "frames_seen": stream_result["stats"].get("frames_seen", 0),
             "candidates_emitted": stream_result["stats"].get("candidates_emitted", 0),
             "queue_overflows": stream_result["stats"].get("queue_overflows", 0),
@@ -326,7 +340,14 @@ def process_scene(
             "selector_pool": stream_result["selector_stats"].get("scored_pool", 0),
             "sharpness_floor_used": stream_result.get("sharpness_floor_used", 0.0),
             "gate_relaxed": stream_result.get("gate_relaxed", False),
+            # NOTE: this snapshot is taken at end-of-scan; we re-snap
+            # after save_covers() below so the operator can see the
+            # actual hit-rate the output phase achieved.
             "frame_cache_stats": stream_result.get("frame_cache_stats", {}),
+            # Bounded sample of raw AI responses for parse-failure
+            # diagnosis. Capped at ~8 entries (≤ ~12 KB) so the
+            # decision log stays small.
+            "raw_ai_samples": stream_result.get("raw_ai_samples", []),
             "aborted": stream_result.get("aborted", False),
             "abort_reason": stream_result.get("abort_reason"),
             "tier_used": "stream",
@@ -651,12 +672,25 @@ def process_scene(
                     },
                     quality_flag=quality_flag,
                 )
+        # Re-snap the frame cache stats AFTER save_covers so we can see
+        # the actual hit-rate the output phase achieved. The pre-output
+        # snapshot on stream_scan only shows what the producer cached;
+        # the meaningful number is whether save_covers consumed it
+        # instead of re-decoding the video.
+        post_output_cache_stats = None
+        if frame_cache is not None:
+            try:
+                post_output_cache_stats = frame_cache.stats()
+            except Exception:  # noqa: BLE001
+                post_output_cache_stats = None
+
         phase_results["output"] = {
             "duration_sec": t.elapsed,
             "provided_thumbnails_discovered": (provided_thumb_stats or {}).get("discovered", 0),
             "provided_thumbnails_scanned": (provided_thumb_stats or {}).get("scanned", 0),
             "provided_thumbnails_accepted": (provided_thumb_stats or {}).get("accepted", 0),
             "provided_thumbnails_imported": (provided_thumb_stats or {}).get("imported", 0),
+            "frame_cache_stats_after_save": post_output_cache_stats,
         }
     _emit_progress(92)
 

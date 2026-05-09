@@ -35,6 +35,7 @@ scenes to trust.
 """
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -166,7 +167,25 @@ def run_stream_scan(
         "frames_dup": 0,
         "candidates_emitted": 0,
         "queue_overflows": 0,
+        # Decode vs CV wall split — exposes whether the CPU video decoder
+        # is the actual bottleneck (it almost always is on long-form
+        # 1080p HEVC). Sum of time spent waiting for the PyAV iterator
+        # to yield the next frame (decode + colorspace convert) vs sum
+        # of time spent on CV ops (sharpness, motion, dedup hash).
+        "decode_wall_sec": 0.0,
+        "cv_wall_sec": 0.0,
     }
+    # Capture raw AI responses for diagnosis when scoring silently
+    # produces zero pickable frames (parse_succeeded=False or score==0).
+    # Bounded so a long scan can't blow the JSON sidecar; the first
+    # handful of failures is enough to read the model output.
+    debug_ai = (
+        str(os.environ.get("AMG_STREAMING_DEBUG_AI_RESPONSES", "0")).strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    raw_ai_samples: List[Dict[str, Any]] = []
+    raw_ai_lock = threading.Lock()
+    raw_ai_cap = int(os.environ.get("AMG_STREAMING_DEBUG_AI_RESPONSES_CAP", "8"))
 
     # Tie-breaker for PriorityQueue when two candidates have identical
     # priority — using a monotonically increasing int ensures we never
@@ -190,96 +209,109 @@ def run_stream_scan(
             prev_gray: Optional[np.ndarray] = None
 
             with VideoReader(video_path) as vr:
+                # Decode wall = time spent waiting for the PyAV iterator
+                # to yield the next frame. CV wall = time spent on the
+                # synchronous CV ops between yields. The two together
+                # should sum to ~the sieve thread wall time; the
+                # decode/CV ratio is what tells us whether NVDEC will
+                # actually move the needle.
+                _yield_t = time.time()
                 for ts, frame in vr.iter_frames_sequential(0.0, duration_sec, interval):
-                    if deadline_sec is not None and time.time() >= deadline_sec:
-                        break
-
-                    sieve_stats["frames_seen"] += 1
-                    if is_frame_too_dark(frame):
-                        sieve_stats["frames_dark"] += 1
-                        continue
-
-                    sharp = measure_sharpness(frame)
-
-                    # Relative sharpness floor: 10th percentile of the
-                    # last 200 samples, never below half the absolute
-                    # hard floor. Bootstraps very loose so we don't
-                    # starve the GPU at the start of the scene.
-                    sharpness_window.append(sharp)
-                    if len(sharpness_window) > 200:
-                        sharpness_window = sharpness_window[-200:]
-                    if len(sharpness_window) >= 30:
-                        rel_floor = float(np.percentile(sharpness_window, 10))
-                    else:
-                        rel_floor = SHARPNESS_HARD_FLOOR / 4.0
-                    rel_floor = max(rel_floor, SHARPNESS_HARD_FLOOR / 2.0)
-
-                    if sharp < rel_floor:
-                        sieve_stats["frames_below_floor"] += 1
-                        continue
-
-                    small = cv2.resize(frame, ANALYSIS_FRAME_SIZE)
-                    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-                    motion = measure_motion(prev_gray, gray) if prev_gray is not None else 0.0
-                    prev_gray = gray
-
-                    if motion > MOTION_CAP_TIER_3:
-                        sieve_stats["frames_high_motion"] += 1
-                        continue
-
-                    phash = compute_perceptual_hash(frame)
-                    if phash is not None:
-                        if any(
-                            are_near_duplicates(phash, prev, DEDUP_HAMMING_THRESHOLD)
-                            for prev in seen_hashes
-                        ):
-                            sieve_stats["frames_dup"] += 1
-                            continue
-                        seen_hashes.append(phash)
-                        # Bound dedup memory — 600 hashes ≈ 5KB and
-                        # covers ~10 minutes worth of "recent" frames at
-                        # 1 fps. Older frames drop out so a long-form
-                        # scene's late candidates don't get falsely
-                        # de-duped against ancient ones.
-                        if len(seen_hashes) > 600:
-                            seen_hashes = seen_hashes[-600:]
-
-                    zone_tags = _zone_tags(ts, duration_sec)
-                    priority = _candidate_priority(
-                        sharpness=sharp,
-                        motion=motion,
-                        zone_tags=zone_tags,
-                    )
-
-                    candidate = {
-                        "timestamp_sec": float(ts),
-                        "frame": frame,  # full-res, used for AI scoring
-                        "sharpness": float(sharp),
-                        "motion": float(motion or 0.0),
-                        "tier": "stream",
-                        "zone_tags": zone_tags,
-                    }
-                    if phash is not None:
-                        candidate["_phash"] = str(phash)
-
-                    # Cache the full-res frame keyed by timestamp so the
-                    # output phase doesn't re-decode. The decoder
-                    # produced this exact ndarray; sharing the reference
-                    # is free.
-                    cache.put(float(ts), full_frame=frame)
-
+                    sieve_stats["decode_wall_sec"] += time.time() - _yield_t
+                    _cv_t0 = time.time()
                     try:
-                        cand_q.put(
-                            (-priority, _next_seq(), candidate),
-                            timeout=2.0,
+                        if deadline_sec is not None and time.time() >= deadline_sec:
+                            break
+
+                        sieve_stats["frames_seen"] += 1
+                        if is_frame_too_dark(frame):
+                            sieve_stats["frames_dark"] += 1
+                            continue
+
+                        sharp = measure_sharpness(frame)
+
+                        # Relative sharpness floor: 10th percentile of the
+                        # last 200 samples, never below half the absolute
+                        # hard floor. Bootstraps very loose so we don't
+                        # starve the GPU at the start of the scene.
+                        sharpness_window.append(sharp)
+                        if len(sharpness_window) > 200:
+                            sharpness_window = sharpness_window[-200:]
+                        if len(sharpness_window) >= 30:
+                            rel_floor = float(np.percentile(sharpness_window, 10))
+                        else:
+                            rel_floor = SHARPNESS_HARD_FLOOR / 4.0
+                        rel_floor = max(rel_floor, SHARPNESS_HARD_FLOOR / 2.0)
+
+                        if sharp < rel_floor:
+                            sieve_stats["frames_below_floor"] += 1
+                            continue
+
+                        small = cv2.resize(frame, ANALYSIS_FRAME_SIZE)
+                        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                        motion = measure_motion(prev_gray, gray) if prev_gray is not None else 0.0
+                        prev_gray = gray
+
+                        if motion > MOTION_CAP_TIER_3:
+                            sieve_stats["frames_high_motion"] += 1
+                            continue
+
+                        phash = compute_perceptual_hash(frame)
+                        if phash is not None:
+                            if any(
+                                are_near_duplicates(phash, prev, DEDUP_HAMMING_THRESHOLD)
+                                for prev in seen_hashes
+                            ):
+                                sieve_stats["frames_dup"] += 1
+                                continue
+                            seen_hashes.append(phash)
+                            # Bound dedup memory — 600 hashes ≈ 5KB and
+                            # covers ~10 minutes worth of "recent" frames at
+                            # 1 fps. Older frames drop out so a long-form
+                            # scene's late candidates don't get falsely
+                            # de-duped against ancient ones.
+                            if len(seen_hashes) > 600:
+                                seen_hashes = seen_hashes[-600:]
+
+                        zone_tags = _zone_tags(ts, duration_sec)
+                        priority = _candidate_priority(
+                            sharpness=sharp,
+                            motion=motion,
+                            zone_tags=zone_tags,
                         )
-                        sieve_stats["candidates_emitted"] += 1
-                    except queue.Full:
-                        sieve_stats["queue_overflows"] += 1
-                        # Dispatcher is saturated; drop this one rather
-                        # than block the producer. Selector will pick
-                        # from the higher-priority backlog.
-                        cache.discard(float(ts))
+
+                        candidate = {
+                            "timestamp_sec": float(ts),
+                            "frame": frame,  # full-res, used for AI scoring
+                            "sharpness": float(sharp),
+                            "motion": float(motion or 0.0),
+                            "tier": "stream",
+                            "zone_tags": zone_tags,
+                        }
+                        if phash is not None:
+                            candidate["_phash"] = str(phash)
+
+                        # Cache the full-res frame keyed by timestamp so the
+                        # output phase doesn't re-decode. The decoder
+                        # produced this exact ndarray; sharing the reference
+                        # is free.
+                        cache.put(float(ts), full_frame=frame)
+
+                        try:
+                            cand_q.put(
+                                (-priority, _next_seq(), candidate),
+                                timeout=2.0,
+                            )
+                            sieve_stats["candidates_emitted"] += 1
+                        except queue.Full:
+                            sieve_stats["queue_overflows"] += 1
+                            # Dispatcher is saturated; drop this one rather
+                            # than block the producer. Selector will pick
+                            # from the higher-priority backlog.
+                            cache.discard(float(ts))
+                    finally:
+                        sieve_stats["cv_wall_sec"] += time.time() - _cv_t0
+                        _yield_t = time.time()
         except Exception as exc:  # noqa: BLE001 - reported back to dispatcher
             sieve_error["exc"] = exc
             log.error("stream sieve failed", error=str(exc))
@@ -302,11 +334,41 @@ def run_stream_scan(
     submitted = 0
     completed = 0
     ai_failures = 0
+    parse_failed_count = 0
+    score_zero_count = 0
+    ai_wall_total = 0.0
     skipped = 0
     aborted = False
     abort_reason: Optional[str] = None
     all_scored: List[Dict[str, Any]] = []
     dispatcher_started = time.time()
+
+    def _capture_raw_ai_sample(
+        candidate: Dict[str, Any],
+        ai_resp: AIResponse,
+        scored: ScoredFrame,
+        reason: str,
+    ) -> None:
+        # Bounded sample of raw model text so we can read why the
+        # selector pool is empty. Triggered automatically on every
+        # parse_failed/score_zero (this is the failure mode we're
+        # diagnosing), or always if AMG_STREAMING_DEBUG_AI_RESPONSES=1.
+        with raw_ai_lock:
+            if len(raw_ai_samples) >= raw_ai_cap and not debug_ai:
+                return
+            raw_text = ai_resp.raw_text or ""
+            sample = {
+                "timestamp_sec": candidate.get("timestamp_sec"),
+                "reason": reason,
+                "ai_success": bool(ai_resp.success),
+                "ai_error_code": ai_resp.error_code,
+                "ai_error_message": (ai_resp.error_message or "")[:200],
+                "raw_text_truncated": raw_text[:1500],
+                "raw_text_len": len(raw_text),
+                "parsed_score": float(scored.score) if scored.score is not None else None,
+                "parse_succeeded": bool(scored.parse_succeeded),
+            }
+            raw_ai_samples.append(sample)
 
     def _score_one(candidate: Dict[str, Any]) -> Dict[str, Any]:
         frame = candidate.get("frame")
@@ -335,6 +397,18 @@ def run_stream_scan(
             scored = ScoredFrame(parse_succeeded=False)
         candidate["scored_frame"] = scored
         candidate["ai_response"] = ai_resp
+
+        # Capture the response when scoring "succeeded" but produced
+        # nothing the selector can use. This is the silent failure mode
+        # that tanked Y_B_003: 49 successful AI calls, every one parsed
+        # to score 0 or failed to parse. Without the raw text in the
+        # decision log we have no way to diagnose the prompt regression.
+        if ai_resp.success and (not scored.parse_succeeded or scored.score <= 0):
+            reason = "parse_failed" if not scored.parse_succeeded else "score_zero"
+            _capture_raw_ai_sample(candidate, ai_resp, scored, reason)
+        elif debug_ai and ai_resp.success:
+            _capture_raw_ai_sample(candidate, ai_resp, scored, "debug_ok")
+
         return candidate
 
     def _budget_exhausted() -> bool:
@@ -414,6 +488,14 @@ def run_stream_scan(
                         error_message=str(exc),
                     )
                     result = candidate
+                ai_wall_total += float(result.get("ai_wall_sec") or 0.0)
+                _scored = result.get("scored_frame")
+                _ai_resp = result.get("ai_response")
+                if _ai_resp is not None and getattr(_ai_resp, "success", False):
+                    if _scored is None or not getattr(_scored, "parse_succeeded", False):
+                        parse_failed_count += 1
+                    elif (getattr(_scored, "score", 0) or 0) <= 0:
+                        score_zero_count += 1
                 all_scored.append(result)
                 selector.add(result)
 
@@ -446,6 +528,14 @@ def run_stream_scan(
                 try:
                     result = fut.result(timeout=remaining)
                     completed += 1
+                    ai_wall_total += float(result.get("ai_wall_sec") or 0.0)
+                    _scored = result.get("scored_frame")
+                    _ai_resp = result.get("ai_response")
+                    if _ai_resp is not None and getattr(_ai_resp, "success", False):
+                        if _scored is None or not getattr(_scored, "parse_succeeded", False):
+                            parse_failed_count += 1
+                        elif (getattr(_scored, "score", 0) or 0) <= 0:
+                            score_zero_count += 1
                     all_scored.append(result)
                     selector.add(result)
                 except Exception as exc:  # noqa: BLE001
@@ -471,10 +561,22 @@ def run_stream_scan(
         aborted = True
 
     final = selector.finalize()
+
+    # Round the wall-time accounting once so the decision log isn't
+    # cluttered with float noise.
+    sieve_stats["decode_wall_sec"] = round(sieve_stats["decode_wall_sec"], 2)
+    sieve_stats["cv_wall_sec"] = round(sieve_stats["cv_wall_sec"], 2)
+
     on_log(
         f"[stream] final: scored={completed} picks={len(final['picks'])} "
         f"sharpness_floor={final['sharpness_floor_used']:.0f} "
         f"gate_relaxed={final['gate_relaxed']}"
+    )
+    on_log(
+        f"[stream] timing: decode_wall={sieve_stats['decode_wall_sec']:.1f}s "
+        f"cv_wall={sieve_stats['cv_wall_sec']:.1f}s "
+        f"ai_wall={ai_wall_total:.1f}s "
+        f"parse_failed={parse_failed_count} score_zero={score_zero_count}"
     )
 
     return {
@@ -490,6 +592,9 @@ def run_stream_scan(
             "submitted": submitted,
             "completed": completed,
             "ai_failures": ai_failures,
+            "parse_failed": parse_failed_count,
+            "score_zero": score_zero_count,
+            "ai_wall_sec": round(ai_wall_total, 2),
             "skipped": skipped,
             "wall_sec": round(time.time() - dispatcher_started, 2),
             "max_workers": workers,
@@ -499,4 +604,5 @@ def run_stream_scan(
         },
         "selector_stats": final["stats"],
         "frame_cache_stats": cache.stats(),
+        "raw_ai_samples": raw_ai_samples,
     }
