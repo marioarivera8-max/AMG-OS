@@ -1,194 +1,73 @@
-# AMG OS v11 — Operations Runbook
+# AMG OS Runbook
 
-Quick reference for daily operations.
+Operational runbook for both cloud production and local CLI workflows.
 
----
+## Environment Scope
 
-## Daily Workflow
+- Cloud production: controller at `https://amg.exoticplug.app`, jobs dispatched to
+  Runpod.
+- Local development: `amg` CLI on developer machine.
 
-```bash
-# 1. Drop new scenes into incoming
-mv ~/Downloads/27\ BBGG*  ~/AMG_Processing/incoming/
+Use cloud defaults from `AGENT_CONTEXT_CURRENT.md` as authoritative.
 
-# 2. Process the batch
-amg batch ~/AMG_Processing/incoming/
+## Cloud Daily Operations
 
-# 3. Review covers + contact sheets
-open ~/AMG_Processing/incoming/27\ BBGG*/27_BBGG_amg_v11/
-```
+1. Open the UI and submit one scene/job.
+2. Watch job state and pod readiness in controller logs if needed.
+3. Review resulting covers and contact sheet visually.
+4. Confirm decision log metrics (`decode_wall_sec`, `cv_wall_sec`, `ai_wall_sec`)
+   when evaluating performance work.
 
----
-
-## Common Commands
-
-```bash
-amg verify              # Health check (run if anything seems off)
-amg status              # What's been happening recently
-amg process <path>      # Single scene
-amg batch <path>        # Multiple scenes in folder
-amg analyze             # Last 30 days of performance
-amg analyze --days 7    # Last week only
-amg calibrate Yasmina   # Recompute Yasmina's thresholds from history
-amg performers          # List performer registry
-amg version             # Version + Ollama status
-amg clean               # Cleanup old work directories
-```
-
----
-
-## Adding a New Studio
-
-You don't need to. v11 auto-creates studio profiles when it encounters a new one.
-
-If you want to customize:
+## Local Daily Operations
 
 ```bash
-# Profile auto-created at:
-# ~/AMG_OS/data/studio_profiles/{StudioName}.json
-
-# Edit it directly to set:
-# - default_genres
-# - common_scene_types
-# - language preferences
-# - banned terms
-```
-
-Then next batch picks up the changes.
-
----
-
-## What "Floor Met" Means
-
-v11 ALWAYS delivers ≥10 covers per scene. The contact sheet shows a quality flag:
-
-- **GOOD** — Normal pipeline succeeded, no fallbacks
-- **AI_GENERATED** — Fallback C used (simplified prompt). Review covers carefully.
-- **REVIEW_NEEDED** — Fallback D used (pure CV rescue). Some covers may be subpar.
-
-If you see REVIEW_NEEDED, the scene was unusual — maybe a compilation, a long
-talking-head segment, or a corrupt source. Check the decision log:
-
-```bash
-cat ~/AMG_OS/data/decision_logs/{scene_id}.json | jq .
-```
-
----
-
-## When Ollama Misbehaves
-
-```bash
-# Symptom: "Ollama: not responding" in `amg verify`
-brew services restart ollama
-
-# Symptom: Model not loaded
-ollama pull qwen2.5vl:7b
-
-# Symptom: Slow scoring (>200s/scene)
-amg verify  # Look for missing env vars
-# If env vars wrong, re-run setup
-./scripts/setup.sh
-
-# Nuclear option: restart from scratch
-brew services stop ollama
-sleep 2
-brew services start ollama
 amg verify
+amg process <video-or-folder>
 ```
 
----
+Use single-scene iteration during tuning.
 
-## When v11 Hangs
-
-Ctrl+C is safe — pipeline cleans up its lock file. Your batch resumes wherever
-you re-run it (skipping already-processed scenes by default).
-
-If something is REALLY stuck:
+## Live Controller Checks
 
 ```bash
-# Find the running process
-ps aux | grep "amg.cli"
-
-# Kill it (note the PID)
-kill <PID>
-
-# Remove stale lock if needed
-rm ~/AMG_OS/data/.batch.lock
+ssh -i "$HOME/.ssh/id_ed25519" root@5.161.231.249 "systemctl status amg-controller --no-pager"
+ssh -i "$HOME/.ssh/id_ed25519" root@5.161.231.249 "journalctl -u amg-controller -n 120 --no-pager"
 ```
 
----
+## Live Runtime Defaults (Cloud)
 
-## Multi-Mac Workflow
+- `AMG_JOB_BACKEND=runpod`
+- `AMG_PROCESSING_PROFILE=fast`
+- `AMG_STREAMING_SCAN=1`
+- `AMG_RUNPOD_VIDEO_BACKEND=ffmpeg_cuda`
+- `AMG_VIDEO_HWACCEL=cuda`
+- `AMG_GPU_CV_ENABLED=1`
+- `AMG_GPU_CV_BACKEND=opencv_cuda`
+- `AMG_GPU_DEDUP_ENABLED=1`
+- `AMG_RUNPOD_OLLAMA_NUM_PARALLEL=6`
+- `AMG_RUNPOD_AI_PARALLEL_WORKERS=6`
+- `AMG_RUNPOD_IDLE_TERMINATE_SEC=900`
+- `AMG_ENABLE_SCENE_INSIGHT=0`
+- `AMG_ENABLE_PROVIDED_THUMBNAIL_SCORING=0`
+- `AMG_SOFT_THUMB_ENABLED=0`
 
-```bash
-# After making code changes on Mac A:
-cd ~/AMG_OS
-git add -A && git commit -m "tweak: adjust Tier 1 floor for BlondeHexe"
-git push
+AMG_OS v1 measured warm-pod pipeline baseline:
 
-# On Mac B:
-cd ~/AMG_OS
-git pull
-# That's it — code synced. Data stays local on each Mac.
-```
+- 24m07s HEVC scene: `130.15s`
+- 35m11s H264 scene: `140.45s`
 
-If you change `requirements.txt`:
+## Fast Rollback Switches
 
-```bash
-# On each Mac:
-source venv/bin/activate
-pip install -r requirements.txt
-```
+If a GPU migration step regresses quality or stability, disable only the
+affected layer:
 
----
+- Decode rollback: `AMG_RUNPOD_VIDEO_BACKEND=auto`
+- GPU CV rollback: `AMG_GPU_CV_ENABLED=0`
+- GPU dedup rollback: `AMG_GPU_DEDUP_ENABLED=0`
 
-## Reviewing Covers
+## Guardrails
 
-After processing, the work directory contains:
-
-```
-27 BBGG - couple swap_amg_v11/
-├── 00_YasminaBrady_contact_sheet.jpg   ← Open this first
-└── covers/
-    ├── 01_Yasmina_BBGG_FINISH_Direct_9.5_14m24s.jpg   ← Top pick
-    ├── 02_Yasmina_BBGG_PENETRATION_Direct_9.0_8m12s.jpg
-    ├── 03_Yasmina_BBGG_NUDE_Direct_8.5_3m24s.jpg
-    ├── ...
-    └── 12_Yasmina_BBGG_BUILDUP_Averted_7.0_5m48s.jpg
-```
-
-Filenames encode everything you need:
-- `01` = rank (highest score first)
-- `Yasmina_BBGG` = performer + code
-- `FINISH` = scene type / origin tier
-- `Direct` = gaze direction
-- `9.5` = AI score
-- `14m24s` = position in source video
-
----
-
-## Performance Targets
-
-After a few batches, run `amg analyze` and check:
-
-| Metric | Target | What if missing |
-|---|---|---|
-| Avg per scene | 60-120 sec | Check `amg verify`, env vars |
-| Avg covers per scene | 11-13 | Normal — extras above floor |
-| Avg top-pick score | 8.0+ | Quality of source content |
-| Floor compliance | 100% | Always 100% — non-negotiable |
-| Fallback usage | <10% | Higher = unusual content batch |
-
----
-
-## When to Recalibrate
-
-After **50+ scenes** for a single studio, recalibration may improve speed:
-
-```bash
-amg calibrate YasminaBrady
-```
-
-This computes the studio's actual Tier 1 threshold from real history and
-updates the profile. Future scenes from that studio will use the refined value.
-
-Don't bother for new studios with <20 scenes — defaults work fine.
+- No auto-upload flows.
+- No closed API vision services.
+- Preserve `REQUIRE_2257_DOC=False` in `amg/config.py`.
+- Validate quality visually before calling a speed change successful.

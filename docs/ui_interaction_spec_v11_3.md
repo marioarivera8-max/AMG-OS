@@ -1,100 +1,33 @@
-# AMG OS UI Interaction Spec (v11.3)
+# UI Interaction Spec (v11.3 Active)
 
-This document locks the target interaction model for the current UI redesign cycle.
+This is the canonical active UI interaction spec.
 
-## Core Workflow
+## Core Operator Flow
 
-1. Operator starts or uploads a scene from Process.
-2. Operator monitors queue/progress and opens completed scene review.
-3. Operator reviews covers quickly (mouse or keyboard), saves review.
-4. Operator uses Library to triage what needs action next.
-5. Operator uses Feedback to inspect disagreement patterns and model alignment.
+1. Submit scene/job from Process UI.
+2. Monitor queue and run state.
+3. Open completed scene review.
+4. Approve or adjust cover choices manually.
+5. Use Library/Feedback views to prioritize next actions.
 
-## Process Page
+## Interaction Constraints
 
-### Current Constraints
-- One backend queue, single running job, FIFO dispatch.
-- HTMX polling for active jobs.
-- Recent scenes and timing history shown in side panel.
+- Keep Jinja + HTMX architecture.
+- Keep review actions explicit and operator-controlled.
+- Preserve current backend payload compatibility for review persistence.
+- No auto-upload behavior in v11.x UI.
 
-### Target Interaction Model
-- Separate jobs into:
-  - Active queue (`queued`/`running`)
-  - Recently completed (`done`/`error`)
-- Keep drop/upload flow as the primary CTA.
-- Keep per-job phase progress visible and refresh active jobs every 2s.
-- Make next action explicit for completed jobs (`Review covers`).
+## Page-Level Intent
 
-## Library Page
+- Process: clear queue state and next action.
+- Library: action-first sorting/filtering.
+- Scene Review: fast keyboard/mouse decision flow.
+- Feedback: inspect disagreement and model-alignment patterns.
 
-### Current Constraints
-- Server-rendered filtering only.
-- Scene status inferred from covers/review marker.
+## Source of Truth Rule
 
-### Target Interaction Model
-- Default sort/order prioritizes action:
-  - `review` and `failed` first by default.
-- Filters are semantically correct and predictable:
-  - status: `review`, `ready`, `draft`, `failed`
-  - score filtering normalized to 0-100 display scale.
-- Add explicit sort controls:
-  - `action_queue`
-  - `newest`
-  - `highest_score`
-  - `lowest_score`
-- Add scalable listing controls:
-  - server-side `limit`
-  - "Load more" by query param.
+When UI behavior claims conflict with runtime docs, align with:
 
-## Scene Review Page
-
-### Current Constraints
-- Per-cover decisions written via hidden inputs.
-- Review submit contract must remain backward compatible.
-
-### Target Interaction Model
-- Sticky review toolbar with:
-  - selected keep/maybe count
-  - unsaved indicator
-  - save CTA
-- Keyboard-first review:
-  - `1` keep, `2` maybe, `3` reject, `0` clear
-  - `j` / `k` next/previous cover
-  - `[` / `]` previous/next cover
-  - `Escape` closes modal preview
-- Keep existing field names and payload contract for `save_review`.
-
-## Feedback Page
-
-### Current Constraints
-- Data source is `feedback.jsonl`.
-- Aggregates and recent rows generated in backend.
-
-### Target Interaction Model
-- Add GET filters:
-  - `scene`
-  - `studio`
-  - `since_days`
-  - `view` (`disagreements` or `all`)
-- Clarify metrics:
-  - score agreement is `within +/-5`
-  - show MAE separately and clearly
-- Table identifies actual cover context:
-  - filename
-  - cover timestamp seconds
-  - save timestamp
-- Show trend and coverage summary over recent days.
-
-## Design System + Hardening
-
-### Target Decisions
-- Move shared CSS from inline template to static asset.
-- Keep Jinja + HTMX architecture; no SPA migration.
-- Vendor HTMX locally under static assets.
-- Reduce inline styles by introducing reusable utility classes and partials.
-
-## Non-Goals
-
-- No automation past manual operator approval.
-- No auth/multi-user/deployment complexity.
-- No changes to pipeline quality logic in this UI effort.
+- `AGENT_CONTEXT_CURRENT.md`
+- `docs/RUNBOOK.md`
+- `docs/TROUBLESHOOTING.md`
