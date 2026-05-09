@@ -567,6 +567,16 @@ class RunpodBackend(JobBackend):
             "AMG_PROVIDED_THUMB_MAX_SCAN",
             "AMG_PROVIDED_THUMB_MAX_ACCEPT",
             "AMG_VISION_MODEL_OVERRIDE",
+            "AMG_STREAMING_SCAN",
+            "AMG_STREAMING_SCAN_INTERVAL_SEC",
+            "AMG_STREAMING_SCAN_MAX_QUEUED",
+            "AMG_STREAMING_SCAN_MAX_AI_CALLS",
+            "AMG_STREAMING_FRAME_CACHE_MAX_MB",
+            "AMG_STREAMING_FUSED_AI_WEIGHT",
+            "AMG_STREAMING_FUSED_SHARP_WEIGHT",
+            "AMG_STREAMING_ZONE_BONUS_FINISH",
+            "AMG_STREAMING_ZONE_BONUS_BUILDUP",
+            "AMG_STREAMING_POST_AI_SHARP_PERCENTILE",
         ]
         for env_name in forwarded_env:
             if env_name in os.environ:

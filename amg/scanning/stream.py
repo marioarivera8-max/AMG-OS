@@ -1,0 +1,502 @@
+"""
+Streaming scan — single-pass producer/consumer pipeline.
+
+Replaces the classic ``tier_scan + finish_hunter + buildup_hunter +
+cluster + floor_enforcement`` chain with one continuous flow:
+
+    [decoder + CV sieve thread]
+             │   pushes survivors into a bounded priority queue
+             ▼
+    [AI dispatcher pump (this thread)]
+             │   keeps ``max_workers`` requests in flight to Ollama
+             ▼
+    [LiveSelector] — fused score + post-AI sharpness gate
+
+The motivating diagnosis (2026-05-08 audit on Y&B_003): the classic path
+spent 24:34 wall-time, made 15 AI calls, and used the GPU for ~16
+seconds. Each phase decoded the whole video and applied an over-strict
+percentile-based sharpness gate (tier_1_floor=674 — calibration was
+dominated by a few static frames). Almost nothing reached the AI; the
+fallback cascade then shipped 15 blurry covers via a *looser* gate plus
+the *simplified* prompt — the classic too-strict-then-too-lenient
+failure mode.
+
+The streaming scan fixes both:
+  1. ONE decode pass, sieve uses a *relative* sharpness floor (10th
+     percentile of a rolling 200-sample window) rather than a brittle
+     absolute calibration percentile. This keeps the GPU fed.
+  2. The selector fuses AI score with sharpness and applies a post-AI
+     sharpness gate at the *25th percentile of actually-scored frames*,
+     so the AI can't outvote real blur.
+
+This module is feature-flagged behind ``AMG_STREAMING_SCAN=1``. The
+classic pipeline stays in tree until the new path has shipped enough
+scenes to trust.
+"""
+from __future__ import annotations
+
+import queue
+import threading
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+import cv2
+import numpy as np
+
+from amg.config import (
+    AI_PARALLEL_WORKERS,
+    ANALYSIS_FRAME_SIZE,
+    BUILDUP_HUNTER_ZONE_END_PCT,
+    BUILDUP_HUNTER_ZONE_START_PCT,
+    DEDUP_HAMMING_THRESHOLD,
+    FINISH_HUNTER_ZONE_START_PCT,
+    MOTION_CAP_TIER_3,
+    SHARPNESS_HARD_FLOOR,
+    STREAMING_FRAME_CACHE_MAX_MB,
+    STREAMING_SCAN_INTERVAL_SEC,
+    STREAMING_SCAN_MAX_AI_CALLS,
+    STREAMING_SCAN_MAX_QUEUED,
+)
+from amg.scanning.selector import LiveSelector
+from amg.scoring.ai_client import AIClient, AIResponse
+from amg.scoring.parser import ScoredFrame, cap_score_for_excellence, parse_ai_response
+from amg.video.dedup import are_near_duplicates, compute_perceptual_hash
+from amg.video.frame_cache import FrameCache
+from amg.video.frames import is_frame_too_dark, measure_motion, measure_sharpness
+from amg.video.reader import VideoReader
+from amg.utils.logging import get_logger
+
+log = get_logger("scanning.stream")
+
+
+_SENTINEL = object()
+
+
+def _zone_tags(ts: float, duration_sec: float) -> List[str]:
+    if duration_sec <= 0:
+        return []
+    pct = float(ts) / float(duration_sec)
+    tags: List[str] = []
+    if pct >= FINISH_HUNTER_ZONE_START_PCT:
+        tags.append("finish_zone")
+    if BUILDUP_HUNTER_ZONE_START_PCT <= pct <= BUILDUP_HUNTER_ZONE_END_PCT:
+        tags.append("buildup_zone")
+    return tags
+
+
+def _candidate_priority(
+    *,
+    sharpness: float,
+    motion: float,
+    zone_tags: List[str],
+) -> float:
+    """Higher = scored sooner. Sharpness dominates because the GPU's job
+    is easier on sharp frames, plus the eventual fused-score winners are
+    almost always sharp. Zone bonuses give finish/buildup a head start."""
+    score = float(sharpness or 0.0)
+    if motion is not None:
+        # Light motion is fine; heavy motion already failed the gate.
+        score -= min(50.0, max(0.0, float(motion) - 1.0) * 10.0)
+    if "finish_zone" in zone_tags:
+        score += 200.0
+    if "buildup_zone" in zone_tags:
+        score += 120.0
+    return score
+
+
+def run_stream_scan(
+    video_path: Path,
+    duration_sec: float,
+    prompt: str,
+    *,
+    target_count: int,
+    cover_cap: int,
+    deadline_sec: Optional[float] = None,
+    system_prompt: Optional[str] = None,
+    ai_client: Optional[AIClient] = None,
+    on_log: Callable[[str], None] = lambda _s: None,
+    on_progress: Callable[[int], None] = lambda _p: None,
+    interval_sec: Optional[float] = None,
+    max_workers: Optional[int] = None,
+    max_ai_calls: Optional[int] = None,
+    max_queued: Optional[int] = None,
+    frame_cache_max_mb: Optional[int] = None,
+    selector_overrides: Optional[Dict[str, Any]] = None,
+    progress_low: int = 20,
+    progress_high: int = 88,
+) -> Dict[str, Any]:
+    """Run the streaming scan and return final candidates + stats.
+
+    Returns dict shaped like::
+
+        {
+          'picks':           [candidate dicts, len <= cover_cap],
+          'all_scored':      [every candidate sent to AI, with results],
+          'frame_cache':     FrameCache (caller passes to save_covers),
+          'stats':           { 'submitted', 'completed', 'skipped', ... },
+          'selector_stats':  { ... },
+          'sharpness_floor_used': float,
+          'gate_relaxed':    bool,
+          'aborted':         bool,
+          'abort_reason':    Optional[str],
+        }
+
+    Caller is responsible for clearing ``frame_cache`` once the output
+    phase has consumed it (or just letting it fall out of scope).
+    """
+    interval = float(interval_sec or STREAMING_SCAN_INTERVAL_SEC)
+    workers = int(max_workers or AI_PARALLEL_WORKERS or 1)
+    ai_call_cap = int(max_ai_calls if max_ai_calls is not None else STREAMING_SCAN_MAX_AI_CALLS)
+    queue_cap = int(max_queued or STREAMING_SCAN_MAX_QUEUED)
+    cache_mb = int(frame_cache_max_mb or STREAMING_FRAME_CACHE_MAX_MB)
+
+    selector_kwargs = dict(selector_overrides or {})
+    selector = LiveSelector(target_k=cover_cap, **selector_kwargs)
+    cache = FrameCache(max_bytes=cache_mb * 1024 * 1024)
+    cand_q: "queue.PriorityQueue[Any]" = queue.PriorityQueue(maxsize=queue_cap)
+    sieve_done = threading.Event()
+    sieve_error: Dict[str, Any] = {}
+    sieve_stats: Dict[str, Any] = {
+        "frames_seen": 0,
+        "frames_dark": 0,
+        "frames_below_floor": 0,
+        "frames_high_motion": 0,
+        "frames_dup": 0,
+        "candidates_emitted": 0,
+        "queue_overflows": 0,
+    }
+
+    # Tie-breaker for PriorityQueue when two candidates have identical
+    # priority — using a monotonically increasing int ensures we never
+    # try to compare candidate dicts (which would fail).
+    seq_lock = threading.Lock()
+    seq_counter = [0]
+
+    def _next_seq() -> int:
+        with seq_lock:
+            seq_counter[0] += 1
+            return seq_counter[0]
+
+    if ai_client is None:
+        ai_client = AIClient()
+
+    # ----- sieve thread -----
+    def sieve_loop() -> None:
+        try:
+            sharpness_window: List[float] = []
+            seen_hashes: List[Any] = []
+            prev_gray: Optional[np.ndarray] = None
+
+            with VideoReader(video_path) as vr:
+                for ts, frame in vr.iter_frames_sequential(0.0, duration_sec, interval):
+                    if deadline_sec is not None and time.time() >= deadline_sec:
+                        break
+
+                    sieve_stats["frames_seen"] += 1
+                    if is_frame_too_dark(frame):
+                        sieve_stats["frames_dark"] += 1
+                        continue
+
+                    sharp = measure_sharpness(frame)
+
+                    # Relative sharpness floor: 10th percentile of the
+                    # last 200 samples, never below half the absolute
+                    # hard floor. Bootstraps very loose so we don't
+                    # starve the GPU at the start of the scene.
+                    sharpness_window.append(sharp)
+                    if len(sharpness_window) > 200:
+                        sharpness_window = sharpness_window[-200:]
+                    if len(sharpness_window) >= 30:
+                        rel_floor = float(np.percentile(sharpness_window, 10))
+                    else:
+                        rel_floor = SHARPNESS_HARD_FLOOR / 4.0
+                    rel_floor = max(rel_floor, SHARPNESS_HARD_FLOOR / 2.0)
+
+                    if sharp < rel_floor:
+                        sieve_stats["frames_below_floor"] += 1
+                        continue
+
+                    small = cv2.resize(frame, ANALYSIS_FRAME_SIZE)
+                    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                    motion = measure_motion(prev_gray, gray) if prev_gray is not None else 0.0
+                    prev_gray = gray
+
+                    if motion > MOTION_CAP_TIER_3:
+                        sieve_stats["frames_high_motion"] += 1
+                        continue
+
+                    phash = compute_perceptual_hash(frame)
+                    if phash is not None:
+                        if any(
+                            are_near_duplicates(phash, prev, DEDUP_HAMMING_THRESHOLD)
+                            for prev in seen_hashes
+                        ):
+                            sieve_stats["frames_dup"] += 1
+                            continue
+                        seen_hashes.append(phash)
+                        # Bound dedup memory — 600 hashes ≈ 5KB and
+                        # covers ~10 minutes worth of "recent" frames at
+                        # 1 fps. Older frames drop out so a long-form
+                        # scene's late candidates don't get falsely
+                        # de-duped against ancient ones.
+                        if len(seen_hashes) > 600:
+                            seen_hashes = seen_hashes[-600:]
+
+                    zone_tags = _zone_tags(ts, duration_sec)
+                    priority = _candidate_priority(
+                        sharpness=sharp,
+                        motion=motion,
+                        zone_tags=zone_tags,
+                    )
+
+                    candidate = {
+                        "timestamp_sec": float(ts),
+                        "frame": frame,  # full-res, used for AI scoring
+                        "sharpness": float(sharp),
+                        "motion": float(motion or 0.0),
+                        "tier": "stream",
+                        "zone_tags": zone_tags,
+                    }
+                    if phash is not None:
+                        candidate["_phash"] = str(phash)
+
+                    # Cache the full-res frame keyed by timestamp so the
+                    # output phase doesn't re-decode. The decoder
+                    # produced this exact ndarray; sharing the reference
+                    # is free.
+                    cache.put(float(ts), full_frame=frame)
+
+                    try:
+                        cand_q.put(
+                            (-priority, _next_seq(), candidate),
+                            timeout=2.0,
+                        )
+                        sieve_stats["candidates_emitted"] += 1
+                    except queue.Full:
+                        sieve_stats["queue_overflows"] += 1
+                        # Dispatcher is saturated; drop this one rather
+                        # than block the producer. Selector will pick
+                        # from the higher-priority backlog.
+                        cache.discard(float(ts))
+        except Exception as exc:  # noqa: BLE001 - reported back to dispatcher
+            sieve_error["exc"] = exc
+            log.error("stream sieve failed", error=str(exc))
+        finally:
+            sieve_done.set()
+            try:
+                cand_q.put((float("inf"), _next_seq(), _SENTINEL), timeout=2.0)
+            except queue.Full:
+                pass
+
+    sieve_thread = threading.Thread(
+        target=sieve_loop,
+        name="stream-sieve",
+        daemon=True,
+    )
+    sieve_thread.start()
+
+    # ----- AI dispatcher pump -----
+    in_flight: Dict[Any, Dict[str, Any]] = {}
+    submitted = 0
+    completed = 0
+    ai_failures = 0
+    skipped = 0
+    aborted = False
+    abort_reason: Optional[str] = None
+    all_scored: List[Dict[str, Any]] = []
+    dispatcher_started = time.time()
+
+    def _score_one(candidate: Dict[str, Any]) -> Dict[str, Any]:
+        frame = candidate.get("frame")
+        if frame is None:
+            candidate["scored_frame"] = ScoredFrame(parse_succeeded=False)
+            candidate["ai_response"] = AIResponse(
+                success=False,
+                error_code="E_NO_FRAME",
+                error_message="frame missing",
+            )
+            return candidate
+        t0 = time.time()
+        ai_resp = ai_client.score_frame(frame, prompt, system_prompt=system_prompt)
+        candidate["ai_wall_sec"] = round(time.time() - t0, 3)
+        if ai_resp.success:
+            scored = parse_ai_response(ai_resp.raw_text)
+            if scored.parse_succeeded and scored.score > 0:
+                # Inline sharpness refinement (mirrors orchestrator). We
+                # don't pull from the orchestrator helper because doing
+                # so would trip a circular import at module load.
+                scored.score = round(
+                    cap_score_for_excellence(scored, scored.score),
+                    1,
+                )
+        else:
+            scored = ScoredFrame(parse_succeeded=False)
+        candidate["scored_frame"] = scored
+        candidate["ai_response"] = ai_resp
+        return candidate
+
+    def _budget_exhausted() -> bool:
+        if deadline_sec is not None and time.time() >= deadline_sec:
+            return True
+        if ai_call_cap > 0 and submitted >= ai_call_cap:
+            return True
+        return False
+
+    def _emit_progress() -> None:
+        # Linear interpolation between progress_low and progress_high
+        # using "scored frames so far / target_k * heuristic" — we don't
+        # know exact frame total without finishing the scan.
+        if completed == 0:
+            on_progress(progress_low)
+            return
+        # Scale: we expect ~10x cover_cap scored frames in a happy run.
+        denom = max(1, cover_cap * 10)
+        frac = min(1.0, completed / denom)
+        on_progress(progress_low + int((progress_high - progress_low) * frac))
+
+    pump_pulse_at = 0.0
+    next_log_at = time.time() + 10.0
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="stream-ai") as executor:
+
+        def _try_submit_more() -> None:
+            nonlocal submitted
+            while len(in_flight) < workers and not _budget_exhausted():
+                try:
+                    _, _, candidate = cand_q.get(timeout=0.05)
+                except queue.Empty:
+                    return
+                if candidate is _SENTINEL:
+                    # Producer is done. Don't requeue the sentinel; the
+                    # outer loop will notice sieve_done + empty queue and
+                    # break.
+                    return
+                fut = executor.submit(_score_one, candidate)
+                in_flight[fut] = candidate
+                submitted += 1
+
+        # Initial fill so the H100 starts working as soon as the first
+        # CV survivors arrive.
+        while len(in_flight) < workers:
+            if sieve_done.is_set() and cand_q.empty():
+                break
+            _try_submit_more()
+            if not in_flight:
+                # Sieve hasn't produced anything yet — yield briefly.
+                time.sleep(0.05)
+                if sieve_done.is_set() and cand_q.empty():
+                    break
+
+        while in_flight or not (sieve_done.is_set() and cand_q.empty()):
+            if _budget_exhausted():
+                aborted = True
+                if deadline_sec is not None and time.time() >= deadline_sec:
+                    abort_reason = "E_STREAM_DEADLINE"
+                else:
+                    abort_reason = "E_STREAM_AI_CAP"
+                break
+
+            done_set, _ = wait(in_flight, timeout=0.5, return_when=FIRST_COMPLETED)
+            for fut in done_set:
+                candidate = in_flight.pop(fut)
+                completed += 1
+                try:
+                    result = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    ai_failures += 1
+                    log.error("stream AI worker exception", error=str(exc))
+                    candidate["scored_frame"] = ScoredFrame(parse_succeeded=False)
+                    candidate["ai_response"] = AIResponse(
+                        success=False,
+                        error_code="E_AI_WORKER_EXCEPTION",
+                        error_message=str(exc),
+                    )
+                    result = candidate
+                all_scored.append(result)
+                selector.add(result)
+
+            now = time.time()
+            if now >= next_log_at:
+                stats = selector.stats()
+                on_log(
+                    f"[stream] submitted={submitted} completed={completed} "
+                    f"pool={stats['scored_pool']} queued={cand_q.qsize()} "
+                    f"in_flight={len(in_flight)}"
+                )
+                next_log_at = now + 10.0
+
+            _try_submit_more()
+            _emit_progress()
+
+            # Pulse — yield briefly if everything is steady-state empty.
+            if not done_set and not in_flight and sieve_done.is_set() and cand_q.empty():
+                break
+            if now - pump_pulse_at > 30.0:
+                pump_pulse_at = now
+
+        # Drain any in-flight whose deadline arrived mid-call. Bound the
+        # per-future wait so a stuck Ollama call can't pin us forever.
+        if in_flight:
+            on_log(f"[stream] draining {len(in_flight)} in-flight after stop signal")
+            drain_deadline = time.time() + 60.0
+            for fut in list(in_flight.keys()):
+                remaining = max(0.5, drain_deadline - time.time())
+                try:
+                    result = fut.result(timeout=remaining)
+                    completed += 1
+                    all_scored.append(result)
+                    selector.add(result)
+                except Exception as exc:  # noqa: BLE001
+                    ai_failures += 1
+                    log.warn("stream drain failed", error=str(exc))
+                in_flight.pop(fut, None)
+
+        # Anything left in the queue we never got to is "skipped".
+        while True:
+            try:
+                _, _, candidate = cand_q.get_nowait()
+            except queue.Empty:
+                break
+            if candidate is _SENTINEL:
+                continue
+            skipped += 1
+
+    sieve_thread.join(timeout=10.0)
+    if sieve_error.get("exc") is not None and not aborted:
+        # Sieve crashed mid-scan; we still kept whatever we managed to
+        # score. Surface the cause so the operator can investigate.
+        abort_reason = abort_reason or "E_STREAM_SIEVE_FAULT"
+        aborted = True
+
+    final = selector.finalize()
+    on_log(
+        f"[stream] final: scored={completed} picks={len(final['picks'])} "
+        f"sharpness_floor={final['sharpness_floor_used']:.0f} "
+        f"gate_relaxed={final['gate_relaxed']}"
+    )
+
+    return {
+        "picks": final["picks"],
+        "all_scored": all_scored,
+        "frame_cache": cache,
+        "sharpness_floor_used": final["sharpness_floor_used"],
+        "gate_relaxed": final["gate_relaxed"],
+        "aborted": aborted,
+        "abort_reason": abort_reason,
+        "stats": {
+            "interval_sec": interval,
+            "submitted": submitted,
+            "completed": completed,
+            "ai_failures": ai_failures,
+            "skipped": skipped,
+            "wall_sec": round(time.time() - dispatcher_started, 2),
+            "max_workers": workers,
+            "queue_cap": queue_cap,
+            "ai_call_cap": ai_call_cap,
+            **sieve_stats,
+        },
+        "selector_stats": final["stats"],
+        "frame_cache_stats": cache.stats(),
+    }

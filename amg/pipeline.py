@@ -44,6 +44,7 @@ from amg.config import (
     SOFT_THUMB_SAMPLE_COUNT,
     SOFT_THUMB_MIN_SCORE,
     SOFT_THUMB_FILENAME,
+    STREAMING_SCAN_ENABLED,
 )
 from amg.ingest.inventory import find_companion_files, make_work_dir, make_covers_dir
 from amg.ingest.studio_profiles import detect_studio, get_or_create_profile
@@ -65,6 +66,7 @@ from amg.scanning.finish_hunter import run_finish_hunter
 from amg.scanning.buildup_hunter import run_buildup_hunter
 from amg.scanning.cluster import expand_clusters
 from amg.scanning.fallback import run_floor_enforcement_cascade
+from amg.scanning.stream import run_stream_scan
 from amg.compliance.doc_2257 import verify_2257
 from amg.compliance.audit_log import audit_event
 from amg.output.covers import save_covers, score_and_save_provided_thumbnails
@@ -268,178 +270,280 @@ def process_scene(
         studio_hint=studio_hint,
     )
 
-    # --- PHASE 5: TIERED SCAN ---
-    if time.time() > deadline:
-        error_codes.append("E_TIMEOUT_HARD")
-        return _abort_with_partial(
-            video_path, scene_id, error_codes, warnings,
-            pipeline_start, phase_results, [],
-            metadata, studio_profile, code_info, title_info, calibration,
-            operator, machine_id, dry_run,
-        )
+    # --- STREAMING SCAN BRANCH (replaces phases 5-8 when enabled) ---
+    # When AMG_STREAMING_SCAN=1 the producer/consumer scan in
+    # ``amg.scanning.stream`` runs in place of the classic
+    # tier_scan + finish/buildup/cluster chain. It keeps the GPU
+    # saturated through one decode pass and applies a post-AI sharpness
+    # gate so blurry frames the AI loved can't ship as covers — the
+    # FALLBACK-C failure mode the 2026-05-08 audit surfaced.
+    #
+    # Phase 9 (floor_enforcement) still runs as a safety net if the
+    # stream produced fewer than COVER_FLOOR picks. The classic path
+    # below is skipped entirely.
+    frame_cache = None
+    streaming_ran = False
+    candidates: List[dict] = []
+    all_scored: List[dict] = []
+    fallbacks_used: List[str] = []
 
-    with phase_timer("tier_scan") as t:
-        tier_result = run_tiered_scan(
-            video_path, duration_sec, calibration, prompt,
-            system_prompt=SYSTEM_PROMPT, deadline_sec=deadline,
-        )
-    tier_stats = tier_result.get("tier_stats") if isinstance(tier_result.get("tier_stats"), dict) else {}
-    frames_extracted = sum(
-        int((v or {}).get("frames_extracted", 0) or 0)
-        for v in tier_stats.values()
-        if isinstance(v, dict)
-    )
-    ai_scored = sum(
-        int((v or {}).get("ai_scored_count", 0) or 0)
-        for v in tier_stats.values()
-        if isinstance(v, dict)
-    )
-    phase_results["tier_scan"] = {
-        "duration_sec": t.elapsed,
-        "tier_used": tier_result["tier_used"],
-        "candidates_found": len(tier_result["candidates"]),
-        "frames_scored": len(tier_result["all_scored"]),
-        "passing_count": len(tier_result["candidates"]),
-        "aborted": tier_result.get("aborted", False),
-        "abort_reason": tier_result.get("abort_reason"),
-        "frames_extracted": frames_extracted,
-        "ai_scored_count": ai_scored,
-        "tier_breakdown": tier_stats,
-        "scan_mode": tier_result.get("scan_mode", TIER_SCAN_MODE),
-        "processing_profile": PROCESSING_PROFILE,
-    }
-    if tier_result.get("aborted"):
-        error_codes.append(tier_result.get("abort_reason", "E_TIMEOUT_HARD"))
-
-    all_scored = list(tier_result["all_scored"])
-    candidates = list(tier_result["candidates"])
-    _emit_progress(45)
-
-    # --- PHASE 6: FINISH HUNTER ---
-    if ENABLE_FINISH_HUNTER and time.time() < deadline and not quota_satisfied(candidates):
-        with phase_timer("finish_hunter") as t:
-            finish_result = run_finish_hunter(
-                video_path, duration_sec, calibration, prompt,
-                system_prompt=SYSTEM_PROMPT, deadline_sec=deadline,
+    if STREAMING_SCAN_ENABLED:
+        streaming_ran = True
+        if time.time() > deadline:
+            error_codes.append("E_TIMEOUT_HARD")
+            return _abort_with_partial(
+                video_path, scene_id, error_codes, warnings,
+                pipeline_start, phase_results, [],
+                metadata, studio_profile, code_info, title_info, calibration,
+                operator, machine_id, dry_run,
             )
-        phase_results["finish_hunter"] = {
-            "duration_sec": t.elapsed,
-            "candidates_found": len(finish_result["candidates"]),
-            "passing_count": len(finish_result["candidates"]),
-            "aborted": finish_result.get("aborted", False),
-            "abort_reason": finish_result.get("abort_reason"),
-            "ai_submitted_count": finish_result.get("ai_submitted_count", 0),
-            "ai_completed_count": finish_result.get("ai_completed_count", 0),
-            "ai_skipped_count": finish_result.get("ai_skipped_count", 0),
-            "ai_batch_wall_sec": finish_result.get("ai_batch_wall_sec", 0.0),
-        }
-        all_scored.extend(finish_result.get("all_scored", []))
-        candidates.extend(finish_result["candidates"])
-    elif time.time() < deadline:
-        phase_results["finish_hunter"] = {
-            "duration_sec": 0.0,
-            "skipped": True,
-            "reason": "disabled" if not ENABLE_FINISH_HUNTER else "quota_satisfied",
-            "quota_progress": quota_progress(candidates),
-        }
-    _emit_progress(60)
 
-    # --- PHASE 7: BUILDUP HUNTER ---
-    if ENABLE_BUILDUP_HUNTER and time.time() < deadline and not quota_satisfied(candidates):
-        with phase_timer("buildup_hunter") as t:
-            buildup_result = run_buildup_hunter(
-                video_path, duration_sec, calibration, prompt,
-                system_prompt=SYSTEM_PROMPT, deadline_sec=deadline,
+        cover_cap_hint = max(get_cover_cap(duration_sec), COVER_FLOOR)
+        with phase_timer("stream_scan") as t:
+            stream_result = run_stream_scan(
+                video_path,
+                duration_sec,
+                prompt,
+                target_count=COVER_FLOOR,
+                cover_cap=cover_cap_hint,
+                deadline_sec=deadline,
+                system_prompt=SYSTEM_PROMPT,
+                ai_client=ai_client,
+                on_log=lambda msg: log.info(msg),
+                on_progress=lambda pct: _emit_progress(pct),
             )
-        phase_results["buildup_hunter"] = {
+        phase_results["stream_scan"] = {
             "duration_sec": t.elapsed,
-            "candidates_found": len(buildup_result["candidates"]),
-            "passing_count": len(buildup_result["candidates"]),
-            "aborted": buildup_result.get("aborted", False),
-            "abort_reason": buildup_result.get("abort_reason"),
-            "ai_submitted_count": buildup_result.get("ai_submitted_count", 0),
-            "ai_completed_count": buildup_result.get("ai_completed_count", 0),
-            "ai_skipped_count": buildup_result.get("ai_skipped_count", 0),
-            "ai_batch_wall_sec": buildup_result.get("ai_batch_wall_sec", 0.0),
+            "submitted": stream_result["stats"].get("submitted", 0),
+            "completed": stream_result["stats"].get("completed", 0),
+            "skipped": stream_result["stats"].get("skipped", 0),
+            "ai_failures": stream_result["stats"].get("ai_failures", 0),
+            "frames_seen": stream_result["stats"].get("frames_seen", 0),
+            "candidates_emitted": stream_result["stats"].get("candidates_emitted", 0),
+            "queue_overflows": stream_result["stats"].get("queue_overflows", 0),
+            "interval_sec": stream_result["stats"].get("interval_sec", 0.0),
+            "max_workers": stream_result["stats"].get("max_workers", 0),
+            "selector_pool": stream_result["selector_stats"].get("scored_pool", 0),
+            "sharpness_floor_used": stream_result.get("sharpness_floor_used", 0.0),
+            "gate_relaxed": stream_result.get("gate_relaxed", False),
+            "frame_cache_stats": stream_result.get("frame_cache_stats", {}),
+            "aborted": stream_result.get("aborted", False),
+            "abort_reason": stream_result.get("abort_reason"),
+            "tier_used": "stream",
         }
-        all_scored.extend(buildup_result.get("all_scored", []))
-        candidates.extend(buildup_result["candidates"])
-    elif time.time() < deadline:
-        phase_results["buildup_hunter"] = {
-            "duration_sec": 0.0,
-            "skipped": True,
-            "reason": "disabled" if not ENABLE_BUILDUP_HUNTER else "quota_satisfied",
-            "quota_progress": quota_progress(candidates),
-        }
-    _emit_progress(72)
+        if stream_result.get("aborted"):
+            error_codes.append(stream_result.get("abort_reason", "E_STREAM_DEADLINE"))
 
-    # --- PHASE 8: CLUSTER EXPANSION ---
-    if ENABLE_CLUSTER_EXPANSION and time.time() < deadline and candidates and not quota_satisfied(candidates):
-        seen_ts = {round(c["timestamp_sec"], 1) for c in candidates}
-        with phase_timer("cluster") as t:
-            cluster_result = expand_clusters(
-                video_path, duration_sec, candidates, calibration, prompt,
-                system_prompt=SYSTEM_PROMPT, deadline_sec=deadline,
-                already_seen_timestamps=seen_ts,
-            )
-        phase_results["cluster"] = {
-            "duration_sec": t.elapsed,
-            "expansions": cluster_result.get("expansions_count", 0),
-            "candidates_found": len([c for c in cluster_result["cluster_candidates"]
-                                     if c.get("scored_frame")
-                                     and c["scored_frame"].score >= SCORE_TIER_3_SUCCESS_FLOOR]),
-            "aborted": cluster_result.get("aborted", False),
-            "abort_reason": cluster_result.get("abort_reason"),
-            "ai_submitted_count": cluster_result.get("ai_submitted_count", 0),
-            "ai_completed_count": cluster_result.get("ai_completed_count", 0),
-            "ai_skipped_count": cluster_result.get("ai_skipped_count", 0),
-            "ai_batch_wall_sec": cluster_result.get("ai_batch_wall_sec", 0.0),
-        }
-        # Add cluster results that scored well
-        for c in cluster_result["cluster_candidates"]:
-            scored = c.get("scored_frame")
-            if scored and scored.parse_succeeded and scored.score >= SCORE_TIER_3_SUCCESS_FLOOR:
-                candidates.append(c)
-            all_scored.append(c)
-    elif time.time() < deadline and candidates:
-        phase_results["cluster"] = {
-            "duration_sec": 0.0,
-            "skipped": True,
-            "reason": "disabled" if not ENABLE_CLUSTER_EXPANSION else "quota_satisfied",
-            "quota_progress": quota_progress(candidates),
-        }
+        candidates = list(stream_result["picks"])
+        all_scored = list(stream_result["all_scored"])
+        frame_cache = stream_result.get("frame_cache")
 
-    # --- PHASE 9: FLOOR ENFORCEMENT ---
-    fallbacks_used = []
-    if len(candidates) < COVER_FLOOR:
-        if time.time() >= deadline:
+        for skipped_phase in ("tier_scan", "finish_hunter", "buildup_hunter", "cluster"):
+            phase_results.setdefault(skipped_phase, {
+                "duration_sec": 0.0,
+                "skipped": True,
+                "reason": "streaming_scan_active",
+            })
+
+        if len(candidates) < COVER_FLOOR:
             log.warn(
-                f"Floor not met ({len(candidates)} < {COVER_FLOOR}) after deadline, "
-                "running emergency cascade"
+                f"Streaming scan produced {len(candidates)} < COVER_FLOOR={COVER_FLOOR}; "
+                "running fallback cascade"
             )
-        else:
-            log.warn(f"Floor not met ({len(candidates)} < {COVER_FLOOR}), running cascade")
-        with phase_timer("floor_enforcement") as t:
-            cascade_result = run_floor_enforcement_cascade(
-                video_path, duration_sec, candidates, all_scored, calibration,
-                target_count=COVER_FLOOR, deadline_sec=deadline,
+            with phase_timer("floor_enforcement") as t:
+                cascade_result = run_floor_enforcement_cascade(
+                    video_path, duration_sec, candidates, all_scored, calibration,
+                    target_count=COVER_FLOOR, deadline_sec=deadline,
+                )
+            phase_results["floor_enforcement"] = {
+                "duration_sec": t.elapsed,
+                "fallbacks_used": cascade_result["fallbacks_used"],
+                "floor_met": cascade_result["floor_met"],
+                "aborted": cascade_result.get("aborted", False),
+                "deadline_overrun": cascade_result.get("deadline_overrun", False),
+                "final_count": len(cascade_result["final_candidates"]),
+            }
+            candidates = cascade_result["final_candidates"]
+            fallbacks_used = cascade_result["fallbacks_used"]
+            if "D" in fallbacks_used:
+                warnings.append("Fallback D used (pure CV rescue)")
+                error_codes.append("E_FLOOR_FALLBACK_D")
+            if not cascade_result["floor_met"]:
+                error_codes.append("E_FLOOR_NOT_MET")
+        _emit_progress(85)
+
+    # --- CLASSIC PHASES 5-9 (skipped when streaming branch is active) ---
+    if not streaming_ran:
+        # --- PHASE 5: TIERED SCAN ---
+        if time.time() > deadline:
+            error_codes.append("E_TIMEOUT_HARD")
+            return _abort_with_partial(
+                video_path, scene_id, error_codes, warnings,
+                pipeline_start, phase_results, [],
+                metadata, studio_profile, code_info, title_info, calibration,
+                operator, machine_id, dry_run,
             )
-        phase_results["floor_enforcement"] = {
+
+        with phase_timer("tier_scan") as t:
+            tier_result = run_tiered_scan(
+                video_path, duration_sec, calibration, prompt,
+                system_prompt=SYSTEM_PROMPT, deadline_sec=deadline,
+            )
+        tier_stats = tier_result.get("tier_stats") if isinstance(tier_result.get("tier_stats"), dict) else {}
+        frames_extracted = sum(
+            int((v or {}).get("frames_extracted", 0) or 0)
+            for v in tier_stats.values()
+            if isinstance(v, dict)
+        )
+        ai_scored = sum(
+            int((v or {}).get("ai_scored_count", 0) or 0)
+            for v in tier_stats.values()
+            if isinstance(v, dict)
+        )
+        phase_results["tier_scan"] = {
             "duration_sec": t.elapsed,
-            "fallbacks_used": cascade_result["fallbacks_used"],
-            "floor_met": cascade_result["floor_met"],
-            "aborted": cascade_result.get("aborted", False),
-            "deadline_overrun": cascade_result.get("deadline_overrun", False),
-            "final_count": len(cascade_result["final_candidates"]),
+            "tier_used": tier_result["tier_used"],
+            "candidates_found": len(tier_result["candidates"]),
+            "frames_scored": len(tier_result["all_scored"]),
+            "passing_count": len(tier_result["candidates"]),
+            "aborted": tier_result.get("aborted", False),
+            "abort_reason": tier_result.get("abort_reason"),
+            "frames_extracted": frames_extracted,
+            "ai_scored_count": ai_scored,
+            "tier_breakdown": tier_stats,
+            "scan_mode": tier_result.get("scan_mode", TIER_SCAN_MODE),
+            "processing_profile": PROCESSING_PROFILE,
         }
-        candidates = cascade_result["final_candidates"]
-        fallbacks_used = cascade_result["fallbacks_used"]
-        if "D" in fallbacks_used:
-            warnings.append("Fallback D used (pure CV rescue)")
-            error_codes.append("E_FLOOR_FALLBACK_D")
-        if not cascade_result["floor_met"]:
-            error_codes.append("E_FLOOR_NOT_MET")
-    _emit_progress(85)
+        if tier_result.get("aborted"):
+            error_codes.append(tier_result.get("abort_reason", "E_TIMEOUT_HARD"))
+
+        all_scored = list(tier_result["all_scored"])
+        candidates = list(tier_result["candidates"])
+        _emit_progress(45)
+
+        # --- PHASE 6: FINISH HUNTER ---
+        if ENABLE_FINISH_HUNTER and time.time() < deadline and not quota_satisfied(candidates):
+            with phase_timer("finish_hunter") as t:
+                finish_result = run_finish_hunter(
+                    video_path, duration_sec, calibration, prompt,
+                    system_prompt=SYSTEM_PROMPT, deadline_sec=deadline,
+                )
+            phase_results["finish_hunter"] = {
+                "duration_sec": t.elapsed,
+                "candidates_found": len(finish_result["candidates"]),
+                "passing_count": len(finish_result["candidates"]),
+                "aborted": finish_result.get("aborted", False),
+                "abort_reason": finish_result.get("abort_reason"),
+                "ai_submitted_count": finish_result.get("ai_submitted_count", 0),
+                "ai_completed_count": finish_result.get("ai_completed_count", 0),
+                "ai_skipped_count": finish_result.get("ai_skipped_count", 0),
+                "ai_batch_wall_sec": finish_result.get("ai_batch_wall_sec", 0.0),
+            }
+            all_scored.extend(finish_result.get("all_scored", []))
+            candidates.extend(finish_result["candidates"])
+        elif time.time() < deadline:
+            phase_results["finish_hunter"] = {
+                "duration_sec": 0.0,
+                "skipped": True,
+                "reason": "disabled" if not ENABLE_FINISH_HUNTER else "quota_satisfied",
+                "quota_progress": quota_progress(candidates),
+            }
+        _emit_progress(60)
+
+        # --- PHASE 7: BUILDUP HUNTER ---
+        if ENABLE_BUILDUP_HUNTER and time.time() < deadline and not quota_satisfied(candidates):
+            with phase_timer("buildup_hunter") as t:
+                buildup_result = run_buildup_hunter(
+                    video_path, duration_sec, calibration, prompt,
+                    system_prompt=SYSTEM_PROMPT, deadline_sec=deadline,
+                )
+            phase_results["buildup_hunter"] = {
+                "duration_sec": t.elapsed,
+                "candidates_found": len(buildup_result["candidates"]),
+                "passing_count": len(buildup_result["candidates"]),
+                "aborted": buildup_result.get("aborted", False),
+                "abort_reason": buildup_result.get("abort_reason"),
+                "ai_submitted_count": buildup_result.get("ai_submitted_count", 0),
+                "ai_completed_count": buildup_result.get("ai_completed_count", 0),
+                "ai_skipped_count": buildup_result.get("ai_skipped_count", 0),
+                "ai_batch_wall_sec": buildup_result.get("ai_batch_wall_sec", 0.0),
+            }
+            all_scored.extend(buildup_result.get("all_scored", []))
+            candidates.extend(buildup_result["candidates"])
+        elif time.time() < deadline:
+            phase_results["buildup_hunter"] = {
+                "duration_sec": 0.0,
+                "skipped": True,
+                "reason": "disabled" if not ENABLE_BUILDUP_HUNTER else "quota_satisfied",
+                "quota_progress": quota_progress(candidates),
+            }
+        _emit_progress(72)
+
+        # --- PHASE 8: CLUSTER EXPANSION ---
+        if ENABLE_CLUSTER_EXPANSION and time.time() < deadline and candidates and not quota_satisfied(candidates):
+            seen_ts = {round(c["timestamp_sec"], 1) for c in candidates}
+            with phase_timer("cluster") as t:
+                cluster_result = expand_clusters(
+                    video_path, duration_sec, candidates, calibration, prompt,
+                    system_prompt=SYSTEM_PROMPT, deadline_sec=deadline,
+                    already_seen_timestamps=seen_ts,
+                )
+            phase_results["cluster"] = {
+                "duration_sec": t.elapsed,
+                "expansions": cluster_result.get("expansions_count", 0),
+                "candidates_found": len([c for c in cluster_result["cluster_candidates"]
+                                         if c.get("scored_frame")
+                                         and c["scored_frame"].score >= SCORE_TIER_3_SUCCESS_FLOOR]),
+                "aborted": cluster_result.get("aborted", False),
+                "abort_reason": cluster_result.get("abort_reason"),
+                "ai_submitted_count": cluster_result.get("ai_submitted_count", 0),
+                "ai_completed_count": cluster_result.get("ai_completed_count", 0),
+                "ai_skipped_count": cluster_result.get("ai_skipped_count", 0),
+                "ai_batch_wall_sec": cluster_result.get("ai_batch_wall_sec", 0.0),
+            }
+            for c in cluster_result["cluster_candidates"]:
+                scored = c.get("scored_frame")
+                if scored and scored.parse_succeeded and scored.score >= SCORE_TIER_3_SUCCESS_FLOOR:
+                    candidates.append(c)
+                all_scored.append(c)
+        elif time.time() < deadline and candidates:
+            phase_results["cluster"] = {
+                "duration_sec": 0.0,
+                "skipped": True,
+                "reason": "disabled" if not ENABLE_CLUSTER_EXPANSION else "quota_satisfied",
+                "quota_progress": quota_progress(candidates),
+            }
+
+        # --- PHASE 9: FLOOR ENFORCEMENT ---
+        if len(candidates) < COVER_FLOOR:
+            if time.time() >= deadline:
+                log.warn(
+                    f"Floor not met ({len(candidates)} < {COVER_FLOOR}) after deadline, "
+                    "running emergency cascade"
+                )
+            else:
+                log.warn(f"Floor not met ({len(candidates)} < {COVER_FLOOR}), running cascade")
+            with phase_timer("floor_enforcement") as t:
+                cascade_result = run_floor_enforcement_cascade(
+                    video_path, duration_sec, candidates, all_scored, calibration,
+                    target_count=COVER_FLOOR, deadline_sec=deadline,
+                )
+            phase_results["floor_enforcement"] = {
+                "duration_sec": t.elapsed,
+                "fallbacks_used": cascade_result["fallbacks_used"],
+                "floor_met": cascade_result["floor_met"],
+                "aborted": cascade_result.get("aborted", False),
+                "deadline_overrun": cascade_result.get("deadline_overrun", False),
+                "final_count": len(cascade_result["final_candidates"]),
+            }
+            candidates = cascade_result["final_candidates"]
+            fallbacks_used = cascade_result["fallbacks_used"]
+            if "D" in fallbacks_used:
+                warnings.append("Fallback D used (pure CV rescue)")
+                error_codes.append("E_FLOOR_FALLBACK_D")
+            if not cascade_result["floor_met"]:
+                error_codes.append("E_FLOOR_NOT_MET")
+        _emit_progress(85)
 
     # Apply adaptive cover cap (review-burden control).
     cover_cap = get_cover_cap(duration_sec)
@@ -490,6 +594,7 @@ def process_scene(
                 candidates, video_path, covers_dir,
                 performer_name=performer_name,
                 performer_code=code_info.get("code", "") if code_info else "",
+                frame_cache=frame_cache,
             )
 
             # Optional: if creator/agency supplied thumbnails in the scene folder,

@@ -284,6 +284,95 @@ SINGLE_PASS_MIN_GAP_SEC = _profile_float(
     turbo=30.0,
 )
 
+# ---------- Streaming scan (v11.4+) ----------
+# When AMG_STREAMING_SCAN=1 the pipeline replaces the tier_scan +
+# finish/buildup/cluster/floor_enforcement chain with a single producer/
+# consumer scan that decodes the video once, runs CV gates as a sieve,
+# keeps the GPU saturated through a continuous AI dispatcher, and selects
+# top-K via a fused score (AI + sharpness + zone bonuses) with a post-AI
+# sharpness gate. Designed to fix the H100-idle problem documented in the
+# 2026-05-08 audit (only 15 AI calls in 24 min on Y&B_003 because every
+# phase decoded the whole video and gated 99% of frames out before
+# scoring).
+# Phase 4 cut-over (2026-05-08): the cloud edition runs the
+# ``balanced`` profile by default and the streaming scan is the new
+# happy path. ``classic`` is the only profile that opts out by
+# default; it's there as a safety hatch if the streaming path ever
+# misbehaves on a specific scene. ``AMG_STREAMING_SCAN=0`` forces the
+# legacy tier_scan + hunters + cluster + fallback chain regardless of
+# profile.
+STREAMING_SCAN_ENABLED = (
+    str(os.environ.get(
+        "AMG_STREAMING_SCAN",
+        _profile_default("0", balanced="1", fast="1", turbo="1"),
+    )).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+# Sample interval for the streaming sieve (frames per N seconds). Lower =
+# more candidates fed to GPU. 1.0 sec → ~1800 frames for a 30-min scene.
+STREAMING_SCAN_INTERVAL_SEC = _profile_float(
+    "AMG_STREAMING_SCAN_INTERVAL_SEC",
+    1.0,
+    balanced=1.0,
+    fast=1.5,
+    turbo=2.0,
+)
+
+# Cap on candidates queued for AI scoring (after CV sieve + dedup). The
+# dispatcher always pulls the highest-priority candidate from this queue
+# next, so dropping the lowest-priority overflow keeps memory bounded
+# without losing the best frames.
+STREAMING_SCAN_MAX_QUEUED = _profile_int(
+    "AMG_STREAMING_SCAN_MAX_QUEUED",
+    400,
+    balanced=300,
+    fast=200,
+    turbo=150,
+)
+
+# Cap on total AI calls per scene to bound GPU spend even when the
+# producer can supply more. 0 = no cap (scan until deadline).
+STREAMING_SCAN_MAX_AI_CALLS = _profile_int(
+    "AMG_STREAMING_SCAN_MAX_AI_CALLS",
+    0,
+    balanced=0,
+    fast=160,
+    turbo=80,
+)
+
+# In-memory frame cache budget. Streaming scan caches full-res frames for
+# CV survivors so the output phase doesn't re-decode them. 3 GB is fine
+# for a Runpod H100 SXM (≥80 GB system RAM); local CLI runs may want to
+# lower this via env.
+STREAMING_FRAME_CACHE_MAX_MB = int(
+    os.environ.get("AMG_STREAMING_FRAME_CACHE_MAX_MB", "3072")
+)
+
+# Fused-score weights used by the LiveSelector. Sharpness is normalised
+# to 0..100 (sharp/10) before weighting so the two terms are comparable
+# with the 0..100 AI score.
+STREAMING_FUSED_AI_WEIGHT = float(
+    os.environ.get("AMG_STREAMING_FUSED_AI_WEIGHT", "0.7")
+)
+STREAMING_FUSED_SHARP_WEIGHT = float(
+    os.environ.get("AMG_STREAMING_FUSED_SHARP_WEIGHT", "0.3")
+)
+STREAMING_ZONE_BONUS_FINISH = float(
+    os.environ.get("AMG_STREAMING_ZONE_BONUS_FINISH", "5.0")
+)
+STREAMING_ZONE_BONUS_BUILDUP = float(
+    os.environ.get("AMG_STREAMING_ZONE_BONUS_BUILDUP", "3.0")
+)
+
+# Post-AI sharpness gate: any picked candidate must clear this percentile
+# of all scored frames' sharpness. Catches "AI said good but it's
+# blurry" — the FALLBACK-C failure mode the 2026-05-08 audit surfaced.
+# Set to 0 to disable.
+STREAMING_POST_AI_SHARP_PERCENTILE = float(
+    os.environ.get("AMG_STREAMING_POST_AI_SHARP_PERCENTILE", "25.0")
+)
+
 # Duration-adaptive sampling scale (efficiency for long-form scenes).
 # Tuple format: (min_duration_sec, max_duration_sec, interval_scale)
 INTERVAL_SCALE_BY_DURATION = [

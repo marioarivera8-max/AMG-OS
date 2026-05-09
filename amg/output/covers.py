@@ -106,9 +106,18 @@ def save_covers(
     performer_name: str = "Unknown",
     performer_code: str = "",
     enhance: bool = ENHANCE_DEFAULT,
+    *,
+    frame_cache: Optional[object] = None,
 ) -> List[dict]:
     """
     Save selected candidates as cover JPEGs.
+
+    When ``frame_cache`` is provided (an ``amg.video.frame_cache.FrameCache``
+    instance from a streaming scan), full-resolution frames are read from
+    the cache before falling back to a fresh disk decode. This eliminates
+    the redundant ``get_frames_at`` pass that dominated the output phase
+    in the classic pipeline (6:28 of a 24:34 wall-time on Y&B_003,
+    2026-05-08 audit).
 
     Returns list of saved cover info:
         {
@@ -143,80 +152,127 @@ def save_covers(
     )
 
     saved = []
-    with VideoReader(video_path) as vr:
-        base_timestamps = [float(entry.get("timestamp_sec", 0) or 0) for entry in sorted_candidates]
-        base_frames = vr.get_frames_at(base_timestamps) if base_timestamps else []
-        base_frame_by_idx = {idx: frame for idx, frame in enumerate(base_frames)}
+    base_timestamps = [float(entry.get("timestamp_sec", 0) or 0) for entry in sorted_candidates]
+    polish_timestamps = (
+        _collect_polish_timestamps(sorted_candidates)
+        if COVER_NEARBY_POLISH_ENABLED
+        else []
+    )
 
-        nearby_frame_map: Dict[float, Any] = {}
-        if COVER_NEARBY_POLISH_ENABLED:
-            polish_timestamps = _collect_polish_timestamps(sorted_candidates)
-            if polish_timestamps:
-                polish_frames = vr.get_frames_at(polish_timestamps)
-                nearby_frame_map = {
-                    round(float(ts), 3): frame
-                    for ts, frame in zip(polish_timestamps, polish_frames)
-                    if frame is not None
-                }
+    cache_hits = 0
+    cache_misses = 0
 
-        for rank, entry in enumerate(sorted_candidates, start=1):
-            scored = entry.get("scored_frame")
-            ts = entry.get("timestamp_sec", 0)
+    base_frame_by_idx: Dict[int, Any] = {}
+    nearby_frame_map: Dict[float, Any] = {}
 
-            # Re-extract at full resolution from video (not the analysis frame)
-            full_frame = base_frame_by_idx.get(rank - 1)
-            if full_frame is None:
-                # Fall back to the analysis frame we already have
-                full_frame = entry.get("frame")
-            if full_frame is None:
-                log.warn("Could not extract frame", timestamp=ts, rank=rank)
-                continue
+    # First, satisfy whatever the streaming cache can give us for free.
+    # Anything else is appended to the disk-decode list.
+    base_disk_indices: List[int] = []
+    base_disk_timestamps: List[float] = []
+    if frame_cache is not None:
+        for idx, ts in enumerate(base_timestamps):
+            cached = frame_cache.get_full(ts) if ts is not None else None
+            if cached is not None:
+                base_frame_by_idx[idx] = cached
+                cache_hits += 1
+            else:
+                base_disk_indices.append(idx)
+                base_disk_timestamps.append(ts)
+                cache_misses += 1
+    else:
+        base_disk_indices = list(range(len(base_timestamps)))
+        base_disk_timestamps = list(base_timestamps)
 
-            score = scored.score if scored else 0
-            if COVER_NEARBY_POLISH_ENABLED and score >= COVER_NEARBY_POLISH_MIN_SCORE:
-                ts, full_frame = _polish_nearby_frame(ts, full_frame, nearby_frames_by_ts=nearby_frame_map)
-            type_ = scored.type_ if scored else "UNKNOWN"
-            gaze = scored.gaze if scored else "UNKNOWN"
-            tier = entry.get("tier", "")
+    polish_disk_timestamps: List[float] = []
+    if COVER_NEARBY_POLISH_ENABLED and polish_timestamps:
+        if frame_cache is not None:
+            for ts in polish_timestamps:
+                cached = frame_cache.get_full(ts)
+                if cached is not None:
+                    nearby_frame_map[round(float(ts), 3)] = cached
+                    cache_hits += 1
+                else:
+                    polish_disk_timestamps.append(ts)
+                    cache_misses += 1
+        else:
+            polish_disk_timestamps = list(polish_timestamps)
 
-            filename = build_filename(
-                rank=rank,
-                performer=performer_name,
-                code=performer_code,
-                type_=type_,
-                gaze=gaze,
-                score=score,
-                timestamp_sec=ts,
-                tier=tier,
-            )
-            output_path = output_dir / filename
+    need_disk_pass = bool(base_disk_timestamps) or bool(polish_disk_timestamps)
+    if need_disk_pass:
+        with VideoReader(video_path) as vr:
+            if base_disk_timestamps:
+                disk_frames = vr.get_frames_at(base_disk_timestamps)
+                for idx_in_sorted, frame in zip(base_disk_indices, disk_frames):
+                    base_frame_by_idx[idx_in_sorted] = frame
+            if polish_disk_timestamps:
+                polish_frames = vr.get_frames_at(polish_disk_timestamps)
+                for ts, frame in zip(polish_disk_timestamps, polish_frames):
+                    if frame is None:
+                        continue
+                    nearby_frame_map[round(float(ts), 3)] = frame
 
-            # Save (with optional enhancement)
-            success = _save_frame(full_frame, output_path, enhance=enhance)
-            if not success:
-                log.warn("Failed to save cover", path=str(output_path))
-                continue
+    if frame_cache is not None:
+        log.info(
+            "save_covers cache stats",
+            hits=cache_hits,
+            misses=cache_misses,
+            re_decode=need_disk_pass,
+        )
 
-            # Verify
-            verified, error = verify_cover(output_path)
+    for rank, entry in enumerate(sorted_candidates, start=1):
+        scored = entry.get("scored_frame")
+        ts = entry.get("timestamp_sec", 0)
 
-            saved.append({
-                "rank": rank,
-                "path": output_path,
-                "filename": filename,
-                "timestamp_sec": ts,
-                "score": score,
-                "type": type_,
-                "gaze": gaze,
-                "tier": tier,
-                "position_label": entry.get("position_label", "OTHER"),
-                "position_label_confidence": entry.get("position_label_confidence", 0.0),
-                "penetration_visible": bool(getattr(scored, "penetration_visible", False)) if scored else False,
-                "penetration_confidence": float(getattr(scored, "penetration_confidence", 0.0) or 0.0) if scored else 0.0,
-                "action_evidence": getattr(scored, "action_evidence", "NONE") if scored else "NONE",
-                "verified": verified,
-                "verification_error": error,
-            })
+        full_frame = base_frame_by_idx.get(rank - 1)
+        if full_frame is None:
+            full_frame = entry.get("frame")
+        if full_frame is None:
+            log.warn("Could not extract frame", timestamp=ts, rank=rank)
+            continue
+
+        score = scored.score if scored else 0
+        if COVER_NEARBY_POLISH_ENABLED and score >= COVER_NEARBY_POLISH_MIN_SCORE:
+            ts, full_frame = _polish_nearby_frame(ts, full_frame, nearby_frames_by_ts=nearby_frame_map)
+        type_ = scored.type_ if scored else "UNKNOWN"
+        gaze = scored.gaze if scored else "UNKNOWN"
+        tier = entry.get("tier", "")
+
+        filename = build_filename(
+            rank=rank,
+            performer=performer_name,
+            code=performer_code,
+            type_=type_,
+            gaze=gaze,
+            score=score,
+            timestamp_sec=ts,
+            tier=tier,
+        )
+        output_path = output_dir / filename
+
+        success = _save_frame(full_frame, output_path, enhance=enhance)
+        if not success:
+            log.warn("Failed to save cover", path=str(output_path))
+            continue
+
+        verified, error = verify_cover(output_path)
+
+        saved.append({
+            "rank": rank,
+            "path": output_path,
+            "filename": filename,
+            "timestamp_sec": ts,
+            "score": score,
+            "type": type_,
+            "gaze": gaze,
+            "tier": tier,
+            "position_label": entry.get("position_label", "OTHER"),
+            "position_label_confidence": entry.get("position_label_confidence", 0.0),
+            "penetration_visible": bool(getattr(scored, "penetration_visible", False)) if scored else False,
+            "penetration_confidence": float(getattr(scored, "penetration_confidence", 0.0) or 0.0) if scored else 0.0,
+            "action_evidence": getattr(scored, "action_evidence", "NONE") if scored else "NONE",
+            "verified": verified,
+            "verification_error": error,
+        })
 
     log.info("Saved covers", count=len(saved), verified=sum(1 for s in saved if s["verified"]))
     return saved
