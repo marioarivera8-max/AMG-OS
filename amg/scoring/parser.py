@@ -29,7 +29,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from amg.config import SCORE_MAX
+from amg.config import (
+    GENRE_LABELS,
+    SUBGENRE_LABELS,
+    SCORE_MAX,
+    normalize_genre_label,
+    normalize_position_label,
+    normalize_subgenre_label,
+)
 
 
 @dataclass
@@ -49,6 +56,10 @@ class ScoredFrame:
     penetration_visible: bool = False
     penetration_confidence: float = 0.0
     action_evidence: str = "NONE"
+    position_label: str = "OTHER"
+    position_confidence: float = 0.0
+    genre_tags: List[str] = field(default_factory=list)
+    subgenre_tags: List[str] = field(default_factory=list)
 
     parse_succeeded: bool = False
     model_score_raw: Optional[float] = None
@@ -69,6 +80,10 @@ _RE_AESTHETIC = re.compile(r'AESTHETIC:\s*([A-Z]+)', re.IGNORECASE)
 _RE_PEN_VISIBLE = re.compile(r'PENETRATION_VISIBLE:\s*(yes|no|true|false)', re.IGNORECASE)
 _RE_PEN_CONF = re.compile(r'PENETRATION_CONFIDENCE:\s*(-?\d+\.?\d*)', re.IGNORECASE)
 _RE_ACTION_EVIDENCE = re.compile(r'ACTION_EVIDENCE:\s*([A-Z0-9_,\- ]+)', re.IGNORECASE)
+_RE_POSITION = re.compile(r'POSITION:\s*([A-Z0-9_\- ]+)', re.IGNORECASE)
+_RE_POS_CONF = re.compile(r'POSITION_CONFIDENCE:\s*(-?\d+\.?\d*)', re.IGNORECASE)
+_RE_GENRES = re.compile(r'^\s*GENRES:\s*([^\r\n]+)', re.IGNORECASE | re.MULTILINE)
+_RE_SUBGENRES = re.compile(r'^\s*SUBGENRES:\s*([^\r\n]+)', re.IGNORECASE | re.MULTILINE)
 
 _RETAIL_BASE = 34.0
 _TIER_B_WEIGHTS: Dict[str, float] = {
@@ -193,6 +208,34 @@ def parse_ai_response(raw_text: str) -> ScoredFrame:
     if evidence_match:
         result.action_evidence = evidence_match.group(1).strip().upper()
 
+    position_match = _RE_POSITION.search(raw_text)
+    if position_match:
+        result.position_label = normalize_position_label(position_match.group(1))
+
+    pos_conf_match = _RE_POS_CONF.search(raw_text)
+    if pos_conf_match:
+        try:
+            conf = float(pos_conf_match.group(1))
+            result.position_confidence = max(0.0, min(1.0, conf))
+        except ValueError:
+            pass
+
+    genre_match = _RE_GENRES.search(raw_text)
+    if genre_match:
+        result.genre_tags = _parse_taxonomy_tags(
+            genre_match.group(1),
+            normalize_genre_label,
+            set(GENRE_LABELS),
+        )
+
+    subgenre_match = _RE_SUBGENRES.search(raw_text)
+    if subgenre_match:
+        result.subgenre_tags = _parse_taxonomy_tags(
+            subgenre_match.group(1),
+            normalize_subgenre_label,
+            set(SUBGENRE_LABELS),
+        )
+
     # Backward compatibility: older prompts may emit TYPE=PENETRATION without
     # the explicit penetration fields. In that case, infer visible=true with
     # low confidence so downstream gates still have a signal.
@@ -221,6 +264,19 @@ def _split_codes(s: str) -> List[str]:
     """Parse 'B1,B3,B6' style strings into list."""
     parts = re.split(r'[,\s]+', s.strip())
     return [p.upper() for p in parts if p.strip()]
+
+
+def _parse_taxonomy_tags(raw: str, normalizer, allowed: set[str]) -> List[str]:
+    if not raw:
+        return []
+    if raw.strip().upper() in {"NONE", "NA", "N/A", "UNKNOWN"}:
+        return []
+    out: List[str] = []
+    for part in re.split(r'[,;/]+', raw):
+        label = normalizer(part)
+        if label and label in allowed and label not in out:
+            out.append(label)
+    return out
 
 
 def _compute_deterministic_score(result: ScoredFrame) -> Optional[float]:

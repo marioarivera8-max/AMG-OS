@@ -490,12 +490,36 @@ QUOTA_FINISH_TARGET = 3
 QUOTA_POSITION_PER_LABEL_TARGET = 3
 QUOTA_POSITION_MAX_LABELS = 4
 QUOTA_MIN_GAP_SEC = 20.0
+POSITION_SEGMENT_COVERAGE_ENABLED = _profile_bool(
+    "AMG_POSITION_SEGMENT_COVERAGE_ENABLED",
+    True,
+)
+POSITION_SEGMENT_TARGET_PER_SEGMENT = _profile_int(
+    "AMG_POSITION_SEGMENT_TARGET_PER_SEGMENT",
+    3,
+)
+POSITION_SEGMENT_MERGE_GAP_SEC = _profile_float(
+    "AMG_POSITION_SEGMENT_MERGE_GAP_SEC",
+    120.0,
+)
+POSITION_SEGMENT_MIN_LABEL_CONF = _profile_float(
+    "AMG_POSITION_SEGMENT_MIN_LABEL_CONF",
+    0.45,
+)
+POSITION_SEGMENT_MAX_TOTAL = _profile_int(
+    "AMG_POSITION_SEGMENT_MAX_TOTAL",
+    36,
+    fast=30,
+    turbo=28,
+)
 
-# Position classifier: classify only top candidates to avoid extra AI load.
+# Position classifier: legacy optional second pass. The main scorer now emits
+# taxonomy labels directly, so this stays opt-in unless an operator wants an
+# extra audit pass on a bounded top-candidate subset.
 POSITION_CLASSIFIER_MAX_CANDIDATES = _profile_int(
     "AMG_POSITION_CLASSIFIER_MAX_CANDIDATES",
-    40,
-    balanced=24,
+    0,
+    balanced=0,
     fast=0,
     turbo=0,
 )
@@ -507,15 +531,216 @@ POSITION_LABELS = [
     "MISSIONARY",
     "COWGIRL",
     "REVERSE_COWGIRL",
-    "DOGGY",
+    "DOGGY_STYLE",
+    "SPOON",
+    "STANDING",
+    "SIXTY_NINE",
+    "PILE_DRIVER",
+    "LOTUS",
+    "ANVIL",
+    "MATING_PRESS",
+    "PRONE_BONE",
+    "AMAZON",
+    "BRIDGE",
+    "WHEELBARROW",
+    "CHAIR_SEATED",
+    "FACE_SITTING",
+    "BLOWJOB_KNEELING",
+    "BLOWJOB_SEATED",
+    "BLOWJOB_LYING",
+    "DEEPTHROAT",
+    "FACE_FUCK",
+    "THROAT_FUCK",
+    "SLOPPY_BJ",
+    "GAGGING_BJ",
+    "DOUBLE_BJ",
+    "CUNNILINGUS",
+    "FACE_SIT_ORAL",
+    "RIM_JOB",
+    "DOUBLE_RIM",
+    "BALL_LICK",
+    "DP",
+    "DAP",
+    "DVP",
+    "DPP",
+    "AIRTIGHT",
+    "SPIT_ROAST",
+    "EIFFEL_TOWER",
+    "TRAIN",
+    "BUKKAKE_CIRCLE",
+    "GANGBANG_CIRCLE",
     "ORAL_BJ",
     "ORAL_CUNN",
-    "SIDE",
     "HANDJOB",
     "TOY",
     "GROUP",
     "OTHER",
 ]
+POSITION_LABEL_ALIASES = {
+    "DOGGY": "DOGGY_STYLE",
+    "FROM_BEHIND": "DOGGY_STYLE",
+    "REAR_ENTRY": "DOGGY_STYLE",
+    "SIDE": "SPOON",
+    "SIDE_BY_SIDE": "SPOON",
+    "SPOONING": "SPOON",
+    "69": "SIXTY_NINE",
+    "MUTUAL_ORAL": "SIXTY_NINE",
+    "PILEDRIVER": "PILE_DRIVER",
+    "LEGS_UP": "ANVIL",
+    "ANKLES_ON_SHOULDERS": "ANVIL",
+    "CHAIR": "CHAIR_SEATED",
+    "SEATED": "CHAIR_SEATED",
+    "LAP_SEX": "CHAIR_SEATED",
+    "SEATED_COWGIRL": "CHAIR_SEATED",
+    "FACE_SIT": "FACE_SITTING",
+    "QUEENING": "FACE_SITTING",
+    "SMOTHER": "FACE_SITTING",
+    "BLOWJOB": "ORAL_BJ",
+    "BJ": "ORAL_BJ",
+    "FELLATIO": "ORAL_BJ",
+    "ORAL": "ORAL_BJ",
+    "ORAL_SEX": "ORAL_BJ",
+    "THROAT_FUCK": "FACE_FUCK",
+    "RIMMING": "RIM_JOB",
+    "ANALINGUS": "RIM_JOB",
+    "TEA_BAG": "BALL_LICK",
+    "TEABAG": "BALL_LICK",
+    "DOUBLE_PENETRATION": "DP",
+    "TRIPLE_PENETRATION": "AIRTIGHT",
+    "BUKKAKE": "BUKKAKE_CIRCLE",
+    "GANGBANG": "GANGBANG_CIRCLE",
+}
+
+GENRE_LABELS = [
+    "STRAIGHT",
+    "LESBIAN",
+    "GAY",
+    "BISEXUAL",
+    "SOLO_FEMALE",
+    "SOLO_MALE",
+    "TRANS",
+    "TRANS_FEMALE",
+    "TRANS_MALE",
+    "GROUP",
+    "THREESOME",
+    "FOURSOME",
+    "GANGBANG",
+    "ORGY",
+    "BUKKAKE",
+]
+GENRE_LABEL_ALIASES = {
+    "GIRL_GIRL": "LESBIAN",
+    "SAPPHIC": "LESBIAN",
+    "BI": "BISEXUAL",
+    "MMF": "BISEXUAL",
+    "FFM": "BISEXUAL",
+}
+
+SUBGENRE_LABELS = [
+    "AMATEUR",
+    "PROFESSIONAL",
+    "POV",
+    "REALITY",
+    "COSPLAY",
+    "PUBLIC",
+    "OUTDOOR",
+    "BDSM",
+    "KINK",
+    "FETISH",
+    "MILF",
+    "MATURE",
+    "GILF",
+    "TEEN_18_PLUS",
+    "INTERRACIAL",
+    "STEP_FAMILY",
+    "GANGBANG",
+    "DP",
+    "TP",
+    "COMPILATION",
+    "ANAL",
+    "ORAL_FOCUSED",
+    "SQUIRTING",
+    "CREAMPIE",
+    "CUMSHOT_FOCUSED",
+    "FACIAL",
+    "BUKKAKE",
+    "HENTAI",
+    "VINTAGE",
+    "ROMANTIC",
+    "GLAMCORE",
+    "VOYEUR",
+    "MASSAGE",
+    "OFFICE",
+    "SCHOOL_ADULT",
+    "LATEX",
+    "LEATHER",
+    "ROLEPLAY",
+    "BONDAGE",
+    "ROPE_BONDAGE",
+    "DOMINATION",
+    "SUBMISSION",
+    "SADISM",
+    "MASOCHISM",
+    "SPANKING",
+    "IMPACT_PLAY",
+    "FOOT_FETISH",
+    "FEMDOM",
+    "PEGGING",
+    "CBT",
+    "EDGING",
+    "ORGASM_DENIAL",
+    "PET_PLAY",
+    "LATEX_FETISH",
+    "MEDICAL_PLAY",
+    "HUMILIATION",
+    "BREATH_PLAY",
+    "WAX_PLAY",
+    "ELECTRO_PLAY",
+    "BOSS_EMPLOYEE",
+    "TEACHER_STUDENT",
+    "DOCTOR_PATIENT",
+    "NURSE_PATIENT",
+    "BABYSITTER",
+    "NEIGHBOR",
+    "LANDLORD_TENANT",
+    "CHEATING_SPOUSE",
+    "CASTING_COUCH",
+    "PICKUP",
+    "DELIVERY_GUY",
+    "REPAIRMAN",
+]
+SUBGENRE_LABEL_ALIASES = {
+    "TEEN": "TEEN_18_PLUS",
+    "SCHOOL": "SCHOOL_ADULT",
+    "SQUIRT": "SQUIRTING",
+    "CUMSHOT": "CUMSHOT_FOCUSED",
+    "MONEY_SHOT": "CUMSHOT_FOCUSED",
+    "ROPE": "ROPE_BONDAGE",
+    "SHIBARI": "ROPE_BONDAGE",
+    "LATEX_FETISHISM": "LATEX_FETISH",
+}
+
+ALL_SUBGENRE_TAGS = sorted(set(SUBGENRE_LABELS))
+ALL_GENRE_TAGS = sorted(set(GENRE_LABELS + SUBGENRE_LABELS))
+
+
+def _normalize_taxonomy_label(raw: str, allowed: list[str], aliases: dict[str, str], default: str) -> str:
+    label = str(raw or "").strip().upper().replace("-", "_").replace(" ", "_")
+    label = "_".join(part for part in label.split("_") if part)
+    label = aliases.get(label, label)
+    return label if label in set(allowed) else default
+
+
+def normalize_position_label(raw: str) -> str:
+    return _normalize_taxonomy_label(raw, POSITION_LABELS, POSITION_LABEL_ALIASES, "OTHER")
+
+
+def normalize_genre_label(raw: str) -> str:
+    return _normalize_taxonomy_label(raw, GENRE_LABELS, GENRE_LABEL_ALIASES, "")
+
+
+def normalize_subgenre_label(raw: str) -> str:
+    return _normalize_taxonomy_label(raw, SUBGENRE_LABELS, SUBGENRE_LABEL_ALIASES, "")
 
 # Fallback thresholds
 ZERO_RATE_FALLBACK_C_TRIGGER = 0.6
@@ -899,7 +1124,8 @@ ENABLE_CLUSTER_EXPANSION = _profile_bool(
 )
 ENABLE_POSITION_CLASSIFIER = _profile_bool(
     "AMG_ENABLE_POSITION_CLASSIFIER",
-    True,
+    False,
+    balanced=False,
     fast=False,
     turbo=False,
 )

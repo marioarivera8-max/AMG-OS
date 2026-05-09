@@ -18,6 +18,7 @@ from amg.config import (
     POSITION_CLASSIFIER_MIN_LABEL_CONF,
     POSITION_CLASSIFIER_CONTEXT_WINDOW_SEC,
     POSITION_LABELS,
+    normalize_position_label,
 )
 from amg.scoring.ai_client import AIClient
 from amg.utils.logging import get_logger
@@ -25,7 +26,7 @@ from amg.utils.logging import get_logger
 log = get_logger("scoring.position_classifier")
 
 _VALID = set(POSITION_LABELS)
-_RE_POSITION = re.compile(r"POSITION:\s*([A-Z_]+)", re.IGNORECASE)
+_RE_POSITION = re.compile(r"POSITION:\s*([A-Z0-9_\- ]+)", re.IGNORECASE)
 _RE_POS_CONF = re.compile(r"POSITION_CONFIDENCE:\s*(-?\d+\.?\d*)", re.IGNORECASE)
 
 
@@ -68,7 +69,7 @@ def _parse_label(raw_text: str) -> tuple[str, float]:
     m = _RE_POSITION.search(raw_text.upper())
     if not m:
         return "OTHER", 0.0
-    label = m.group(1).strip().upper()
+    label = normalize_position_label(m.group(1))
     if label not in _VALID:
         label = "OTHER"
     conf = 0.0

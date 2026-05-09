@@ -63,6 +63,7 @@ from amg.config import (
     STREAMING_SCAN_MAX_QUEUED,
     STREAMING_SEGMENT_COUNT,
     STREAMING_SEGMENT_MIN_DURATION_SEC,
+    normalize_position_label,
 )
 from amg.scanning.selector import LiveSelector
 from amg.scoring.ai_client import AIClient, AIResponse
@@ -510,6 +511,11 @@ def run_stream_scan(
             scored = ScoredFrame(parse_succeeded=False)
         candidate["scored_frame"] = scored
         candidate["ai_response"] = ai_resp
+        label = normalize_position_label(getattr(scored, "position_label", "OTHER"))
+        candidate["position_label"] = label
+        candidate["position_label_confidence"] = round(float(getattr(scored, "position_confidence", 0.0) or 0.0), 3)
+        candidate["genre_tags"] = list(getattr(scored, "genre_tags", []) or [])
+        candidate["subgenre_tags"] = list(getattr(scored, "subgenre_tags", []) or [])
 
         # Capture the response when scoring "succeeded" but produced
         # nothing the selector can use. This is the silent failure mode

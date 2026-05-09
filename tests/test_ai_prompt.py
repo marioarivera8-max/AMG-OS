@@ -16,6 +16,13 @@ class TestBuildScoringPrompt:
         assert "PENETRATION_VISIBLE" in prompt
         assert "PENETRATION_CONFIDENCE" in prompt
         assert "ACTION_EVIDENCE" in prompt
+        assert "POSITION / GENRE TAXONOMY" in prompt
+        assert "POSITION:" in prompt
+        assert "GENRES:" in prompt
+        assert "SUBGENRES:" in prompt
+        assert "DOGGY_STYLE" in prompt
+        assert "BLOWJOB_KNEELING" in prompt
+        assert "STEP_FAMILY" in prompt
         assert "RETAIL_BASE" in prompt
         assert "100.0" in prompt
         assert "TIER_D_PRESENT" in prompt
@@ -44,6 +51,8 @@ class TestBuildScoringPrompt:
         assert "TYPE:" in prompt
         assert "GAZE:" in prompt
         assert "PENETRATION_VISIBLE:" in prompt
+        assert "POSITION:" in prompt
+        assert "GENRES:" in prompt
         # Should be much shorter than full prompt
         full = build_scoring_prompt()
         assert len(prompt) < len(full) / 2
@@ -82,6 +91,32 @@ class TestParseAiResponse:
         assert result.penetration_visible is False
         assert result.penetration_confidence == 0.13
         assert result.action_evidence == "POSE_NO_CONTACT"
+
+    def test_taxonomy_fields_parse_and_normalize(self):
+        text = """
+        TIER_A_PASS: yes
+        TIER_B_PRESENT: B1,B3
+        TIER_C_PRESENT: C1
+        TIER_D_PRESENT: NONE
+        SCORE: 81.0
+        TYPE: PENETRATION
+        GAZE: SINGLE
+        AESTHETIC: PROFESSIONAL
+        PENETRATION_VISIBLE: yes
+        PENETRATION_CONFIDENCE: 0.91
+        ACTION_EVIDENCE: EXPLICIT_PENETRATION
+        POSITION: doggy
+        POSITION_CONFIDENCE: 0.82
+        GENRES: straight, group
+        SUBGENRES: teen, squirting, casting_couch, unknown_tag
+        END
+        """
+        result = parse_ai_response(text)
+        assert result.parse_succeeded
+        assert result.position_label == "DOGGY_STYLE"
+        assert result.position_confidence == 0.82
+        assert result.genre_tags == ["STRAIGHT", "GROUP"]
+        assert result.subgenre_tags == ["TEEN_18_PLUS", "SQUIRTING", "CASTING_COUCH"]
 
     def test_tier_a_fail(self):
         text = """

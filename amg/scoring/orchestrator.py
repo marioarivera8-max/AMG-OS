@@ -19,7 +19,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import List, Optional, Callable
 import numpy as np
 
-from amg.config import AI_PARALLEL_WORKERS, SCORE_TIER_3_SUCCESS_FLOOR, SCORE_MAX
+from amg.config import AI_PARALLEL_WORKERS, SCORE_TIER_3_SUCCESS_FLOOR, SCORE_MAX, normalize_position_label
 from amg.scoring.ai_client import AIClient, AIResponse
 from amg.scoring.parser import parse_ai_response, ScoredFrame, cap_score_for_excellence
 from amg.video.frames import measure_sharpness
@@ -107,6 +107,11 @@ def score_frames_parallel(
 
         entry["scored_frame"] = scored
         entry["ai_response"] = ai_resp
+        label = normalize_position_label(getattr(scored, "position_label", "OTHER"))
+        entry["position_label"] = label
+        entry["position_label_confidence"] = round(float(getattr(scored, "position_confidence", 0.0) or 0.0), 3)
+        entry["genre_tags"] = list(getattr(scored, "genre_tags", []) or [])
+        entry["subgenre_tags"] = list(getattr(scored, "subgenre_tags", []) or [])
         return idx, entry
 
     def budget_exhausted(batch_start: float) -> bool:

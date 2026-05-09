@@ -45,6 +45,7 @@ from amg.config import (
     SOFT_THUMB_MIN_SCORE,
     SOFT_THUMB_FILENAME,
     STREAMING_SCAN_ENABLED,
+    normalize_position_label,
 )
 from amg.ingest.inventory import find_companion_files, make_work_dir, make_covers_dir
 from amg.ingest.studio_profiles import detect_studio, get_or_create_profile
@@ -79,6 +80,49 @@ from amg.utils.logging import get_logger, init_logging
 from amg.__version__ import __version__
 
 log = get_logger("pipeline")
+
+
+def _sync_candidate_taxonomy(candidates: List[dict]) -> dict:
+    """Copy parser taxonomy fields onto candidate dicts for selection/output."""
+    synced = 0
+    position_labeled = 0
+    genre_labeled = 0
+    for entry in candidates:
+        scored = entry.get("scored_frame")
+        if not scored:
+            continue
+
+        label = normalize_position_label(getattr(scored, "position_label", "OTHER"))
+        conf = float(getattr(scored, "position_confidence", 0.0) or 0.0)
+        if label and label != "OTHER":
+            entry["position_label"] = label
+            entry["position_label_confidence"] = round(conf, 3)
+            position_labeled += 1
+            synced += 1
+        else:
+            entry.setdefault("position_label", "OTHER")
+            entry.setdefault("position_label_confidence", round(conf, 3))
+
+        genres = list(getattr(scored, "genre_tags", []) or [])
+        subgenres = list(getattr(scored, "subgenre_tags", []) or [])
+        if genres:
+            entry["genre_tags"] = genres
+            genre_labeled += 1
+            synced += 1
+        else:
+            entry.setdefault("genre_tags", [])
+        if subgenres:
+            entry["subgenre_tags"] = subgenres
+            synced += 1
+        else:
+            entry.setdefault("subgenre_tags", [])
+
+    return {
+        "candidates_seen": len(candidates),
+        "taxonomy_synced": synced,
+        "position_labeled": position_labeled,
+        "genre_labeled": genre_labeled,
+    }
 
 
 def process_scene(
@@ -579,6 +623,9 @@ def process_scene(
     cover_cap = get_cover_cap(duration_sec)
     if cover_cap < COVER_FLOOR:
         cover_cap = COVER_FLOOR
+
+    taxonomy_stats = _sync_candidate_taxonomy(candidates)
+    phase_results["taxonomy_metadata"] = taxonomy_stats
 
     # Position classifier pass (bounded): attach `position_label` to top
     # position-like candidates so quota-fill can target 3-per-position.

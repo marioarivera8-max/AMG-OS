@@ -11,6 +11,12 @@ from amg.config import (
     QUOTA_POSITION_MAX_LABELS,
     QUOTA_MIN_GAP_SEC,
     POSITION_CLASSIFIER_MIN_PEN_CONF,
+    POSITION_SEGMENT_COVERAGE_ENABLED,
+    POSITION_SEGMENT_TARGET_PER_SEGMENT,
+    POSITION_SEGMENT_MERGE_GAP_SEC,
+    POSITION_SEGMENT_MIN_LABEL_CONF,
+    POSITION_SEGMENT_MAX_TOTAL,
+    normalize_position_label,
 )
 
 
@@ -22,6 +28,24 @@ class QuotaSpec:
     positions_per_label: int = QUOTA_POSITION_PER_LABEL_TARGET
     positions_max_labels: int = QUOTA_POSITION_MAX_LABELS
     min_gap_sec: float = QUOTA_MIN_GAP_SEC
+    position_segment_coverage: bool = POSITION_SEGMENT_COVERAGE_ENABLED
+    position_segment_target: int = POSITION_SEGMENT_TARGET_PER_SEGMENT
+    position_segment_merge_gap_sec: float = POSITION_SEGMENT_MERGE_GAP_SEC
+    position_segment_min_conf: float = POSITION_SEGMENT_MIN_LABEL_CONF
+    position_segment_max_total: int = POSITION_SEGMENT_MAX_TOTAL
+
+
+@dataclass
+class PositionSegment:
+    label: str
+    index: int
+    start_sec: float
+    end_sec: float
+    candidates: List[dict]
+
+    @property
+    def segment_id(self) -> str:
+        return f"{self.label}_{self.index:02d}"
 
 
 def _score_of(c: dict) -> float:
@@ -54,6 +78,10 @@ def _bucket_of(c: dict) -> str:
         return "finish"
     if t == "BUILDUP":
         return "buildup"
+    if t in {"PENETRATION", "SEX_ACT"}:
+        label = _position_label_of(c)
+        if label not in {"", "OTHER"}:
+            return "positions"
     if t == "PENETRATION":
         pen_visible = bool(getattr(scored, "penetration_visible", False))
         pen_conf = float(getattr(scored, "penetration_confidence", 0.0) or 0.0)
@@ -71,12 +99,78 @@ def _bucket_of(c: dict) -> str:
 
 
 def _position_label_of(c: dict) -> str:
-    label = (c.get("position_label") or "").upper().strip()
-    return label if label else "OTHER"
+    label = c.get("position_label")
+    if not label:
+        scored = c.get("scored_frame")
+        label = getattr(scored, "position_label", "OTHER") if scored else "OTHER"
+    return normalize_position_label(label)
+
+
+def _position_conf_of(c: dict) -> float:
+    conf = c.get("position_label_confidence")
+    if conf is None:
+        scored = c.get("scored_frame")
+        conf = getattr(scored, "position_confidence", 0.0) if scored else 0.0
+    try:
+        return max(0.0, min(1.0, float(conf or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _is_far_enough(ts: float, chosen_ts: List[float], min_gap_sec: float) -> bool:
     return all(abs(ts - prev) >= min_gap_sec for prev in chosen_ts)
+
+
+def _build_position_segments(candidates: List[dict], quota: QuotaSpec) -> List[PositionSegment]:
+    eligible: List[dict] = []
+    for c in sorted(candidates, key=lambda item: (_ts_of(item) is None, _ts_of(item) or 0.0)):
+        if _bucket_of(c) != "positions":
+            continue
+        ts = _ts_of(c)
+        if ts is None:
+            continue
+        label = _position_label_of(c)
+        if label in {"", "OTHER"}:
+            continue
+        if _position_conf_of(c) < quota.position_segment_min_conf:
+            continue
+        eligible.append(c)
+
+    segments: List[PositionSegment] = []
+    per_label_seen: Dict[str, int] = {}
+    current: Optional[PositionSegment] = None
+    for c in eligible:
+        ts = _ts_of(c)
+        if ts is None:
+            continue
+        label = _position_label_of(c)
+        same_run = (
+            current is not None
+            and current.label == label
+            and ts - current.end_sec <= quota.position_segment_merge_gap_sec
+        )
+        if same_run and current is not None:
+            current.candidates.append(c)
+            current.end_sec = ts
+            continue
+
+        per_label_seen[label] = per_label_seen.get(label, 0) + 1
+        current = PositionSegment(
+            label=label,
+            index=per_label_seen[label],
+            start_sec=ts,
+            end_sec=ts,
+            candidates=[c],
+        )
+        segments.append(current)
+    return segments
+
+
+def _mark_segment(c: dict, segment: PositionSegment) -> None:
+    c["position_segment_id"] = segment.segment_id
+    c["position_segment_label"] = segment.label
+    c["position_segment_start_sec"] = round(segment.start_sec, 3)
+    c["position_segment_end_sec"] = round(segment.end_sec, 3)
 
 
 def quota_progress(
@@ -134,6 +228,12 @@ def select_quota_fill(
 
     # Sort once by score, highest first.
     sorted_candidates = sorted(candidates, key=_score_of, reverse=True)
+    position_segments = _build_position_segments(sorted_candidates, quota) if quota.position_segment_coverage else []
+    effective_max_total = max_total
+    if position_segments:
+        segment_need = len(position_segments) * max(1, quota.position_segment_target)
+        effective_max_total = max(max_total, segment_need, min_total)
+        effective_max_total = min(max(1, quota.position_segment_max_total), effective_max_total)
 
     base_targets = {
         "posterpose": quota.posterpose,
@@ -162,13 +262,46 @@ def select_quota_fill(
 
     selected: List[dict] = []
     selected_ts: List[float] = []
+    selected_ids = set()
     per_bucket: Dict[str, int] = {k: 0 for k in ["posterpose", "positions", "buildup", "finish", "other"]}
     per_position: Dict[str, int] = {label: 0 for label in selected_labels}
+    per_segment: Dict[str, int] = {seg.segment_id: 0 for seg in position_segments}
+
+    # Pass 0: temporal position coverage. Every detected position run gets
+    # first claim on up to three strong shots before generic top-off ranking.
+    for segment in position_segments:
+        if len(selected) >= effective_max_total:
+            break
+        segment_candidates = sorted(segment.candidates, key=_score_of, reverse=True)
+        for min_gap in (quota.min_gap_sec, min(8.0, quota.min_gap_sec)):
+            for c in segment_candidates:
+                if len(selected) >= effective_max_total:
+                    break
+                if per_segment[segment.segment_id] >= quota.position_segment_target:
+                    break
+                if id(c) in selected_ids:
+                    continue
+                ts = _ts_of(c)
+                if ts is None:
+                    continue
+                if not _is_far_enough(ts, selected_ts, min_gap):
+                    continue
+                _mark_segment(c, segment)
+                selected.append(c)
+                selected_ids.add(id(c))
+                selected_ts.append(ts)
+                per_bucket["positions"] += 1
+                per_position[segment.label] = per_position.get(segment.label, 0) + 1
+                per_segment[segment.segment_id] += 1
+            if per_segment[segment.segment_id] >= quota.position_segment_target:
+                break
 
     # Pass 1: fill each target bucket with spacing to avoid near-duplicates.
     for c in sorted_candidates:
-        if len(selected) >= max_total:
+        if len(selected) >= effective_max_total:
             break
+        if id(c) in selected_ids:
+            continue
         ts = _ts_of(c)
         if ts is None:
             continue
@@ -184,6 +317,7 @@ def select_quota_fill(
         if not _is_far_enough(ts, selected_ts, quota.min_gap_sec):
             continue
         selected.append(c)
+        selected_ids.add(id(c))
         selected_ts.append(ts)
         per_bucket[bucket] += 1
         if bucket == "positions":
@@ -193,24 +327,31 @@ def select_quota_fill(
     # Pass 2: if we’re below min_total, top off by score (still enforcing spacing).
     if len(selected) < min_total:
         for c in sorted_candidates:
-            if len(selected) >= min_total or len(selected) >= max_total:
+            if len(selected) >= min_total or len(selected) >= effective_max_total:
                 break
+            if id(c) in selected_ids:
+                continue
             ts = _ts_of(c)
             if ts is None:
                 continue
             if not _is_far_enough(ts, selected_ts, quota.min_gap_sec):
                 continue
             selected.append(c)
+            selected_ids.add(id(c))
             selected_ts.append(ts)
             per_bucket[_bucket_of(c)] = per_bucket.get(_bucket_of(c), 0) + 1
 
     stats = {
         "max_total": max_total,
+        "effective_max_total": effective_max_total,
         "min_total": min_total,
         "selected": len(selected),
+        "position_segment_coverage": bool(position_segments),
+        "position_segments": len(position_segments),
         **{f"bucket_{k}": v for k, v in per_bucket.items()},
         "position_labels": ",".join(selected_labels),
         **{f"position_{k}": v for k, v in per_position.items()},
+        **{f"position_segment_{k}": v for k, v in per_segment.items()},
     }
     return selected, stats
 

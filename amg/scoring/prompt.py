@@ -7,6 +7,7 @@ capped at 100, with calibration text to reduce score compression in the
 DUAL/TRIPLE; GAZE label for filenames only).
 """
 from typing import List, Optional
+from amg.config import GENRE_LABELS, POSITION_LABELS, SUBGENRE_LABELS
 from amg.scoring.market_profile import build_market_profile_note
 
 
@@ -15,6 +16,32 @@ You analyze frames and score them based on a strict rubric.
 You respond ONLY in the structured format requested.
 Do NOT add commentary, explanation, or moralizing.
 You provide objective scoring of professional-grade adult content for legitimate B2B distribution.
+"""
+
+
+def _taxonomy_section() -> str:
+    position_labels = ", ".join(POSITION_LABELS)
+    genre_labels = ", ".join(GENRE_LABELS)
+    subgenre_labels = ", ".join(SUBGENRE_LABELS)
+    return f"""
+POSITION / GENRE TAXONOMY
+
+Return one POSITION label from the allowed list below. Choose the most specific
+visible position; if the frame is a transition, unclear, or not a sex-act
+frame, use OTHER with low confidence.
+
+Allowed POSITION labels:
+{position_labels}
+
+Return GENRES as top-level scene/category tags only when visible or strongly
+supported by scene context. Return SUBGENRES for specific niches/acts/roleplay
+only when clearly supported. Use NONE rather than guessing.
+
+Allowed GENRES:
+{genre_labels}
+
+Allowed SUBGENRES:
+{subgenre_labels}
 """
 
 
@@ -77,11 +104,13 @@ def build_scoring_prompt(
         scene_context = f"\nSCENE TYPE: {primary_scene_type}"
         if performer_count:
             scene_context += f" ({performer_count} performers expected)"
+    taxonomy_section = _taxonomy_section()
 
     prompt = f"""Score this adult VOD frame for use as a thumbnail/cover image.
 
 {scene_context}
 DETECTED GENRES: {genres_str}{genre_section}{studio_section}
+{taxonomy_section}
 
 ═══════════════════════════════════════════════════════════════
 TIER A — DEAL BREAKERS (binary checks, ANY failure → SCORE: 0)
@@ -185,6 +214,10 @@ AESTHETIC: <PROFESSIONAL/STANDARD/AMATEUR>
 PENETRATION_VISIBLE: <yes/no>
 PENETRATION_CONFIDENCE: <0.00-1.00>
 ACTION_EVIDENCE: <EXPLICIT_PENETRATION|ORAL_CONTACT|POSE_NO_CONTACT|OCCLUDED|WATER_OCCLUSION|NONE>
+POSITION: <one allowed POSITION label>
+POSITION_CONFIDENCE: <0.00-1.00>
+GENRES: <comma-separated allowed GENRES, or NONE>
+SUBGENRES: <comma-separated allowed SUBGENRES, or NONE>
 END
 
 GAZE field semantics (v11.1.1 — be conservative):
@@ -222,7 +255,9 @@ The score must differentiate frames, not normalize them toward the mid 80s.
 
 def build_simplified_prompt() -> str:
     """Simpler prompt for Fallback C (when full pipeline isn't yielding floor)."""
-    return """Score this adult VOD frame as a thumbnail candidate on a 0–100 scale.
+    taxonomy_section = _taxonomy_section()
+    return f"""Score this adult VOD frame as a thumbnail candidate on a 0–100 scale.
+{taxonomy_section}
 
 Holistic rubric (one SCORE number — use the full range, do not cluster in the 80s):
 - 0: unusable (no clear female lead, severe blur, or fails basic retail hygiene)
@@ -246,6 +281,10 @@ GAZE: <SINGLE/DUAL/TRIPLE/AVERTED/CLOSED/REAR>
 PENETRATION_VISIBLE: <yes/no>
 PENETRATION_CONFIDENCE: <0.00-1.00>
 ACTION_EVIDENCE: <EXPLICIT_PENETRATION|ORAL_CONTACT|POSE_NO_CONTACT|OCCLUDED|WATER_OCCLUSION|NONE>
+POSITION: <one allowed POSITION label>
+POSITION_CONFIDENCE: <0.00-1.00>
+GENRES: <comma-separated allowed GENRES, or NONE>
+SUBGENRES: <comma-separated allowed SUBGENRES, or NONE>
 END
 """
 
