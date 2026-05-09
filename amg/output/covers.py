@@ -224,7 +224,7 @@ def save_covers(
         ts = entry.get("timestamp_sec", 0)
 
         full_frame = base_frame_by_idx.get(rank - 1)
-        if full_frame is None:
+        if full_frame is None and not entry.get("_analysis_frame_only"):
             full_frame = entry.get("frame")
         if full_frame is None:
             log.warn("Could not extract frame", timestamp=ts, rank=rank)

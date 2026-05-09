@@ -56,9 +56,14 @@ from amg.config import (
     MOTION_CAP_TIER_3,
     SHARPNESS_HARD_FLOOR,
     STREAMING_FRAME_CACHE_MAX_MB,
+    STREAMING_ANALYSIS_MAX_HEIGHT,
+    STREAMING_ANALYSIS_MAX_WIDTH,
+    STREAMING_LOW_RES_ANALYSIS_ENABLED,
     STREAMING_SCAN_INTERVAL_SEC,
     STREAMING_SCAN_MAX_AI_CALLS,
     STREAMING_SCAN_MAX_QUEUED,
+    STREAMING_SEGMENT_COUNT,
+    STREAMING_SEGMENT_MIN_DURATION_SEC,
 )
 from amg.scanning.selector import LiveSelector
 from amg.scoring.ai_client import AIClient, AIResponse
@@ -124,6 +129,8 @@ def run_stream_scan(
     max_ai_calls: Optional[int] = None,
     max_queued: Optional[int] = None,
     frame_cache_max_mb: Optional[int] = None,
+    low_res_analysis: Optional[bool] = None,
+    segment_count: Optional[int] = None,
     selector_overrides: Optional[Dict[str, Any]] = None,
     progress_low: int = 20,
     progress_high: int = 88,
@@ -152,12 +159,31 @@ def run_stream_scan(
     ai_call_cap = int(max_ai_calls if max_ai_calls is not None else STREAMING_SCAN_MAX_AI_CALLS)
     queue_cap = int(max_queued or STREAMING_SCAN_MAX_QUEUED)
     cache_mb = int(frame_cache_max_mb or STREAMING_FRAME_CACHE_MAX_MB)
+    low_res = (
+        STREAMING_LOW_RES_ANALYSIS_ENABLED
+        if low_res_analysis is None
+        else bool(low_res_analysis)
+    )
+    analysis_size = (
+        int(STREAMING_ANALYSIS_MAX_WIDTH),
+        int(STREAMING_ANALYSIS_MAX_HEIGHT),
+    )
+    if analysis_size[0] <= 0 or analysis_size[1] <= 0:
+        low_res = False
+    requested_segments = int(segment_count or STREAMING_SEGMENT_COUNT or 1)
+    effective_segments = max(1, requested_segments)
+    if duration_sec < float(STREAMING_SEGMENT_MIN_DURATION_SEC):
+        effective_segments = 1
+    # Keep pathological env values from spawning hundreds of decoders.
+    effective_segments = min(effective_segments, 16)
 
     selector_kwargs = dict(selector_overrides or {})
     selector = LiveSelector(target_k=cover_cap, **selector_kwargs)
     cache = FrameCache(max_bytes=cache_mb * 1024 * 1024)
     cand_q: "queue.PriorityQueue[Any]" = queue.PriorityQueue(maxsize=queue_cap)
     sieve_done = threading.Event()
+    sieve_done_lock = threading.Lock()
+    sieve_done_count = 0
     stop_sieve = threading.Event()
     sieve_error: Dict[str, Any] = {}
     sieve_stats: Dict[str, Any] = {
@@ -168,6 +194,11 @@ def run_stream_scan(
         "frames_dup": 0,
         "candidates_emitted": 0,
         "queue_overflows": 0,
+        "segment_count": effective_segments,
+        "low_res_analysis": bool(low_res),
+        "analysis_frame_size": list(analysis_size) if low_res else None,
+        "full_res_cached": not bool(low_res),
+        "segment_stats": [],
         # Decode vs CV wall split — exposes whether the CPU video decoder
         # is the actual bottleneck (it almost always is on long-form
         # 1080p HEVC). Sum of time spent waiting for the PyAV iterator
@@ -202,8 +233,25 @@ def run_stream_scan(
     if ai_client is None:
         ai_client = AIClient()
 
-    # ----- sieve thread -----
-    def sieve_loop() -> None:
+    stats_lock = threading.Lock()
+
+    # ----- sieve thread(s) -----
+    def sieve_loop(segment_idx: int, start_sec: float, end_sec: float) -> None:
+        nonlocal sieve_done_count
+        local_stats: Dict[str, Any] = {
+            "segment_idx": segment_idx,
+            "start_sec": float(start_sec),
+            "end_sec": float(end_sec),
+            "frames_seen": 0,
+            "frames_dark": 0,
+            "frames_below_floor": 0,
+            "frames_high_motion": 0,
+            "frames_dup": 0,
+            "candidates_emitted": 0,
+            "queue_overflows": 0,
+            "decode_wall_sec": 0.0,
+            "cv_wall_sec": 0.0,
+        }
         try:
             sharpness_window: List[float] = []
             seen_hashes: List[Any] = []
@@ -217,10 +265,19 @@ def run_stream_scan(
                 # decode/CV ratio is what tells us whether NVDEC will
                 # actually move the needle.
                 _yield_t = time.time()
-                for ts, frame in vr.iter_frames_sequential(0.0, duration_sec, interval):
+                if low_res and hasattr(vr, "iter_frames_sequential_scaled"):
+                    frame_iter = vr.iter_frames_sequential_scaled(
+                        start_sec,
+                        end_sec,
+                        interval,
+                        analysis_size,
+                    )
+                else:
+                    frame_iter = vr.iter_frames_sequential(start_sec, end_sec, interval)
+                for ts, frame in frame_iter:
                     if stop_sieve.is_set():
                         break
-                    sieve_stats["decode_wall_sec"] += time.time() - _yield_t
+                    local_stats["decode_wall_sec"] += time.time() - _yield_t
                     _cv_t0 = time.time()
                     try:
                         if stop_sieve.is_set():
@@ -228,9 +285,9 @@ def run_stream_scan(
                         if deadline_sec is not None and time.time() >= deadline_sec:
                             break
 
-                        sieve_stats["frames_seen"] += 1
+                        local_stats["frames_seen"] += 1
                         if is_frame_too_dark(frame):
-                            sieve_stats["frames_dark"] += 1
+                            local_stats["frames_dark"] += 1
                             continue
 
                         sharp = measure_sharpness(frame)
@@ -249,7 +306,7 @@ def run_stream_scan(
                         rel_floor = max(rel_floor, SHARPNESS_HARD_FLOOR / 2.0)
 
                         if sharp < rel_floor:
-                            sieve_stats["frames_below_floor"] += 1
+                            local_stats["frames_below_floor"] += 1
                             continue
 
                         small = cv2.resize(frame, ANALYSIS_FRAME_SIZE)
@@ -258,7 +315,7 @@ def run_stream_scan(
                         prev_gray = gray
 
                         if motion > MOTION_CAP_TIER_3:
-                            sieve_stats["frames_high_motion"] += 1
+                            local_stats["frames_high_motion"] += 1
                             continue
 
                         phash = compute_perceptual_hash(frame)
@@ -267,7 +324,7 @@ def run_stream_scan(
                                 are_near_duplicates(phash, prev, DEDUP_HAMMING_THRESHOLD)
                                 for prev in seen_hashes
                             ):
-                                sieve_stats["frames_dup"] += 1
+                                local_stats["frames_dup"] += 1
                                 continue
                             seen_hashes.append(phash)
                             # Bound dedup memory — 600 hashes ≈ 5KB and
@@ -287,52 +344,90 @@ def run_stream_scan(
 
                         candidate = {
                             "timestamp_sec": float(ts),
-                            "frame": frame,  # full-res, used for AI scoring
+                            "frame": frame,  # analysis/AI frame; may be scaled
                             "sharpness": float(sharp),
                             "motion": float(motion or 0.0),
                             "tier": "stream",
+                            "segment_idx": segment_idx,
                             "zone_tags": zone_tags,
                         }
+                        if low_res:
+                            candidate["_analysis_frame_only"] = True
                         if phash is not None:
                             candidate["_phash"] = str(phash)
 
-                        # Cache the full-res frame keyed by timestamp so the
-                        # output phase doesn't re-decode. The decoder
-                        # produced this exact ndarray; sharing the reference
-                        # is free.
-                        cache.put(float(ts), full_frame=frame)
+                        # In low-res mode the frame is deliberately analysis-
+                        # sized. Cache only that copy and let save_covers()
+                        # re-extract full-res frames for the final picks.
+                        if low_res:
+                            cache.put(float(ts), analysis_frame=frame)
+                        else:
+                            cache.put(float(ts), full_frame=frame)
 
                         try:
                             cand_q.put(
                                 (-priority, _next_seq(), candidate),
                                 timeout=2.0,
                             )
-                            sieve_stats["candidates_emitted"] += 1
+                            local_stats["candidates_emitted"] += 1
                         except queue.Full:
-                            sieve_stats["queue_overflows"] += 1
+                            local_stats["queue_overflows"] += 1
                             # Dispatcher is saturated; drop this one rather
                             # than block the producer. Selector will pick
                             # from the higher-priority backlog.
                             cache.discard(float(ts))
                     finally:
-                        sieve_stats["cv_wall_sec"] += time.time() - _cv_t0
+                        local_stats["cv_wall_sec"] += time.time() - _cv_t0
                         _yield_t = time.time()
         except Exception as exc:  # noqa: BLE001 - reported back to dispatcher
             sieve_error["exc"] = exc
             log.error("stream sieve failed", error=str(exc))
         finally:
-            sieve_done.set()
+            with stats_lock:
+                for key in (
+                    "frames_seen",
+                    "frames_dark",
+                    "frames_below_floor",
+                    "frames_high_motion",
+                    "frames_dup",
+                    "candidates_emitted",
+                    "queue_overflows",
+                    "decode_wall_sec",
+                    "cv_wall_sec",
+                ):
+                    sieve_stats[key] += local_stats[key]
+                sieve_stats["segment_stats"].append(local_stats)
+            with sieve_done_lock:
+                sieve_done_count += 1
+                if sieve_done_count >= effective_segments:
+                    sieve_done.set()
             try:
                 cand_q.put((float("inf"), _next_seq(), _SENTINEL), timeout=2.0)
             except queue.Full:
                 pass
 
-    sieve_thread = threading.Thread(
-        target=sieve_loop,
-        name="stream-sieve",
-        daemon=True,
-    )
-    sieve_thread.start()
+    def _segment_ranges() -> List[tuple[int, float, float]]:
+        if effective_segments <= 1:
+            return [(0, 0.0, float(duration_sec))]
+        span = float(duration_sec) / float(effective_segments)
+        ranges: List[tuple[int, float, float]] = []
+        for idx in range(effective_segments):
+            start = idx * span
+            end = float(duration_sec) if idx == effective_segments - 1 else (idx + 1) * span
+            ranges.append((idx, start, end))
+        return ranges
+
+    sieve_threads = [
+        threading.Thread(
+            target=sieve_loop,
+            args=(idx, start, end),
+            name=f"stream-sieve-{idx}",
+            daemon=True,
+        )
+        for idx, start, end in _segment_ranges()
+    ]
+    for sieve_thread in sieve_threads:
+        sieve_thread.start()
 
     # ----- AI dispatcher pump -----
     in_flight: Dict[Any, Dict[str, Any]] = {}
@@ -562,7 +657,8 @@ def run_stream_scan(
                 continue
             skipped += 1
 
-    sieve_thread.join(timeout=10.0)
+    for sieve_thread in sieve_threads:
+        sieve_thread.join(timeout=10.0)
     if sieve_error.get("exc") is not None and not aborted:
         # Sieve crashed mid-scan; we still kept whatever we managed to
         # score. Surface the cause so the operator can investigate.
@@ -575,6 +671,10 @@ def run_stream_scan(
     # cluttered with float noise.
     sieve_stats["decode_wall_sec"] = round(sieve_stats["decode_wall_sec"], 2)
     sieve_stats["cv_wall_sec"] = round(sieve_stats["cv_wall_sec"], 2)
+    for seg in sieve_stats.get("segment_stats", []):
+        if isinstance(seg, dict):
+            seg["decode_wall_sec"] = round(float(seg.get("decode_wall_sec") or 0.0), 2)
+            seg["cv_wall_sec"] = round(float(seg.get("cv_wall_sec") or 0.0), 2)
 
     on_log(
         f"[stream] final: scored={completed} picks={len(final['picks'])} "

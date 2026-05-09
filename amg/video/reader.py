@@ -73,6 +73,30 @@ _FFMPEG_CUDA_PATH = Path(
 )
 
 
+def _fit_within(width: int, height: int, max_size: Tuple[int, int]) -> Tuple[int, int]:
+    """Return even dimensions fitting inside max_size without upscaling."""
+    max_w, max_h = int(max_size[0] or 0), int(max_size[1] or 0)
+    if width <= 0 or height <= 0 or max_w <= 0 or max_h <= 0:
+        return width, height
+    scale = min(max_w / float(width), max_h / float(height), 1.0)
+    out_w = max(2, int(round(width * scale)))
+    out_h = max(2, int(round(height * scale)))
+    # yuv/rawvideo filters are happier with even sizes.
+    if out_w % 2:
+        out_w -= 1
+    if out_h % 2:
+        out_h -= 1
+    return max(2, out_w), max(2, out_h)
+
+
+def _resize_to_fit(frame: np.ndarray, max_size: Tuple[int, int]) -> np.ndarray:
+    h, w = frame.shape[:2]
+    out_w, out_h = _fit_within(w, h, max_size)
+    if out_w == w and out_h == h:
+        return frame
+    return cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+
+
 def _is_apple_silicon() -> bool:
     return platform.system() == "Darwin" and platform.machine() == "arm64"
 
@@ -387,6 +411,21 @@ class _PyAVBackend:
             )
             return
 
+    def iter_frames_sequential_scaled(
+        self,
+        start_sec: float,
+        end_sec: float,
+        interval_sec: float,
+        max_size: Tuple[int, int],
+    ) -> Iterator[Tuple[float, np.ndarray]]:
+        """Sequential frames resized for analysis/AI use.
+
+        PyAV still decodes the original frame, but callers get the smaller
+        array and can avoid holding full-resolution frames in memory.
+        """
+        for ts, frame in self.iter_frames_sequential(start_sec, end_sec, interval_sec):
+            yield ts, _resize_to_fit(frame, max_size)
+
 
 class _OpenCVBackend:
     """OpenCV fallback. Same behavior as v11.1's reader."""
@@ -486,6 +525,16 @@ class _OpenCVBackend:
                 yield (timestamp, frame)
             timestamp += interval_sec
 
+    def iter_frames_sequential_scaled(
+        self,
+        start_sec: float,
+        end_sec: float,
+        interval_sec: float,
+        max_size: Tuple[int, int],
+    ) -> Iterator[Tuple[float, np.ndarray]]:
+        for ts, frame in self.iter_frames_sequential(start_sec, end_sec, interval_sec):
+            yield ts, _resize_to_fit(frame, max_size)
+
 
 class _FFmpegCudaBackend:
     """
@@ -555,10 +604,47 @@ class _FFmpegCudaBackend:
         end_sec: float,
         interval_sec: float,
     ) -> Iterator[Tuple[float, np.ndarray]]:
+        yield from self._iter_frames_pipe(
+            start_sec,
+            end_sec,
+            interval_sec,
+            output_size=None,
+        )
+
+    def iter_frames_sequential_scaled(
+        self,
+        start_sec: float,
+        end_sec: float,
+        interval_sec: float,
+        max_size: Tuple[int, int],
+    ) -> Iterator[Tuple[float, np.ndarray]]:
+        yield from self._iter_frames_pipe(
+            start_sec,
+            end_sec,
+            interval_sec,
+            output_size=max_size,
+        )
+
+    def _iter_frames_pipe(
+        self,
+        start_sec: float,
+        end_sec: float,
+        interval_sec: float,
+        *,
+        output_size: Optional[Tuple[int, int]],
+    ) -> Iterator[Tuple[float, np.ndarray]]:
         if interval_sec <= 0:
             raise ValueError("interval_sec must be > 0")
         if not self._should_use_cuda_pipe():
-            yield from self._delegate.iter_frames_sequential(start_sec, end_sec, interval_sec)
+            if output_size:
+                yield from self._delegate.iter_frames_sequential_scaled(
+                    start_sec,
+                    end_sec,
+                    interval_sec,
+                    output_size,
+                )
+            else:
+                yield from self._delegate.iter_frames_sequential(start_sec, end_sec, interval_sec)
             return
 
         self._delegate.open()
@@ -569,24 +655,37 @@ class _FFmpegCudaBackend:
                 width=width,
                 height=height,
             )
-            yield from self._delegate.iter_frames_sequential(start_sec, end_sec, interval_sec)
+            if output_size:
+                yield from self._delegate.iter_frames_sequential_scaled(
+                    start_sec,
+                    end_sec,
+                    interval_sec,
+                    output_size,
+                )
+            else:
+                yield from self._delegate.iter_frames_sequential(start_sec, end_sec, interval_sec)
             return
 
         span = max(0.0, float(end_sec) - float(start_sec))
         if span <= 0:
             return
 
-        frame_bytes = width * height * 3
-        vf = f"fps=1/{float(interval_sec):.6f}"
+        out_w, out_h = width, height
+        if output_size:
+            out_w, out_h = _fit_within(width, height, output_size)
+        frame_bytes = out_w * out_h * 3
+        if output_size and (out_w, out_h) != (width, height):
+            vf = f"fps=1/{float(interval_sec):.6f},scale={out_w}:{out_h}"
+            hwaccel_args = ["-hwaccel", "cuda"]
+        else:
+            vf = f"fps=1/{float(interval_sec):.6f}"
+            hwaccel_args = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
         cmd = [
             str(self._ffmpeg_path),
             "-hide_banner",
             "-loglevel",
             "error",
-            "-hwaccel",
-            "cuda",
-            "-hwaccel_output_format",
-            "cuda",
+            *hwaccel_args,
             "-ss",
             f"{float(start_sec):.6f}",
             "-t",
@@ -621,7 +720,7 @@ class _FFmpegCudaBackend:
                 buf = proc.stdout.read(frame_bytes)
                 if not buf or len(buf) < frame_bytes:
                     break
-                frame = np.frombuffer(buf, dtype=np.uint8).reshape((height, width, 3)).copy()
+                frame = np.frombuffer(buf, dtype=np.uint8).reshape((out_h, out_w, 3)).copy()
                 yield (ts, frame)
                 emitted += 1
                 ts += float(interval_sec)
@@ -638,7 +737,15 @@ class _FFmpegCudaBackend:
                 "ffmpeg-cuda sequential decode failed; falling back to PyAV",
                 error=str(e),
             )
-            yield from self._delegate.iter_frames_sequential(start_sec, end_sec, interval_sec)
+            if output_size:
+                yield from self._delegate.iter_frames_sequential_scaled(
+                    start_sec,
+                    end_sec,
+                    interval_sec,
+                    output_size,
+                )
+            else:
+                yield from self._delegate.iter_frames_sequential(start_sec, end_sec, interval_sec)
         finally:
             if proc is not None:
                 try:
@@ -753,6 +860,25 @@ class VideoReader:
         interval_sec: float,
     ) -> Iterator[Tuple[float, np.ndarray]]:
         return self._backend.iter_frames_sequential(start_sec, end_sec, interval_sec)
+
+    def iter_frames_sequential_scaled(
+        self,
+        start_sec: float,
+        end_sec: float,
+        interval_sec: float,
+        max_size: Tuple[int, int],
+    ) -> Iterator[Tuple[float, np.ndarray]]:
+        if hasattr(self._backend, "iter_frames_sequential_scaled"):
+            return self._backend.iter_frames_sequential_scaled(
+                start_sec,
+                end_sec,
+                interval_sec,
+                max_size,
+            )
+        return (
+            (ts, _resize_to_fit(frame, max_size))
+            for ts, frame in self._backend.iter_frames_sequential(start_sec, end_sec, interval_sec)
+        )
 
 
 def get_frame_at_timestamp(video_path: Path, timestamp_sec: float) -> Optional[np.ndarray]:

@@ -373,6 +373,36 @@ STREAMING_POST_AI_SHARP_PERCENTILE = float(
     os.environ.get("AMG_STREAMING_POST_AI_SHARP_PERCENTILE", "25.0")
 )
 
+# Low-resolution streaming analysis. When enabled, the streaming scanner asks
+# the video backend for analysis-sized frames and re-extracts full-resolution
+# frames only for the final cover picks. On ffmpeg-cuda this avoids piping
+# full-size raw BGR frames through Python for every sampled timestamp.
+STREAMING_LOW_RES_ANALYSIS_ENABLED = _profile_bool(
+    "AMG_STREAMING_LOW_RES_ANALYSIS",
+    False,
+    fast=True,
+    turbo=True,
+)
+STREAMING_ANALYSIS_MAX_WIDTH = _profile_int(
+    "AMG_STREAMING_ANALYSIS_MAX_WIDTH",
+    672,
+)
+STREAMING_ANALYSIS_MAX_HEIGHT = _profile_int(
+    "AMG_STREAMING_ANALYSIS_MAX_HEIGHT",
+    672,
+)
+
+# Optional segment-parallel streaming scan. Keep default at 1 so the current
+# production path stays unchanged unless the H100 bake-off explicitly opts in.
+STREAMING_SEGMENT_COUNT = _profile_int(
+    "AMG_STREAMING_SEGMENT_COUNT",
+    1,
+)
+STREAMING_SEGMENT_MIN_DURATION_SEC = _profile_float(
+    "AMG_STREAMING_SEGMENT_MIN_DURATION_SEC",
+    1800.0,
+)
+
 # Duration-adaptive sampling scale (efficiency for long-form scenes).
 # Tuple format: (min_duration_sec, max_duration_sec, interval_scale)
 INTERVAL_SCALE_BY_DURATION = [

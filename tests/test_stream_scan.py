@@ -151,6 +151,71 @@ class TestHappyPath:
             cached = cache.get_full(ts)
             assert cached is frame, f"cache miss at ts={ts}"
 
+    def test_low_res_analysis_caches_analysis_only(self, monkeypatch, tmp_path):
+        import amg.scanning.stream as stream
+
+        frames = [
+            (0.0, _frame(60)),
+            (10.0, _frame(70)),
+        ]
+        called = {"scaled": False}
+
+        class _ScaledReader:
+            def __init__(self, _path):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def iter_frames_sequential(self, *_args):
+                raise AssertionError("low-res mode should use scaled iterator")
+
+            def iter_frames_sequential_scaled(self, _start, _end, _interval, _max_size):
+                called["scaled"] = True
+                yield from frames
+
+        monkeypatch.setattr(stream, "VideoReader", _ScaledReader)
+        monkeypatch.setattr(stream, "is_frame_too_dark", lambda _f: False)
+        monkeypatch.setattr(stream, "measure_sharpness", lambda f: float(f[0, 0, 0]) * 10.0)
+        monkeypatch.setattr(stream, "measure_motion", lambda *_a: 0.0)
+        monkeypatch.setattr(stream, "compute_perceptual_hash", lambda _f: None)
+        monkeypatch.setattr(stream, "are_near_duplicates", lambda *_a, **_k: False)
+
+        class _Client:
+            def score_frame(self, *_a, **_k):
+                return _FakeAIResponse(success=True, raw_text="ok")
+
+        monkeypatch.setattr(stream, "AIClient", lambda: _Client())
+        monkeypatch.setattr(stream, "parse_ai_response", lambda _r: _ScoredStub(True, 90.0))
+        monkeypatch.setattr(stream, "cap_score_for_excellence", lambda _r, s: float(s))
+
+        result = stream.run_stream_scan(
+            Path("dummy.mp4"),
+            duration_sec=60.0,
+            prompt="prompt",
+            target_count=1,
+            cover_cap=1,
+            on_log=_quiet_log,
+            on_progress=_quiet_progress,
+            max_workers=1,
+            interval_sec=1.0,
+            max_queued=10,
+            frame_cache_max_mb=64,
+            low_res_analysis=True,
+            selector_overrides={"min_gap_sec": 0.5, "post_ai_sharp_percentile": 0.0},
+        )
+
+        assert called["scaled"] is True
+        assert result["stats"]["low_res_analysis"] is True
+        assert result["stats"]["full_res_cached"] is False
+        cache = result["frame_cache"]
+        assert cache.get_full(0.0) is None
+        assert cache.get_analysis(0.0) is frames[0][1]
+        assert result["all_scored"][0]["_analysis_frame_only"] is True
+
     def test_dark_and_blurry_dropped(self, monkeypatch, tmp_path):
         # Mix: dark, very low sharpness, normal. Only the third should
         # reach the dispatcher.
@@ -287,6 +352,63 @@ class TestDeadline:
         assert result["aborted"] is True
         assert result["abort_reason"] == "E_STREAM_AI_CAP"
         assert result["stats"]["submitted"] == 3
+
+
+class TestSegmentParallel:
+    def test_segment_count_splits_sieve_ranges(self, monkeypatch, tmp_path):
+        import amg.scanning.stream as stream
+
+        ranges = []
+
+        class _SegmentReader:
+            def __init__(self, _path):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def iter_frames_sequential(self, start, end, _interval):
+                ranges.append((round(float(start), 3), round(float(end), 3)))
+                yield (float(start) + 1.0, _frame(80))
+
+        monkeypatch.setattr(stream, "VideoReader", _SegmentReader)
+        monkeypatch.setattr(stream, "STREAMING_SEGMENT_MIN_DURATION_SEC", 0.0)
+        monkeypatch.setattr(stream, "is_frame_too_dark", lambda _f: False)
+        monkeypatch.setattr(stream, "measure_sharpness", lambda f: float(f[0, 0, 0]) * 10.0)
+        monkeypatch.setattr(stream, "measure_motion", lambda *_a: 0.0)
+        monkeypatch.setattr(stream, "compute_perceptual_hash", lambda _f: None)
+        monkeypatch.setattr(stream, "are_near_duplicates", lambda *_a, **_k: False)
+
+        class _Client:
+            def score_frame(self, *_a, **_k):
+                return _FakeAIResponse(success=True, raw_text="ok")
+
+        monkeypatch.setattr(stream, "AIClient", lambda: _Client())
+        monkeypatch.setattr(stream, "parse_ai_response", lambda _r: _ScoredStub(True, 90.0))
+        monkeypatch.setattr(stream, "cap_score_for_excellence", lambda _r, s: float(s))
+
+        result = stream.run_stream_scan(
+            Path("dummy.mp4"),
+            duration_sec=100.0,
+            prompt="prompt",
+            target_count=1,
+            cover_cap=1,
+            on_log=_quiet_log,
+            on_progress=_quiet_progress,
+            max_workers=1,
+            interval_sec=1.0,
+            max_queued=10,
+            frame_cache_max_mb=64,
+            segment_count=2,
+            selector_overrides={"min_gap_sec": 0.5, "post_ai_sharp_percentile": 0.0},
+        )
+
+        assert sorted(ranges) == [(0.0, 50.0), (50.0, 100.0)]
+        assert result["stats"]["segment_count"] == 2
+        assert len(result["stats"]["segment_stats"]) == 2
 
 
 class TestInstrumentation:
