@@ -158,6 +158,7 @@ def run_stream_scan(
     cache = FrameCache(max_bytes=cache_mb * 1024 * 1024)
     cand_q: "queue.PriorityQueue[Any]" = queue.PriorityQueue(maxsize=queue_cap)
     sieve_done = threading.Event()
+    stop_sieve = threading.Event()
     sieve_error: Dict[str, Any] = {}
     sieve_stats: Dict[str, Any] = {
         "frames_seen": 0,
@@ -217,9 +218,13 @@ def run_stream_scan(
                 # actually move the needle.
                 _yield_t = time.time()
                 for ts, frame in vr.iter_frames_sequential(0.0, duration_sec, interval):
+                    if stop_sieve.is_set():
+                        break
                     sieve_stats["decode_wall_sec"] += time.time() - _yield_t
                     _cv_t0 = time.time()
                     try:
+                        if stop_sieve.is_set():
+                            break
                         if deadline_sec is not None and time.time() >= deadline_sec:
                             break
 
@@ -361,8 +366,8 @@ def run_stream_scan(
                 "timestamp_sec": candidate.get("timestamp_sec"),
                 "reason": reason,
                 "ai_success": bool(ai_resp.success),
-                "ai_error_code": ai_resp.error_code,
-                "ai_error_message": (ai_resp.error_message or "")[:200],
+                "ai_error_code": getattr(ai_resp, "error_code", None),
+                "ai_error_message": (getattr(ai_resp, "error_message", "") or "")[:200],
                 "raw_text_truncated": raw_text[:1500],
                 "raw_text_len": len(raw_text),
                 "parsed_score": float(scored.score) if scored.score is not None else None,
@@ -470,6 +475,10 @@ def run_stream_scan(
                     abort_reason = "E_STREAM_DEADLINE"
                 else:
                     abort_reason = "E_STREAM_AI_CAP"
+                # Stop producer decode immediately when dispatcher budget
+                # is exhausted (especially AI cap) instead of decoding until
+                # deadline and then waiting for join timeout.
+                stop_sieve.set()
                 break
 
             done_set, _ = wait(in_flight, timeout=0.5, return_when=FIRST_COMPLETED)

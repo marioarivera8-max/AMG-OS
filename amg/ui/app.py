@@ -1140,6 +1140,11 @@ def _expand_cloud_selection_to_videos(
         "download_root": "folder" | None,
         "relative_path": "sub/video.mp4" | None
       }
+
+    NOTE: even for folder picks we currently enqueue each video as an
+    independent cloud-source job that pulls only that file (download_root
+    stays None). Pulling the whole folder per scene causes repeated large
+    transfers when one folder contains many videos.
     """
     from amg.cloud.credentials import CredentialStore
     from amg.cloud.rclone import Rclone, RcloneError, RcloneNotFoundError
@@ -1186,8 +1191,8 @@ def _expand_cloud_selection_to_videos(
                 expanded.append(
                     {
                         "path": full_path,
-                        "download_root": p,
-                        "relative_path": _relative_cloud_path(full_path, p),
+                        "download_root": None,
+                        "relative_path": None,
                     }
                 )
                 seen.add(full_path)

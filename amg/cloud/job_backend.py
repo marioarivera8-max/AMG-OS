@@ -46,7 +46,7 @@ from typing import Any, Callable, Dict, Optional
 
 import requests
 
-from amg.config import DATA_DIR, PROCESSING_PROFILE
+from amg.config import DATA_DIR
 from amg.utils.logging import get_logger
 
 log = get_logger("amg.cloud.job_backend")
@@ -533,14 +533,24 @@ class RunpodBackend(JobBackend):
         spec = self._spec
         ollama_parallel = str(os.environ.get("AMG_RUNPOD_OLLAMA_NUM_PARALLEL", "6"))
         worker_parallel = str(os.environ.get("AMG_RUNPOD_AI_PARALLEL_WORKERS", ollama_parallel))
-        video_backend = str(os.environ.get("AMG_RUNPOD_VIDEO_BACKEND", "pyav"))
-        processing_profile = str(os.environ.get("AMG_PROCESSING_PROFILE", PROCESSING_PROFILE))
+        # Default to auto so pod images can choose their fastest path
+        # (ffmpeg-cuda+pyav on H100 when AMG_VIDEO_HWACCEL=cuda). Forcing
+        # "pyav" here would silently disable the NVDEC backend shipped in
+        # Dockerfile.pod.
+        video_backend = str(os.environ.get("AMG_RUNPOD_VIDEO_BACKEND", "auto"))
+        # Cloud should default to balanced if controller env omitted the
+        # profile; local CLI keeps its own quality default in config.py.
+        processing_profile = str(os.environ.get("AMG_PROCESSING_PROFILE", "balanced"))
         # Pass the shared secret into pod env so worker accepts controller requests.
         spec_env = dict(spec.env or {})
         spec_env["OLLAMA_NUM_PARALLEL"] = ollama_parallel
         spec_env["AMG_AI_PARALLEL_WORKERS"] = worker_parallel
         spec_env["AMG_VIDEO_BACKEND"] = video_backend
+        spec_env["AMG_VIDEO_HWACCEL"] = str(os.environ.get("AMG_VIDEO_HWACCEL", "cuda"))
         spec_env["AMG_PROCESSING_PROFILE"] = processing_profile
+        # Streaming scan is the cloud happy path; force-on unless the
+        # operator explicitly overrides it in controller env.
+        spec_env["AMG_STREAMING_SCAN"] = str(os.environ.get("AMG_STREAMING_SCAN", "1"))
         forwarded_env = [
             "AMG_CALIBRATION_SAMPLE_COUNT",
             "AMG_CALIBRATION_MAX_DURATION_SEC",
@@ -567,6 +577,7 @@ class RunpodBackend(JobBackend):
             "AMG_PROVIDED_THUMB_MAX_SCAN",
             "AMG_PROVIDED_THUMB_MAX_ACCEPT",
             "AMG_VISION_MODEL_OVERRIDE",
+            "AMG_VIDEO_HWACCEL",
             "AMG_STREAMING_SCAN",
             "AMG_STREAMING_SCAN_INTERVAL_SEC",
             "AMG_STREAMING_SCAN_MAX_QUEUED",
