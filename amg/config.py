@@ -193,6 +193,13 @@ AI_SCORING_SEED = 42
 # Frame analysis (sharpness, motion, faces) at this size
 ANALYSIS_FRAME_SIZE = (640, 360)
 
+# GPU-first CV path (phase migration flags).
+# Off by default for conservative compatibility; cloud env can force on.
+GPU_CV_ENABLED = _env_bool("AMG_GPU_CV_ENABLED", False)
+# opencv_cuda | cupy (cupy is optional and only used when installed)
+GPU_CV_BACKEND = os.environ.get("AMG_GPU_CV_BACKEND", "opencv_cuda").strip().lower()
+GPU_DEDUP_ENABLED = _env_bool("AMG_GPU_DEDUP_ENABLED", GPU_CV_ENABLED)
+
 # Calibration sample count (for adaptive Tier 1 threshold)
 CALIBRATION_SAMPLE_COUNT = _profile_int(
     "AMG_CALIBRATION_SAMPLE_COUNT",

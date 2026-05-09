@@ -555,11 +555,10 @@ class RunpodBackend(JobBackend):
             spec = self._spec
             ollama_parallel = str(os.environ.get("AMG_RUNPOD_OLLAMA_NUM_PARALLEL", "6"))
             worker_parallel = str(os.environ.get("AMG_RUNPOD_AI_PARALLEL_WORKERS", ollama_parallel))
-            # Default to auto so pod images can choose their fastest path
-            # (ffmpeg-cuda+pyav on H100 when AMG_VIDEO_HWACCEL=cuda). Forcing
-            # "pyav" here would silently disable the NVDEC backend shipped in
-            # Dockerfile.pod.
-            video_backend = str(os.environ.get("AMG_RUNPOD_VIDEO_BACKEND", "auto"))
+            # Hard-lock decode path to ffmpeg_cuda by default for cloud jobs.
+            # This prevents silent fallback to pyav/opencv when controller env
+            # omits AMG_RUNPOD_VIDEO_BACKEND. Operators can still override.
+            video_backend = str(os.environ.get("AMG_RUNPOD_VIDEO_BACKEND", "ffmpeg_cuda"))
             # Cloud should default to balanced if controller env omitted the
             # profile; local CLI keeps its own quality default in config.py.
             processing_profile = str(os.environ.get("AMG_PROCESSING_PROFILE", "balanced"))
@@ -569,6 +568,11 @@ class RunpodBackend(JobBackend):
             spec_env["AMG_AI_PARALLEL_WORKERS"] = worker_parallel
             spec_env["AMG_VIDEO_BACKEND"] = video_backend
             spec_env["AMG_VIDEO_HWACCEL"] = str(os.environ.get("AMG_VIDEO_HWACCEL", "cuda"))
+            spec_env["AMG_GPU_CV_ENABLED"] = str(os.environ.get("AMG_GPU_CV_ENABLED", "1"))
+            spec_env["AMG_GPU_CV_BACKEND"] = str(os.environ.get("AMG_GPU_CV_BACKEND", "opencv_cuda"))
+            spec_env["AMG_GPU_DEDUP_ENABLED"] = str(
+                os.environ.get("AMG_GPU_DEDUP_ENABLED", spec_env["AMG_GPU_CV_ENABLED"])
+            )
             spec_env["AMG_PROCESSING_PROFILE"] = processing_profile
             spec_env["AMG_POD_MAX_ACTIVE_PIPELINES"] = str(
                 os.environ.get(
@@ -606,6 +610,9 @@ class RunpodBackend(JobBackend):
                 "AMG_PROVIDED_THUMB_MAX_ACCEPT",
                 "AMG_VISION_MODEL_OVERRIDE",
                 "AMG_VIDEO_HWACCEL",
+                "AMG_GPU_CV_ENABLED",
+                "AMG_GPU_CV_BACKEND",
+                "AMG_GPU_DEDUP_ENABLED",
                 "AMG_STREAMING_SCAN",
                 "AMG_STREAMING_SCAN_INTERVAL_SEC",
                 "AMG_STREAMING_SCAN_MAX_QUEUED",

@@ -1,21 +1,74 @@
 """
 Frame deduplication via perceptual hashing.
 
-Many candidate frames look near-identical (consecutive frames in a slow scene).
-Pre-filter with dHash + Hamming distance ≤ 5 (industry standard for "near duplicate").
-
-Saves AI calls and ensures variety in final cover set.
+GPU migration notes:
+- v11.x used PIL/imagehash on CPU for every candidate.
+- This module now computes dHash natively with OpenCV/Numpy and can use
+  cv2.cuda for preprocess (gray+resize) when enabled.
+- Hamming-threshold semantics remain unchanged.
 """
-import imagehash
-import cv2
-import numpy as np
-from PIL import Image
+import os
+from dataclasses import dataclass
 from typing import List, Optional
 
+import cv2
+import numpy as np
+
 from amg.config import DEDUP_HASH_SIZE, DEDUP_HAMMING_THRESHOLD
+from amg.utils.logging import get_logger
+
+log = get_logger("video.dedup")
 
 
-def compute_perceptual_hash(frame_bgr: np.ndarray) -> Optional[imagehash.ImageHash]:
+def _gpu_enabled() -> bool:
+    flag = os.environ.get("AMG_GPU_DEDUP_ENABLED")
+    if flag is None:
+        flag = os.environ.get("AMG_GPU_CV_ENABLED", "0")
+    if str(flag).strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
+    if not hasattr(cv2, "cuda"):
+        return False
+    try:
+        return int(cv2.cuda.getCudaEnabledDeviceCount()) > 0
+    except Exception:
+        return False
+
+
+@dataclass(frozen=True)
+class PerceptualHash:
+    bits: int
+    size: int
+
+    def __sub__(self, other) -> int:
+        if not isinstance(other, PerceptualHash):
+            return 10**9
+        return int((self.bits ^ other.bits).bit_count())
+
+    def __str__(self) -> str:
+        width = self.size * self.size
+        return f"{self.bits:0{max(1, width // 4)}x}"
+
+
+def _frame_to_gray_resized(frame_bgr: np.ndarray, hash_size: int) -> Optional[np.ndarray]:
+    out_w = hash_size + 1
+    out_h = hash_size
+    if _gpu_enabled():
+        try:
+            gpu = cv2.cuda_GpuMat()
+            gpu.upload(frame_bgr)
+            gray = cv2.cuda.cvtColor(gpu, cv2.COLOR_BGR2GRAY)
+            resized = cv2.cuda.resize(gray, (out_w, out_h), interpolation=cv2.INTER_AREA)
+            return resized.download()
+        except Exception as exc:  # noqa: BLE001
+            log.warn("GPU dedup preprocess failed; using CPU fallback", error=str(exc))
+    try:
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        return cv2.resize(gray, (out_w, out_h), interpolation=cv2.INTER_AREA)
+    except Exception:
+        return None
+
+
+def compute_perceptual_hash(frame_bgr: np.ndarray) -> Optional[PerceptualHash]:
     """
     Compute dHash for a frame.
 
@@ -24,9 +77,16 @@ def compute_perceptual_hash(frame_bgr: np.ndarray) -> Optional[imagehash.ImageHa
     if frame_bgr is None:
         return None
     try:
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(rgb)
-        return imagehash.dhash(pil_img, hash_size=DEDUP_HASH_SIZE)
+        hs = max(1, int(DEDUP_HASH_SIZE))
+        small = _frame_to_gray_resized(frame_bgr, hs)
+        if small is None:
+            return None
+        # dHash: horizontal adjacent comparisons.
+        diff = small[:, 1:] > small[:, :-1]
+        bits = 0
+        for bit in diff.reshape(-1):
+            bits = (bits << 1) | int(bool(bit))
+        return PerceptualHash(bits=bits, size=hs)
     except Exception:
         return None
 
@@ -39,7 +99,10 @@ def are_near_duplicates(hash1, hash2, threshold: int = DEDUP_HAMMING_THRESHOLD) 
     """
     if hash1 is None or hash2 is None:
         return False
-    return (hash1 - hash2) <= threshold
+    try:
+        return (hash1 - hash2) <= threshold
+    except Exception:
+        return False
 
 
 def deduplicate_frames(

@@ -579,10 +579,119 @@ class _FFmpegCudaBackend:
         return self._delegate.frame_size
 
     def get_frame_at(self, timestamp_sec: float) -> Optional[np.ndarray]:
-        return self._delegate.get_frame_at(timestamp_sec)
+        rows = self.get_frames_at([timestamp_sec])
+        return rows[0] if rows else None
 
     def get_frames_at(self, timestamps_sec: List[float]) -> List[Optional[np.ndarray]]:
-        return self._delegate.get_frames_at(timestamps_sec)
+        if not timestamps_sec:
+            return []
+        if not self._should_use_cuda_pipe():
+            return self._delegate.get_frames_at(timestamps_sec)
+
+        self._delegate.open()
+        width, height = self._delegate.frame_size
+        if width <= 0 or height <= 0:
+            log.warn(
+                "ffmpeg-cuda random access missing frame dimensions; falling back to PyAV",
+                width=width,
+                height=height,
+            )
+            return self._delegate.get_frames_at(timestamps_sec)
+
+        results: List[Optional[np.ndarray]] = []
+        failures = 0
+        for ts in timestamps_sec:
+            ok, frame = self._read_frame_at_pipe(float(ts), width=width, height=height)
+            if not ok:
+                failures += 1
+                frame = self._delegate.get_frame_at(float(ts))
+            results.append(frame)
+
+        if failures:
+            log.warn(
+                "ffmpeg-cuda random access had fallbacks",
+                failures=failures,
+                requested=len(timestamps_sec),
+            )
+        return results
+
+    def _read_frame_at_pipe(
+        self,
+        timestamp_sec: float,
+        *,
+        width: int,
+        height: int,
+    ) -> Tuple[bool, Optional[np.ndarray]]:
+        if timestamp_sec < 0 or (self.duration_sec and timestamp_sec > self.duration_sec):
+            return True, None
+
+        frame_bytes = int(width) * int(height) * 3
+        if frame_bytes <= 0:
+            return False, None
+
+        cmd = [
+            str(self._ffmpeg_path),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-hwaccel",
+            "cuda",
+            "-ss",
+            f"{float(timestamp_sec):.6f}",
+            "-i",
+            str(self.video_path),
+            "-frames:v",
+            "1",
+            "-an",
+            "-sn",
+            "-dn",
+            "-pix_fmt",
+            "bgr24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]
+
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            out, err = proc.communicate(timeout=30.0)
+            if proc.returncode != 0 or len(out) < frame_bytes:
+                msg = err.decode("utf-8", "ignore")[:200] if err else ""
+                log.warn(
+                    "ffmpeg-cuda random frame decode failed; using PyAV fallback",
+                    t=round(float(timestamp_sec), 3),
+                    exit=proc.returncode,
+                    bytes=len(out),
+                    error=msg,
+                )
+                return False, None
+            frame = np.frombuffer(out[:frame_bytes], dtype=np.uint8).reshape((height, width, 3))
+            return True, frame
+        except subprocess.TimeoutExpired:
+            if proc is not None:
+                try:
+                    proc.kill()
+                    proc.communicate(timeout=5.0)
+                except Exception:
+                    pass
+            log.warn(
+                "ffmpeg-cuda random frame decode timed out; using PyAV fallback",
+                t=round(float(timestamp_sec), 3),
+            )
+            return False, None
+        except Exception as e:
+            log.warn(
+                "ffmpeg-cuda random frame decode errored; using PyAV fallback",
+                t=round(float(timestamp_sec), 3),
+                error=str(e),
+            )
+            return False, None
 
     def _should_use_cuda_pipe(self) -> bool:
         if _HWACCEL_MODE not in {"cuda", "nvdec"}:
@@ -720,7 +829,10 @@ class _FFmpegCudaBackend:
                 buf = proc.stdout.read(frame_bytes)
                 if not buf or len(buf) < frame_bytes:
                     break
-                frame = np.frombuffer(buf, dtype=np.uint8).reshape((out_h, out_w, 3)).copy()
+                # Avoid an extra CPU memcpy per frame. ``buf`` is a distinct
+                # bytes object per read() call, so the ndarray can safely hold
+                # a view into it until the consumer is done.
+                frame = np.frombuffer(buf, dtype=np.uint8).reshape((out_h, out_w, 3))
                 yield (ts, frame)
                 emitted += 1
                 ts += float(interval_sec)

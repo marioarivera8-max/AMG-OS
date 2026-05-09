@@ -262,7 +262,11 @@ def test_runpod_backend_full_happy_path(runpod_backend, tmp_path, monkeypatch):
     assert client.provisioned[0].env.get("AMG_POD_AUTH_TOKEN") == "x" * 48
     assert client.provisioned[0].env.get("OLLAMA_NUM_PARALLEL") == "6"
     assert client.provisioned[0].env.get("AMG_AI_PARALLEL_WORKERS") == "6"
-    assert client.provisioned[0].env.get("AMG_VIDEO_BACKEND") == "auto"
+    assert client.provisioned[0].env.get("AMG_VIDEO_BACKEND") == "ffmpeg_cuda"
+    assert client.provisioned[0].env.get("AMG_VIDEO_HWACCEL") == "cuda"
+    assert client.provisioned[0].env.get("AMG_GPU_CV_ENABLED") == "1"
+    assert client.provisioned[0].env.get("AMG_GPU_CV_BACKEND") == "opencv_cuda"
+    assert client.provisioned[0].env.get("AMG_GPU_DEDUP_ENABLED") == "1"
     assert client.provisioned[0].env.get("AMG_PROCESSING_PROFILE") == "balanced"
     assert client.provisioned[0].env.get("AMG_STREAMING_SCAN") == "1"
     # Artifacts extracted to work_dirs/<scene_id>/ (v0 layout: flat zip)

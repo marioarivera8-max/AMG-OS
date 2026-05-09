@@ -545,6 +545,9 @@ class TestInstrumentation:
         assert "decode_wall_sec" in stats
         assert "cv_wall_sec" in stats
         assert "ai_wall_sec" in stats
+        assert "video_backend" in stats
+        assert "gpu_cv_mode" in stats
+        assert "gpu_cv_backend" in stats
         assert stats["decode_wall_sec"] >= 0.0
         assert stats["cv_wall_sec"] >= 0.0
         assert stats["ai_wall_sec"] >= 0.0

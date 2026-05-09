@@ -1,14 +1,23 @@
 """
 Frame analysis: sharpness, motion measurement, adaptive calibration.
 
-Sharpness: Laplacian variance — standard cheap-and-effective measure.
-Motion: optical flow magnitude between consecutive frames (quick gate).
-Calibration: sample 100 frames evenly, derive per-source thresholds.
+GPU migration notes:
+- This module now exposes an optional CUDA-backed analysis path for hot CV ops
+  (resize + gray conversion + Laplacian sharpness + frame-diff motion proxy).
+- CPU remains the source-of-truth fallback on every host.
+- Callers should treat GPU as opportunistic acceleration, not a hard dependency.
 """
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Tuple
+
 import cv2
 import numpy as np
-from pathlib import Path
-from typing import Tuple
+try:  # Optional phase-5 kernel backend.
+    import cupy as cp  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    cp = None
 
 from amg.config import (
     ANALYSIS_FRAME_SIZE,
@@ -20,6 +29,82 @@ from amg.config import (
     SHARPNESS_HARD_FLOOR,
 )
 from amg.video.reader import VideoReader
+from amg.utils.logging import get_logger
+
+log = get_logger("video.frames")
+
+
+def _cuda_device_available() -> bool:
+    if str(os.environ.get("AMG_GPU_CV_ENABLED", "0")).strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
+    if not hasattr(cv2, "cuda"):
+        return False
+    try:
+        return int(cv2.cuda.getCudaEnabledDeviceCount()) > 0
+    except Exception:
+        return False
+
+
+@dataclass(frozen=True)
+class CvRuntime:
+    mode: str  # "gpu" | "cpu"
+    backend: str  # "opencv-cuda" | "cupy" | "cpu"
+    reason: str
+
+
+_RUNTIME: Optional[CvRuntime] = None
+
+
+def runtime() -> CvRuntime:
+    global _RUNTIME
+    if _RUNTIME is None:
+        backend_pref = str(os.environ.get("AMG_GPU_CV_BACKEND", "opencv_cuda")).strip().lower()
+        if _cuda_device_available() and backend_pref == "cupy" and cp is not None:
+            _RUNTIME = CvRuntime(
+                mode="gpu",
+                backend="cupy",
+                reason="AMG_GPU_CV_ENABLED + CuPy backend selected",
+            )
+        elif _cuda_device_available():
+            _RUNTIME = CvRuntime(
+                mode="gpu",
+                backend="opencv-cuda",
+                reason="AMG_GPU_CV_ENABLED + CUDA device",
+            )
+        else:
+            _RUNTIME = CvRuntime(mode="cpu", backend="cpu", reason="cuda unavailable or disabled")
+    return _RUNTIME
+
+
+def runtime_info() -> dict:
+    r = runtime()
+    return {"mode": r.mode, "backend": r.backend, "reason": r.reason}
+
+
+def _gpu_resize_gray(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
+    """Return ANALYSIS_FRAME_SIZE gray frame via cv2.cuda when available."""
+    if runtime().mode != "gpu":
+        return None
+    try:
+        gpu = cv2.cuda_GpuMat()
+        gpu.upload(frame_bgr)
+        resized = cv2.cuda.resize(gpu, ANALYSIS_FRAME_SIZE, interpolation=cv2.INTER_AREA)
+        gray = cv2.cuda.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        return gray.download()
+    except Exception as exc:  # noqa: BLE001 - GPU path must be best-effort
+        log.warn("GPU resize/gray failed; using CPU fallback", error=str(exc))
+        return None
+
+
+def analysis_gray(frame_bgr: np.ndarray) -> np.ndarray:
+    """Canonical analysis-sized grayscale frame for downstream CV metrics."""
+    if frame_bgr is None:
+        return np.zeros((ANALYSIS_FRAME_SIZE[1], ANALYSIS_FRAME_SIZE[0]), dtype=np.uint8)
+    gray = _gpu_resize_gray(frame_bgr)
+    if gray is not None:
+        return gray
+    small = cv2.resize(frame_bgr, ANALYSIS_FRAME_SIZE)
+    return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
 
 def measure_sharpness(frame_bgr: np.ndarray) -> float:
@@ -37,9 +122,16 @@ def measure_sharpness(frame_bgr: np.ndarray) -> float:
     if frame_bgr is None:
         return 0.0
 
-    # Resize for consistent measurement
-    small = cv2.resize(frame_bgr, ANALYSIS_FRAME_SIZE)
-    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    gray = analysis_gray(frame_bgr)
+    if runtime().mode == "gpu":
+        try:
+            gpu_gray = cv2.cuda_GpuMat()
+            gpu_gray.upload(gray)
+            lap = cv2.cuda.createLaplacianFilter(cv2.CV_8U, cv2.CV_32F, ksize=3).apply(gpu_gray)
+            lap_cpu = lap.download()
+            return float(lap_cpu.var())
+        except Exception as exc:  # noqa: BLE001
+            log.warn("GPU sharpness failed; using CPU fallback", error=str(exc))
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
@@ -57,17 +149,36 @@ def measure_motion(prev_gray: np.ndarray, curr_gray: np.ndarray) -> float:
     if prev_gray.shape != curr_gray.shape:
         return 0.0
 
+    # Fast GPU-friendly proxy first: mean absolute frame delta.
+    if runtime().mode == "gpu":
+        if runtime().backend == "cupy" and cp is not None:
+            try:
+                prev_gpu = cp.asarray(prev_gray)
+                curr_gpu = cp.asarray(curr_gray)
+                diff = cp.abs(curr_gpu.astype(cp.float32) - prev_gpu.astype(cp.float32))
+                return float(cp.mean(diff).get()) / 32.0
+            except Exception as exc:  # noqa: BLE001
+                log.warn("CuPy motion kernel failed; using fallback", error=str(exc))
+        try:
+            g0 = cv2.cuda_GpuMat()
+            g1 = cv2.cuda_GpuMat()
+            g0.upload(prev_gray)
+            g1.upload(curr_gray)
+            diff = cv2.cuda.absdiff(g0, g1).download()
+            return float(diff.mean()) / 32.0
+        except Exception as exc:  # noqa: BLE001
+            log.warn("GPU motion proxy failed; using Farneback CPU", error=str(exc))
     try:
         flow = cv2.calcOpticalFlowFarneback(
             prev_gray, curr_gray,
-            None,           # flow output
-            0.5,            # pyr_scale
-            3,              # levels
-            15,             # winsize
-            3,              # iterations
-            5,              # poly_n
-            1.2,            # poly_sigma
-            0,              # flags
+            None,
+            0.5,
+            3,
+            15,
+            3,
+            5,
+            1.2,
+            0,
         )
         magnitude = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
         return float(magnitude.mean())
@@ -156,7 +267,7 @@ def is_frame_too_dark(frame_bgr: np.ndarray, threshold: float = 0.1) -> bool:
     """
     if frame_bgr is None:
         return True
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    gray = analysis_gray(frame_bgr)
     avg = gray.mean() / 255.0
     return avg < threshold
 
@@ -165,5 +276,5 @@ def average_brightness(frame_bgr: np.ndarray) -> float:
     """Return average brightness 0-1."""
     if frame_bgr is None:
         return 0.0
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    gray = analysis_gray(frame_bgr)
     return float(gray.mean()) / 255.0

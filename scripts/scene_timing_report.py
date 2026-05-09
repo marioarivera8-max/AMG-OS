@@ -123,6 +123,9 @@ def _json_summary(logs: list[tuple[float, Path, dict[str, Any]]], run_rows: dict
                     "decode_wall_sec": float(stream.get("decode_wall_sec") or 0.0),
                     "cv_wall_sec": float(stream.get("cv_wall_sec") or 0.0),
                     "ai_wall_sec": float(stream.get("ai_wall_sec") or 0.0),
+                    "video_backend": stream.get("video_backend"),
+                    "gpu_cv_mode": stream.get("gpu_cv_mode"),
+                    "gpu_cv_backend": stream.get("gpu_cv_backend"),
                     "submitted": stream.get("submitted"),
                     "completed": stream.get("completed"),
                     "parse_failed": stream.get("parse_failed"),
@@ -192,6 +195,8 @@ def main() -> int:
             print(
                 "  stream split: "
                 f"decode={_fmt(split['decode'])} cv={_fmt(split['cv'])} ai={_fmt(split['ai'])} "
+                f"backend={stream.get('video_backend')} "
+                f"gpu_cv={stream.get('gpu_cv_mode')}/{stream.get('gpu_cv_backend')} "
                 f"submitted={stream.get('submitted')} completed={stream.get('completed')} "
                 f"parse_failed={stream.get('parse_failed')} score_zero={stream.get('score_zero')} "
                 f"segments={stream.get('segment_count', 1)} low_res={stream.get('low_res_analysis')}"

@@ -43,7 +43,6 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-import cv2
 import numpy as np
 
 from amg.config import (
@@ -70,7 +69,13 @@ from amg.scoring.ai_client import AIClient, AIResponse
 from amg.scoring.parser import ScoredFrame, cap_score_for_excellence, parse_ai_response
 from amg.video.dedup import are_near_duplicates, compute_perceptual_hash
 from amg.video.frame_cache import FrameCache
-from amg.video.frames import is_frame_too_dark, measure_motion, measure_sharpness
+from amg.video.frames import (
+    analysis_gray,
+    is_frame_too_dark,
+    measure_motion,
+    measure_sharpness,
+    runtime_info as cv_runtime_info,
+)
 from amg.video.reader import VideoReader
 from amg.utils.logging import get_logger
 
@@ -199,6 +204,10 @@ def run_stream_scan(
         "analysis_frame_size": list(analysis_size) if low_res else None,
         "full_res_cached": not bool(low_res),
         "segment_stats": [],
+        "video_backend": None,
+        "gpu_cv_mode": cv_runtime_info().get("mode"),
+        "gpu_cv_backend": cv_runtime_info().get("backend"),
+        "gpu_cv_reason": cv_runtime_info().get("reason"),
         # Decode vs CV wall split — exposes whether the CPU video decoder
         # is the actual bottleneck (it almost always is on long-form
         # 1080p HEVC). Sum of time spent waiting for the PyAV iterator
@@ -242,6 +251,7 @@ def run_stream_scan(
             "segment_idx": segment_idx,
             "start_sec": float(start_sec),
             "end_sec": float(end_sec),
+            "video_backend": None,
             "frames_seen": 0,
             "frames_dark": 0,
             "frames_below_floor": 0,
@@ -258,6 +268,7 @@ def run_stream_scan(
             prev_gray: Optional[np.ndarray] = None
 
             with VideoReader(video_path) as vr:
+                local_stats["video_backend"] = getattr(vr, "backend_name", "unknown")
                 # Decode wall = time spent waiting for the PyAV iterator
                 # to yield the next frame. CV wall = time spent on the
                 # synchronous CV ops between yields. The two together
@@ -309,8 +320,7 @@ def run_stream_scan(
                             local_stats["frames_below_floor"] += 1
                             continue
 
-                        small = cv2.resize(frame, ANALYSIS_FRAME_SIZE)
-                        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                        gray = analysis_gray(frame)
                         motion = measure_motion(prev_gray, gray) if prev_gray is not None else 0.0
                         prev_gray = gray
 
@@ -396,6 +406,9 @@ def run_stream_scan(
                     "cv_wall_sec",
                 ):
                     sieve_stats[key] += local_stats[key]
+                if local_stats.get("video_backend"):
+                    if sieve_stats.get("video_backend") is None:
+                        sieve_stats["video_backend"] = local_stats.get("video_backend")
                 sieve_stats["segment_stats"].append(local_stats)
             with sieve_done_lock:
                 sieve_done_count += 1

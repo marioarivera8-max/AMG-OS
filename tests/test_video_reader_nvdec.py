@@ -167,3 +167,115 @@ def test_ffmpeg_cuda_scaled_iter_pipes_smaller_frames(monkeypatch, tmp_path):
     assert frame.shape == (378, 672, 3)
     vf_idx = captured_cmd["cmd"].index("-vf") + 1
     assert "scale=672:378" in captured_cmd["cmd"][vf_idx]
+
+
+def test_ffmpeg_cuda_get_frames_at_uses_pipe(monkeypatch, tmp_path):
+    """Random-access frame extraction should use ffmpeg-cuda too.
+
+    This covers calibration/fallback/output, not just the sequential scan path.
+    """
+    import amg.video.reader as reader
+
+    ffmpeg_bin = tmp_path / "ffmpeg-cuda"
+    ffmpeg_bin.write_text("stub")
+
+    class _DummyPyAVBackend:
+        def __init__(self, _video_path):
+            self._size = (2, 2)
+            self.duration_sec = 10.0
+            self.fallback_calls = 0
+
+        def open(self):
+            return None
+
+        def close(self):
+            return None
+
+        @property
+        def frame_size(self):
+            return self._size
+
+        def get_frame_at(self, _timestamp_sec):
+            self.fallback_calls += 1
+            return np.zeros((2, 2, 3), dtype=np.uint8)
+
+        def get_frames_at(self, timestamps_sec):
+            self.fallback_calls += len(timestamps_sec)
+            return [np.zeros((2, 2, 3), dtype=np.uint8) for _ in timestamps_sec]
+
+    captured_cmds = []
+    frame_bytes = bytes(range(12))  # 2*2*3
+
+    class _FakeProc:
+        returncode = 0
+
+        def __init__(self, cmd, **_kwargs):
+            captured_cmds.append(cmd)
+
+        def communicate(self, timeout=None):
+            return frame_bytes, b""
+
+    monkeypatch.setattr(reader, "_PyAVBackend", _DummyPyAVBackend)
+    monkeypatch.setattr(reader, "_HWACCEL_MODE", "cuda")
+    monkeypatch.setattr(reader, "_FFMPEG_CUDA_PATH", ffmpeg_bin)
+    monkeypatch.setattr(reader.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(reader.subprocess, "Popen", _FakeProc)
+
+    backend = reader._FFmpegCudaBackend(Path("dummy.mp4"))
+    rows = backend.get_frames_at([1.0, 2.5])
+
+    assert len(rows) == 2
+    assert all(frame is not None and frame.shape == (2, 2, 3) for frame in rows)
+    assert len(captured_cmds) == 2
+    assert all("-hwaccel" in cmd and "cuda" in cmd for cmd in captured_cmds)
+    assert all("-frames:v" in cmd and "1" in cmd for cmd in captured_cmds)
+    assert backend._delegate.fallback_calls == 0
+
+
+def test_ffmpeg_cuda_get_frames_at_falls_back_per_failed_frame(monkeypatch, tmp_path):
+    import amg.video.reader as reader
+
+    ffmpeg_bin = tmp_path / "ffmpeg-cuda"
+    ffmpeg_bin.write_text("stub")
+
+    class _DummyPyAVBackend:
+        def __init__(self, _video_path):
+            self._size = (2, 2)
+            self.duration_sec = 10.0
+            self.fallback_calls = 0
+
+        def open(self):
+            return None
+
+        def close(self):
+            return None
+
+        @property
+        def frame_size(self):
+            return self._size
+
+        def get_frame_at(self, _timestamp_sec):
+            self.fallback_calls += 1
+            return np.full((2, 2, 3), 9, dtype=np.uint8)
+
+    class _FakeProc:
+        returncode = 1
+
+        def __init__(self, _cmd, **_kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            return b"", b"decode failed"
+
+    monkeypatch.setattr(reader, "_PyAVBackend", _DummyPyAVBackend)
+    monkeypatch.setattr(reader, "_HWACCEL_MODE", "cuda")
+    monkeypatch.setattr(reader, "_FFMPEG_CUDA_PATH", ffmpeg_bin)
+    monkeypatch.setattr(reader.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(reader.subprocess, "Popen", _FakeProc)
+
+    backend = reader._FFmpegCudaBackend(Path("dummy.mp4"))
+    rows = backend.get_frames_at([1.0])
+
+    assert rows[0] is not None
+    assert int(rows[0][0, 0, 0]) == 9
+    assert backend._delegate.fallback_calls == 1

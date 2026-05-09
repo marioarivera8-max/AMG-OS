@@ -576,6 +576,10 @@ def create_app(*, auth_token: Optional[str] = None, tracker: Optional[_JobTracke
             "ollama_num_parallel": os.environ.get("OLLAMA_NUM_PARALLEL"),
             "ai_parallel_workers": os.environ.get("AMG_AI_PARALLEL_WORKERS"),
             "video_backend": os.environ.get("AMG_VIDEO_BACKEND"),
+            "video_hwaccel": os.environ.get("AMG_VIDEO_HWACCEL"),
+            "gpu_cv_enabled": os.environ.get("AMG_GPU_CV_ENABLED"),
+            "gpu_cv_backend": os.environ.get("AMG_GPU_CV_BACKEND"),
+            "gpu_dedup_enabled": os.environ.get("AMG_GPU_DEDUP_ENABLED"),
             "processing_profile": os.environ.get("AMG_PROCESSING_PROFILE"),
             "pod_max_active_pipelines": _pod_pipeline_limit(),
         }
