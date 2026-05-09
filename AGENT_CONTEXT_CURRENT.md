@@ -24,11 +24,11 @@ AMG OS supports two active paths:
 
 ## Live Runtime Baseline (authoritative)
 
-From `/etc/amg/controller.env`, service state, and live canary validation on
+From `/etc/amg/controller.env`, service state, and live deploy validation on
 2026-05-09:
 
 - `AMG_JOB_BACKEND=runpod`
-- `AMG_RUNPOD_IMAGE=ghcr.io/marioarivera8-max/amg-pod:main-8b5749d`
+- `AMG_RUNPOD_IMAGE=ghcr.io/marioarivera8-max/amg-pod:main-abfbb12`
 - `AMG_PROCESSING_PROFILE=fast`
 - `AMG_STREAMING_SCAN=1`
 - `AMG_RUNPOD_VIDEO_BACKEND=ffmpeg_cuda`
@@ -46,7 +46,22 @@ From `/etc/amg/controller.env`, service state, and live canary validation on
 Controller service:
 
 - `amg-controller` active/running
-- controller image pinned at `ghcr.io/marioarivera8-max/amg-controller:main-8b5749d`
+- controller image pinned at `ghcr.io/marioarivera8-max/amg-controller:main-abfbb12`
+
+## Latest Deployed Change
+
+Commit `abfbb12` adds taxonomy-aware cover selection:
+
+- Main VLM scoring prompt emits `POSITION`, `POSITION_CONFIDENCE`, `GENRES`,
+  and `SUBGENRES` for every scored candidate.
+- Position labels now include the operator taxonomy from
+  `adult_content_ai_taxonomy.md` (foundational, oral variants, and group
+  positions).
+- Genre/subgenre tags are parsed and persisted into saved cover metadata.
+- Quota fill now detects temporal position segments and can keep up to 3 covers
+  per detected position run, including repeated returns to the same position.
+- The old bounded second-pass position classifier is disabled by default; the
+  taxonomy comes from the main scoring call to avoid extra Ollama round trips.
 
 ## AMG_OS v1 Performance Baseline
 
