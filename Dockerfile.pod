@@ -85,6 +85,33 @@ RUN curl -fsSL "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE
     && rm -rf /tmp/rclone* \
     && rclone version | head -1
 
+# CUDA-enabled FFmpeg (BtbN static GPL build). The Debian-packaged ffmpeg
+# above is software-only — neither it nor the bundled PyAV wheel has
+# nvdec/nvcuvid support, so the H100's hardware video decoder sits idle
+# while CPU HEVC decode dominates wall time (Y_B_003 audit 2026-05-09:
+# ~95% of stream_scan was decode wall, ~5% AI). This binary lets the
+# new FFmpeg-CUDA reader backend pipe NVDEC-decoded frames into the
+# Python pipeline. Installed alongside the apt ffmpeg (kept for ffprobe
+# compatibility) under a distinct name so nothing else has to change.
+#
+# BtbN ships nightly + tagged builds; pinning a tag keeps the build
+# reproducible. Bumping: pull the new SHA256 from the GitHub release
+# page (https://github.com/BtbN/FFmpeg-Builds/releases) — each release
+# includes a sha256sums.txt next to the tarballs.
+ARG FFMPEG_CUDA_VERSION=latest
+ARG FFMPEG_CUDA_TARBALL=ffmpeg-n7.1-latest-linux64-gpl-7.1.tar.xz
+ARG FFMPEG_CUDA_SHA256=b762f75fa5143dc281ca1aa92f268974999addbc4893941874a9bc7381602e2c
+RUN curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_CUDA_VERSION}/${FFMPEG_CUDA_TARBALL}" \
+        -o /tmp/ffmpeg-cuda.tar.xz \
+    && echo "${FFMPEG_CUDA_SHA256}  /tmp/ffmpeg-cuda.tar.xz" | sha256sum -c - \
+    && tar -xJf /tmp/ffmpeg-cuda.tar.xz -C /tmp/ \
+    && mv /tmp/ffmpeg-n7.1-latest-linux64-gpl-7.1/bin/ffmpeg /usr/local/bin/ffmpeg-cuda \
+    && chmod +x /usr/local/bin/ffmpeg-cuda \
+    && rm -rf /tmp/ffmpeg-cuda.tar.xz /tmp/ffmpeg-n7.1-latest-linux64-gpl-7.1 \
+    && /usr/local/bin/ffmpeg-cuda -version | head -1 \
+    && /usr/local/bin/ffmpeg-cuda -hide_banner -hwaccels 2>&1 | grep -q cuda \
+    && echo "[ffmpeg-cuda] cuda hwaccel registered"
+
 # Ollama static binary (linux/amd64) with bundled CUDA libs. Pinned by
 # version + sha256 from the release's official sha256sum.txt. We download
 # the tarball directly instead of running install.sh because the script
@@ -136,7 +163,8 @@ ENV AMG_DATA_DIR=/data \
     OLLAMA_KEEP_ALIVE=24h \
     OLLAMA_NUM_PARALLEL=6 \
     AMG_AI_PARALLEL_WORKERS=6 \
-    AMG_VIDEO_BACKEND=pyav \
+    AMG_VIDEO_BACKEND=auto \
+    AMG_VIDEO_HWACCEL=cuda \
     OLLAMA_FLASH_ATTENTION=1 \
     OLLAMA_KV_CACHE_TYPE=q8_0 \
     OLLAMA_CONTEXT_LENGTH=2560 \

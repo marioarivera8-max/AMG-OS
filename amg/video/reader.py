@@ -2,9 +2,10 @@
 Video reader — v11.1.3.
 
 Backend selection (in priority order):
-  1. PyAV with videotoolbox option set  (Apple Silicon — see HWACCEL CAVEAT)
-  2. PyAV with plain software decode    (cross-platform, fast)
-  3. OpenCV                             (fallback, always available)
+  1. ffmpeg-cuda + PyAV hybrid          (Linux pod, when AMG_VIDEO_HWACCEL=cuda)
+  2. PyAV with videotoolbox option set  (Apple Silicon — see HWACCEL CAVEAT)
+  3. PyAV with plain software decode    (cross-platform, fast)
+  4. OpenCV                             (fallback, always available)
 
 PyAV is a Python wrapper around ffmpeg's libav* libraries. For the hot
 path — sequential iteration during Tier 1/2/3 scans on long 4K HEVC
@@ -34,12 +35,14 @@ asked for.
 
 Public API is unchanged from v11.1 — drop-in replacement.
 
-Backend can be forced via env var AMG_VIDEO_BACKEND={pyav,opencv,auto}.
+Backend can be forced via env var
+AMG_VIDEO_BACKEND={ffmpeg_cuda,pyav,opencv,auto}.
 """
 from __future__ import annotations
 
 import os
 import platform
+import subprocess
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
@@ -64,6 +67,10 @@ except ImportError:  # pragma: no cover
 # Backend selection knob. Default 'auto' tries PyAV first.
 # Override with AMG_VIDEO_BACKEND env var: 'pyav', 'opencv', or 'auto'.
 _BACKEND_OVERRIDE = os.environ.get("AMG_VIDEO_BACKEND", "auto").lower()
+_HWACCEL_MODE = os.environ.get("AMG_VIDEO_HWACCEL", "auto").lower()
+_FFMPEG_CUDA_PATH = Path(
+    os.environ.get("AMG_FFMPEG_CUDA_BIN", "/usr/local/bin/ffmpeg-cuda")
+)
 
 
 def _is_apple_silicon() -> bool:
@@ -96,6 +103,8 @@ class _PyAVBackend:
         self._fps: Optional[float] = None
         self._frame_count: Optional[int] = None
         self._duration: Optional[float] = None
+        self._width: Optional[int] = None
+        self._height: Optional[int] = None
         self._hwaccel_used = False
         self._codec_name: Optional[str] = None
 
@@ -200,6 +209,8 @@ class _PyAVBackend:
             self._frame_count = int(self._fps * self._duration)
         else:
             self._frame_count = 0
+        self._width = int(video_stream.width or 0)
+        self._height = int(video_stream.height or 0)
 
         self._stream_container = container
         self._stream_video = video_stream
@@ -234,6 +245,12 @@ class _PyAVBackend:
     @property
     def hwaccel_used(self) -> bool:
         return self._hwaccel_used
+
+    @property
+    def frame_size(self) -> Tuple[int, int]:
+        if self._width is None or self._height is None:
+            self.open()
+        return int(self._width or 0), int(self._height or 0)
 
     def get_frame_at(self, timestamp_sec: float) -> Optional[np.ndarray]:
         """
@@ -380,6 +397,8 @@ class _OpenCVBackend:
         self._fps: Optional[float] = None
         self._frame_count: Optional[int] = None
         self._duration: Optional[float] = None
+        self._width: Optional[int] = None
+        self._height: Optional[int] = None
         self._hwaccel_used = False
         self._codec_name = "unknown"
 
@@ -392,6 +411,8 @@ class _OpenCVBackend:
         self._cap = cap
         self._fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
         self._frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        self._width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        self._height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         if self._fps > 0:
             self._duration = self._frame_count / self._fps
         else:
@@ -429,6 +450,12 @@ class _OpenCVBackend:
     def hwaccel_used(self) -> bool:
         return False
 
+    @property
+    def frame_size(self) -> Tuple[int, int]:
+        if self._width is None or self._height is None:
+            self.open()
+        return int(self._width or 0), int(self._height or 0)
+
     def get_frame_at(self, timestamp_sec: float) -> Optional[np.ndarray]:
         if timestamp_sec < 0 or timestamp_sec > self.duration_sec:
             return None
@@ -460,6 +487,167 @@ class _OpenCVBackend:
             timestamp += interval_sec
 
 
+class _FFmpegCudaBackend:
+    """
+    Hybrid backend:
+      - metadata + random access via PyAV (existing stable path)
+      - sequential iteration via ffmpeg-cuda subprocess (NVDEC hot path)
+
+    This keeps API compatibility while moving the dominant decode loop
+    off CPU when AMG_VIDEO_HWACCEL=cuda on pod images that ship
+    /usr/local/bin/ffmpeg-cuda.
+    """
+
+    def __init__(self, video_path: Path):
+        self.video_path = Path(video_path)
+        self._delegate = _PyAVBackend(video_path)
+        self._ffmpeg_path = _FFMPEG_CUDA_PATH
+
+    def open(self) -> None:
+        self._delegate.open()
+
+    def close(self) -> None:
+        self._delegate.close()
+
+    @property
+    def fps(self) -> float:
+        return self._delegate.fps
+
+    @property
+    def frame_count(self) -> int:
+        return self._delegate.frame_count
+
+    @property
+    def duration_sec(self) -> float:
+        return self._delegate.duration_sec
+
+    @property
+    def hwaccel_used(self) -> bool:
+        return True
+
+    @property
+    def frame_size(self) -> Tuple[int, int]:
+        return self._delegate.frame_size
+
+    def get_frame_at(self, timestamp_sec: float) -> Optional[np.ndarray]:
+        return self._delegate.get_frame_at(timestamp_sec)
+
+    def get_frames_at(self, timestamps_sec: List[float]) -> List[Optional[np.ndarray]]:
+        return self._delegate.get_frames_at(timestamps_sec)
+
+    def _should_use_cuda_pipe(self) -> bool:
+        if _HWACCEL_MODE not in {"cuda", "nvdec"}:
+            return False
+        if platform.system() != "Linux":
+            return False
+        if not self._ffmpeg_path.exists():
+            log.warn(
+                "AMG_VIDEO_HWACCEL requests CUDA but ffmpeg-cuda missing; "
+                "falling back to PyAV software sequential decode",
+                ffmpeg_cuda_bin=str(self._ffmpeg_path),
+            )
+            return False
+        return True
+
+    def iter_frames_sequential(
+        self,
+        start_sec: float,
+        end_sec: float,
+        interval_sec: float,
+    ) -> Iterator[Tuple[float, np.ndarray]]:
+        if interval_sec <= 0:
+            raise ValueError("interval_sec must be > 0")
+        if not self._should_use_cuda_pipe():
+            yield from self._delegate.iter_frames_sequential(start_sec, end_sec, interval_sec)
+            return
+
+        self._delegate.open()
+        width, height = self._delegate.frame_size
+        if width <= 0 or height <= 0:
+            log.warn(
+                "ffmpeg-cuda path missing frame dimensions; falling back to PyAV",
+                width=width,
+                height=height,
+            )
+            yield from self._delegate.iter_frames_sequential(start_sec, end_sec, interval_sec)
+            return
+
+        span = max(0.0, float(end_sec) - float(start_sec))
+        if span <= 0:
+            return
+
+        frame_bytes = width * height * 3
+        vf = f"fps=1/{float(interval_sec):.6f}"
+        cmd = [
+            str(self._ffmpeg_path),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-hwaccel",
+            "cuda",
+            "-hwaccel_output_format",
+            "cuda",
+            "-ss",
+            f"{float(start_sec):.6f}",
+            "-t",
+            f"{span:.6f}",
+            "-i",
+            str(self.video_path),
+            "-vf",
+            vf,
+            "-an",
+            "-sn",
+            "-dn",
+            "-pix_fmt",
+            "bgr24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]
+
+        proc = None
+        emitted = 0
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=frame_bytes * 2,
+            )
+            if proc.stdout is None:
+                raise IOError("ffmpeg-cuda started without stdout pipe")
+            ts = float(start_sec)
+            while ts <= end_sec:
+                buf = proc.stdout.read(frame_bytes)
+                if not buf or len(buf) < frame_bytes:
+                    break
+                frame = np.frombuffer(buf, dtype=np.uint8).reshape((height, width, 3)).copy()
+                yield (ts, frame)
+                emitted += 1
+                ts += float(interval_sec)
+            rc = proc.wait(timeout=10.0)
+            if rc != 0 and emitted == 0:
+                err = b""
+                if proc.stderr is not None:
+                    err = proc.stderr.read()
+                raise IOError(
+                    f"ffmpeg-cuda failed with exit={rc}: {err.decode('utf-8', 'ignore')[:200]}"
+                )
+        except Exception as e:
+            log.warn(
+                "ffmpeg-cuda sequential decode failed; falling back to PyAV",
+                error=str(e),
+            )
+            yield from self._delegate.iter_frames_sequential(start_sec, end_sec, interval_sec)
+        finally:
+            if proc is not None:
+                try:
+                    if proc.poll() is None:
+                        proc.kill()
+                except Exception:
+                    pass
+
+
 # --- Public class -----------------------------------------------------------
 
 
@@ -484,12 +672,23 @@ class VideoReader:
         # Honor the env override if set
         if _BACKEND_OVERRIDE == "opencv":
             return _OpenCVBackend(self.video_path)
+        if _BACKEND_OVERRIDE == "ffmpeg_cuda":
+            if not PYAV_AVAILABLE:
+                log.warn("AMG_VIDEO_BACKEND=ffmpeg_cuda but PyAV not installed; using OpenCV")
+                return _OpenCVBackend(self.video_path)
+            return _FFmpegCudaBackend(self.video_path)
         if _BACKEND_OVERRIDE == "pyav":
             if not PYAV_AVAILABLE:
                 log.warn("AMG_VIDEO_BACKEND=pyav but PyAV not installed; using OpenCV")
                 return _OpenCVBackend(self.video_path)
             return _PyAVBackend(self.video_path)
         # Auto: prefer PyAV
+        if (
+            _BACKEND_OVERRIDE == "auto"
+            and PYAV_AVAILABLE
+            and _HWACCEL_MODE in {"cuda", "nvdec"}
+        ):
+            return _FFmpegCudaBackend(self.video_path)
         if PYAV_AVAILABLE:
             return _PyAVBackend(self.video_path)
         return _OpenCVBackend(self.video_path)
@@ -505,8 +704,8 @@ class VideoReader:
         try:
             self._backend.open()
         except Exception as e:
-            # If PyAV fails to open the file at all, fall back to OpenCV
-            if isinstance(self._backend, _PyAVBackend):
+            # If PyAV/ffmpeg-cuda fails to open the file at all, fall back to OpenCV
+            if isinstance(self._backend, (_PyAVBackend, _FFmpegCudaBackend)):
                 log.warn("PyAV failed to open file; falling back to OpenCV", error=str(e))
                 self._backend = _OpenCVBackend(self.video_path)
                 self._backend.open()
@@ -531,6 +730,8 @@ class VideoReader:
 
     @property
     def backend_name(self) -> str:
+        if isinstance(self._backend, _FFmpegCudaBackend):
+            return "ffmpeg-cuda+pyav"
         if isinstance(self._backend, _PyAVBackend):
             # See _PyAVBackend.open() for why we don't claim "videotoolbox" here:
             # PyAV 13.1 accepts the option without engaging HW decode, and
