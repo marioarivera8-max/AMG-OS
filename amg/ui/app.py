@@ -1050,27 +1050,61 @@ def _get_backend_instance():
         return _backend_instance
 
 
+def _dispatcher_max_active_jobs() -> int:
+    """Controller-side queue concurrency.
+
+    Defaults to 1 for current production behavior. On a warm H100, setting
+    AMG_RUNPOD_CONTROLLER_MAX_ACTIVE_JOBS=2 or 3 lets the pod prefetch the
+    next cloud scene while another scene is running, and can run multiple
+    pipelines when the pod-side AMG_POD_MAX_ACTIVE_PIPELINES allows it.
+    """
+    raw = os.environ.get(
+        "AMG_RUNPOD_CONTROLLER_MAX_ACTIVE_JOBS",
+        os.environ.get("AMG_CONTROLLER_MAX_ACTIVE_JOBS", "1"),
+    )
+    try:
+        return max(1, min(8, int(raw)))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _dispatcher_loop() -> None:
     """
-    FIFO dispatcher: run one queued job at a time in submission order.
+    FIFO dispatcher. By default it runs one queued job at a time; H100
+    deployments can opt into several active jobs to overlap rclone download
+    and pipeline work on the same warm pod.
     """
     global _dispatcher_thread
     while True:
-        next_job_id = None
+        launch_job_ids: List[str] = []
         with _jobs_lock:
             # Prune stale ids from fifo.
             _job_fifo[:] = [jid for jid in _job_fifo if jid in _jobs]
-            running_exists = any(j.get("status") == "running" for j in _jobs.values())
-            if not running_exists:
+            running_count = sum(1 for j in _jobs.values() if j.get("status") == "running")
+            capacity = max(0, _dispatcher_max_active_jobs() - running_count)
+            if capacity > 0:
                 for jid in _job_fifo:
                     j = _jobs.get(jid)
                     if j and j.get("status") == "queued":
-                        next_job_id = jid
-                        break
+                        launch_job_ids.append(jid)
+                        j["status"] = "running"
+                        j["started_at_ts"] = time.time()
+                        j["started_at"] = datetime.now().isoformat()
+                        j["message"] = f"Running · priority #{j.get('queue_seq')}"
+                        j["current_phase"] = "ingest"
+                        if len(launch_job_ids) >= capacity:
+                            break
             pending_exists = any(j.get("status") in {"queued", "running"} for j in _jobs.values())
 
-        if next_job_id:
-            _run_job(next_job_id)
+        if launch_job_ids:
+            for jid in launch_job_ids:
+                threading.Thread(
+                    target=_run_job,
+                    args=(jid,),
+                    kwargs={"already_claimed": True},
+                    daemon=True,
+                    name=f"amg-ui-job-{jid}",
+                ).start()
             continue
         if not pending_exists:
             break
@@ -1199,14 +1233,15 @@ def _expand_cloud_selection_to_videos(
     return expanded
 
 
-def _run_job(job_id: str) -> None:
+def _run_job(job_id: str, *, already_claimed: bool = False) -> None:
     with _jobs_lock:
         job = _jobs.get(job_id)
         if not job:
             return
-        job["status"] = "running"
-        job["started_at_ts"] = time.time()
-        job["started_at"] = datetime.now().isoformat()
+        if not already_claimed:
+            job["status"] = "running"
+            job["started_at_ts"] = time.time()
+            job["started_at"] = datetime.now().isoformat()
         job["message"] = f"Running · priority #{job.get('queue_seq')}"
         job["current_phase"] = "ingest"
         video_path = Path(job["video_path"])
@@ -1498,6 +1533,20 @@ def _record_run_timing(job: dict, result: Optional[dict]) -> None:
             "error_codes": (result or {}).get("error_codes", []),
             "decision_log_path": decision_log_path,
         }
+        pod_timing = (result or {}).get("_pod_job_timing") if isinstance(result, dict) else None
+        if isinstance(pod_timing, dict):
+            row["pod_job_timing"] = pod_timing
+            try:
+                dl0 = pod_timing.get("download_started_at_ts")
+                dl1 = pod_timing.get("download_finished_at_ts")
+                pw0 = pod_timing.get("pipeline_wait_started_at_ts")
+                ps0 = pod_timing.get("pipeline_started_at_ts")
+                ps1 = pod_timing.get("pipeline_finished_at_ts")
+                row["pod_download_sec"] = round(float(dl1) - float(dl0), 2) if dl0 and dl1 else None
+                row["pod_pipeline_wait_sec"] = round(float(ps0) - float(pw0), 2) if pw0 and ps0 else None
+                row["pod_pipeline_sec"] = round(float(ps1) - float(ps0), 2) if ps0 and ps1 else None
+            except (TypeError, ValueError):
+                pass
         with open(RUN_TIMINGS_PATH, "a") as f:
             f.write(json.dumps(row) + "\n")
     except Exception:

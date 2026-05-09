@@ -86,9 +86,35 @@ _AUTH_EXEMPT_PATHS = {"/healthz"}
 # small enough that 50 jobs in memory ~= 50 * 200 lines * ~200 bytes = 2 MB.
 LOG_TAIL_LINES = 200
 
+_PIPELINE_SEMAPHORE_LOCK = threading.Lock()
+_PIPELINE_SEMAPHORE: Optional[threading.BoundedSemaphore] = None
+_PIPELINE_SEMAPHORE_LIMIT: Optional[int] = None
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _epoch_sec() -> float:
+    return round(time.time(), 3)
+
+
+def _pod_pipeline_limit() -> int:
+    raw = os.environ.get("AMG_POD_MAX_ACTIVE_PIPELINES", "1")
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _get_pipeline_semaphore() -> threading.BoundedSemaphore:
+    global _PIPELINE_SEMAPHORE, _PIPELINE_SEMAPHORE_LIMIT
+    limit = _pod_pipeline_limit()
+    with _PIPELINE_SEMAPHORE_LOCK:
+        if _PIPELINE_SEMAPHORE is None or _PIPELINE_SEMAPHORE_LIMIT != limit:
+            _PIPELINE_SEMAPHORE = threading.BoundedSemaphore(limit)
+            _PIPELINE_SEMAPHORE_LIMIT = limit
+        return _PIPELINE_SEMAPHORE
 
 
 # ---------- auth ----------
@@ -167,8 +193,16 @@ class _JobTracker:
                 "video_path": str(video_path),
                 "work_dir": str(work_dir),
                 "created_at": _utcnow_iso(),
+                "created_at_ts": _epoch_sec(),
                 "started_at": None,
+                "started_at_ts": None,
+                "download_started_at_ts": None,
+                "download_finished_at_ts": None,
+                "pipeline_wait_started_at_ts": None,
+                "pipeline_started_at_ts": None,
+                "pipeline_finished_at_ts": None,
                 "finished_at": None,
+                "finished_at_ts": None,
                 "log_tail": deque(maxlen=LOG_TAIL_LINES),
                 "result": None,
                 "error": None,
@@ -222,11 +256,25 @@ def _run_pipeline_in_thread(tracker: _JobTracker, job_id: str, video_path: Path)
     transitions and the final result back into the tracker."""
     tracker.update(
         job_id,
-        status="running",
-        started_at=_utcnow_iso(),
+        status="waiting_pipeline",
+        pipeline_wait_started_at_ts=_epoch_sec(),
     )
-    tracker.append_log(job_id, f"[pod-worker] starting process_scene for {video_path}")
+    tracker.append_log(
+        job_id,
+        f"[pod-worker] waiting for pipeline slot "
+        f"(max_active={_pod_pipeline_limit()})",
+    )
+    sem = _get_pipeline_semaphore()
+    sem.acquire()
     try:
+        tracker.update(
+            job_id,
+            status="running",
+            started_at=_utcnow_iso(),
+            started_at_ts=_epoch_sec(),
+            pipeline_started_at_ts=_epoch_sec(),
+        )
+        tracker.append_log(job_id, f"[pod-worker] starting process_scene for {video_path}")
         from amg.pipeline import process_scene  # imported here to keep startup cheap
 
         def _on_progress(pct: int) -> None:
@@ -245,6 +293,8 @@ def _run_pipeline_in_thread(tracker: _JobTracker, job_id: str, video_path: Path)
         update_kwargs: Dict[str, Any] = dict(
             status="done" if result.get("success") else "error",
             finished_at=_utcnow_iso(),
+            finished_at_ts=_epoch_sec(),
+            pipeline_finished_at_ts=_epoch_sec(),
             result=result,
             progress_pct=100,
         )
@@ -264,11 +314,18 @@ def _run_pipeline_in_thread(tracker: _JobTracker, job_id: str, video_path: Path)
             job_id,
             status="error",
             finished_at=_utcnow_iso(),
+            finished_at_ts=_epoch_sec(),
+            pipeline_finished_at_ts=_epoch_sec(),
             error=str(exc),
             progress_pct=0,
         )
         tracker.append_log(job_id, f"[pod-worker] pipeline raised: {exc}")
         log.error(f"Job {job_id} failed: {exc}")
+    finally:
+        try:
+            sem.release()
+        except ValueError:
+            pass
 
 
 def _write_temp_rclone_config(config_text: str, parent: Path) -> Path:
@@ -339,7 +396,13 @@ def _run_cloud_job_in_thread(
     from amg.cloud.rclone import Rclone, RcloneError
 
     copy_source = (download_root or remote_path).strip()
-    tracker.update(job_id, status="downloading", started_at=_utcnow_iso())
+    tracker.update(
+        job_id,
+        status="downloading",
+        started_at=_utcnow_iso(),
+        started_at_ts=_epoch_sec(),
+        download_started_at_ts=_epoch_sec(),
+    )
     tracker.append_log(
         job_id,
         f"[pod-worker] downloading {remote}:{copy_source} -> {download_dir}",
@@ -367,6 +430,8 @@ def _run_cloud_job_in_thread(
             job_id,
             status="error",
             finished_at=_utcnow_iso(),
+            finished_at_ts=_epoch_sec(),
+            download_finished_at_ts=_epoch_sec(),
             error=f"rclone copy failed: {exc}",
         )
         tracker.append_log(job_id, f"[pod-worker] rclone copy failed: {exc}")
@@ -377,6 +442,8 @@ def _run_cloud_job_in_thread(
             job_id,
             status="error",
             finished_at=_utcnow_iso(),
+            finished_at_ts=_epoch_sec(),
+            download_finished_at_ts=_epoch_sec(),
             error=f"download setup failed: {exc}",
         )
         tracker.append_log(job_id, f"[pod-worker] download setup failed: {exc}")
@@ -393,7 +460,7 @@ def _run_cloud_job_in_thread(
             except OSError:
                 pass
 
-    tracker.update(job_id, download_pct=100)
+    tracker.update(job_id, download_pct=100, download_finished_at_ts=_epoch_sec())
     expected = Path(remote_path).name
     video_path = _locate_downloaded_video_with_relative(
         download_dir,
@@ -405,6 +472,7 @@ def _run_cloud_job_in_thread(
             job_id,
             status="error",
             finished_at=_utcnow_iso(),
+            finished_at_ts=_epoch_sec(),
             error="rclone reported success but no file landed in the download dir",
         )
         tracker.append_log(job_id, "[pod-worker] no downloaded file found after rclone copy")
@@ -509,6 +577,7 @@ def create_app(*, auth_token: Optional[str] = None, tracker: Optional[_JobTracke
             "ai_parallel_workers": os.environ.get("AMG_AI_PARALLEL_WORKERS"),
             "video_backend": os.environ.get("AMG_VIDEO_BACKEND"),
             "processing_profile": os.environ.get("AMG_PROCESSING_PROFILE"),
+            "pod_max_active_pipelines": _pod_pipeline_limit(),
         }
         if not payload["ok"]:
             raise HTTPException(status_code=503, detail=payload)

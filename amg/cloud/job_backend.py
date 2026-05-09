@@ -344,6 +344,7 @@ class RunpodBackend(JobBackend):
             in {"1", "true", "yes", "on"}
         )
         self._lifecycle_lock = threading.RLock()
+        self._provision_lock = threading.Lock()
         self._active_jobs = 0
         self._warm_pod_id: Optional[str] = None
         self._idle_timer: Optional[threading.Timer] = None
@@ -479,8 +480,16 @@ class RunpodBackend(JobBackend):
             success = True
             return result
         except Exception:
-            # On any failure, do not keep a warm pod around in unknown state.
-            self._terminate_pod_now(pod_id, on_log=on_log)
+            # With opt-in controller concurrency, several jobs may share one
+            # warm pod. Do not tear the pod out from under sibling jobs; the
+            # last failing job will still terminate it when no other active
+            # work remains.
+            with self._lifecycle_lock:
+                other_active = self._active_jobs > 1
+            if other_active:
+                on_log("[runpod] job failed while sibling jobs are active; deferring pod teardown")
+            else:
+                self._terminate_pod_now(pod_id, on_log=on_log)
             raise
         finally:
             self._release_pod(pod_id, success=success, on_log=on_log)
@@ -521,93 +530,114 @@ class RunpodBackend(JobBackend):
     def _acquire_pod(self, *, on_log: LogHook) -> str:
         with self._lifecycle_lock:
             self._cancel_idle_timer()
-            self._active_jobs += 1
             pod_id = self._warm_pod_id
         if pod_id:
+            with self._lifecycle_lock:
+                self._active_jobs += 1
             on_log(
                 "[runpod] reusing warm pod; env/image changes require pod recycle "
                 "before they take effect"
             )
             return pod_id
-        on_log(f"[runpod] provisioning GPU pod (gpu={self._spec.gpu_type})")
-        spec = self._spec
-        ollama_parallel = str(os.environ.get("AMG_RUNPOD_OLLAMA_NUM_PARALLEL", "6"))
-        worker_parallel = str(os.environ.get("AMG_RUNPOD_AI_PARALLEL_WORKERS", ollama_parallel))
-        # Default to auto so pod images can choose their fastest path
-        # (ffmpeg-cuda+pyav on H100 when AMG_VIDEO_HWACCEL=cuda). Forcing
-        # "pyav" here would silently disable the NVDEC backend shipped in
-        # Dockerfile.pod.
-        video_backend = str(os.environ.get("AMG_RUNPOD_VIDEO_BACKEND", "auto"))
-        # Cloud should default to balanced if controller env omitted the
-        # profile; local CLI keeps its own quality default in config.py.
-        processing_profile = str(os.environ.get("AMG_PROCESSING_PROFILE", "balanced"))
-        # Pass the shared secret into pod env so worker accepts controller requests.
-        spec_env = dict(spec.env or {})
-        spec_env["OLLAMA_NUM_PARALLEL"] = ollama_parallel
-        spec_env["AMG_AI_PARALLEL_WORKERS"] = worker_parallel
-        spec_env["AMG_VIDEO_BACKEND"] = video_backend
-        spec_env["AMG_VIDEO_HWACCEL"] = str(os.environ.get("AMG_VIDEO_HWACCEL", "cuda"))
-        spec_env["AMG_PROCESSING_PROFILE"] = processing_profile
-        # Streaming scan is the cloud happy path; force-on unless the
-        # operator explicitly overrides it in controller env.
-        spec_env["AMG_STREAMING_SCAN"] = str(os.environ.get("AMG_STREAMING_SCAN", "1"))
-        forwarded_env = [
-            "AMG_CALIBRATION_SAMPLE_COUNT",
-            "AMG_CALIBRATION_MAX_DURATION_SEC",
-            "AMG_TIER_SCAN_MODE",
-            "AMG_TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER",
-            "AMG_TIER_SCAN_MAX_AI_FRAMES_PER_TIER",
-            "AMG_TIER_SCAN_MAX_WALL_SEC_PER_TIER",
-            "AMG_SINGLE_PASS_SCAN_INTERVAL_SEC",
-            "AMG_SINGLE_PASS_MAX_AI_FRAMES",
-            "AMG_SINGLE_PASS_MIN_GAP_SEC",
-            "AMG_CLUSTER_HUNTER_TOP_N",
-            "AMG_FINISH_HUNTER_TOP_N",
-            "AMG_BUILDUP_HUNTER_TOP_N",
-            "AMG_POSITION_CLASSIFIER_MAX_CANDIDATES",
-            "AMG_ENABLE_FINISH_HUNTER",
-            "AMG_ENABLE_BUILDUP_HUNTER",
-            "AMG_ENABLE_CLUSTER_EXPANSION",
-            "AMG_ENABLE_POSITION_CLASSIFIER",
-            "AMG_ENABLE_SCENE_INSIGHT",
-            "AMG_ENABLE_PROVIDED_THUMBNAIL_SCORING",
-            "AMG_SOFT_THUMB_ENABLED",
-            "AMG_SOFT_THUMB_SAMPLE_COUNT",
-            "AMG_COVER_NEARBY_POLISH_ENABLED",
-            "AMG_PROVIDED_THUMB_MAX_SCAN",
-            "AMG_PROVIDED_THUMB_MAX_ACCEPT",
-            "AMG_VISION_MODEL_OVERRIDE",
-            "AMG_VIDEO_HWACCEL",
-            "AMG_STREAMING_SCAN",
-            "AMG_STREAMING_SCAN_INTERVAL_SEC",
-            "AMG_STREAMING_SCAN_MAX_QUEUED",
-            "AMG_STREAMING_SCAN_MAX_AI_CALLS",
-            "AMG_STREAMING_FRAME_CACHE_MAX_MB",
-            "AMG_STREAMING_FUSED_AI_WEIGHT",
-            "AMG_STREAMING_FUSED_SHARP_WEIGHT",
-            "AMG_STREAMING_ZONE_BONUS_FINISH",
-            "AMG_STREAMING_ZONE_BONUS_BUILDUP",
-            "AMG_STREAMING_POST_AI_SHARP_PERCENTILE",
-        ]
-        for env_name in forwarded_env:
-            if env_name in os.environ:
-                spec_env[env_name] = os.environ[env_name]
-        spec_env["AMG_POD_AUTH_TOKEN"] = self._auth_token
-        spec.env = spec_env
-        pod = self._client.provision_pod(
-            spec,
-            ready_timeout=self._provision_timeout_sec,
-            poll_interval=self._poll_interval_sec,
-        )
-        new_pod_id = pod["id"]
-        with self._lifecycle_lock:
-            # If another thread won the race, keep the existing warm pod and
-            # terminate the extra one to avoid accidental double billing.
-            if self._warm_pod_id and self._warm_pod_id != new_pod_id:
-                self._terminate_pod_now(new_pod_id, on_log=on_log)
-                return self._warm_pod_id
-            self._warm_pod_id = new_pod_id
-        return new_pod_id
+
+        with self._provision_lock:
+            with self._lifecycle_lock:
+                pod_id = self._warm_pod_id
+                if pod_id:
+                    self._active_jobs += 1
+                    on_log(
+                        "[runpod] reusing warm pod; env/image changes require pod recycle "
+                        "before they take effect"
+                    )
+                    return pod_id
+
+            on_log(f"[runpod] provisioning GPU pod (gpu={self._spec.gpu_type})")
+            spec = self._spec
+            ollama_parallel = str(os.environ.get("AMG_RUNPOD_OLLAMA_NUM_PARALLEL", "6"))
+            worker_parallel = str(os.environ.get("AMG_RUNPOD_AI_PARALLEL_WORKERS", ollama_parallel))
+            # Default to auto so pod images can choose their fastest path
+            # (ffmpeg-cuda+pyav on H100 when AMG_VIDEO_HWACCEL=cuda). Forcing
+            # "pyav" here would silently disable the NVDEC backend shipped in
+            # Dockerfile.pod.
+            video_backend = str(os.environ.get("AMG_RUNPOD_VIDEO_BACKEND", "auto"))
+            # Cloud should default to balanced if controller env omitted the
+            # profile; local CLI keeps its own quality default in config.py.
+            processing_profile = str(os.environ.get("AMG_PROCESSING_PROFILE", "balanced"))
+            # Pass the shared secret into pod env so worker accepts controller requests.
+            spec_env = dict(spec.env or {})
+            spec_env["OLLAMA_NUM_PARALLEL"] = ollama_parallel
+            spec_env["AMG_AI_PARALLEL_WORKERS"] = worker_parallel
+            spec_env["AMG_VIDEO_BACKEND"] = video_backend
+            spec_env["AMG_VIDEO_HWACCEL"] = str(os.environ.get("AMG_VIDEO_HWACCEL", "cuda"))
+            spec_env["AMG_PROCESSING_PROFILE"] = processing_profile
+            spec_env["AMG_POD_MAX_ACTIVE_PIPELINES"] = str(
+                os.environ.get(
+                    "AMG_RUNPOD_MAX_ACTIVE_PIPELINES",
+                    os.environ.get("AMG_POD_MAX_ACTIVE_PIPELINES", "1"),
+                )
+            )
+            # Streaming scan is the cloud happy path; force-on unless the
+            # operator explicitly overrides it in controller env.
+            spec_env["AMG_STREAMING_SCAN"] = str(os.environ.get("AMG_STREAMING_SCAN", "1"))
+            forwarded_env = [
+                "AMG_CALIBRATION_SAMPLE_COUNT",
+                "AMG_CALIBRATION_MAX_DURATION_SEC",
+                "AMG_TIER_SCAN_MODE",
+                "AMG_TIER_SCAN_MAX_EXTRACTED_FRAMES_PER_TIER",
+                "AMG_TIER_SCAN_MAX_AI_FRAMES_PER_TIER",
+                "AMG_TIER_SCAN_MAX_WALL_SEC_PER_TIER",
+                "AMG_SINGLE_PASS_SCAN_INTERVAL_SEC",
+                "AMG_SINGLE_PASS_MAX_AI_FRAMES",
+                "AMG_SINGLE_PASS_MIN_GAP_SEC",
+                "AMG_CLUSTER_HUNTER_TOP_N",
+                "AMG_FINISH_HUNTER_TOP_N",
+                "AMG_BUILDUP_HUNTER_TOP_N",
+                "AMG_POSITION_CLASSIFIER_MAX_CANDIDATES",
+                "AMG_ENABLE_FINISH_HUNTER",
+                "AMG_ENABLE_BUILDUP_HUNTER",
+                "AMG_ENABLE_CLUSTER_EXPANSION",
+                "AMG_ENABLE_POSITION_CLASSIFIER",
+                "AMG_ENABLE_SCENE_INSIGHT",
+                "AMG_ENABLE_PROVIDED_THUMBNAIL_SCORING",
+                "AMG_SOFT_THUMB_ENABLED",
+                "AMG_SOFT_THUMB_SAMPLE_COUNT",
+                "AMG_COVER_NEARBY_POLISH_ENABLED",
+                "AMG_PROVIDED_THUMB_MAX_SCAN",
+                "AMG_PROVIDED_THUMB_MAX_ACCEPT",
+                "AMG_VISION_MODEL_OVERRIDE",
+                "AMG_VIDEO_HWACCEL",
+                "AMG_STREAMING_SCAN",
+                "AMG_STREAMING_SCAN_INTERVAL_SEC",
+                "AMG_STREAMING_SCAN_MAX_QUEUED",
+                "AMG_STREAMING_SCAN_MAX_AI_CALLS",
+                "AMG_STREAMING_FRAME_CACHE_MAX_MB",
+                "AMG_STREAMING_LOW_RES_ANALYSIS",
+                "AMG_STREAMING_ANALYSIS_MAX_WIDTH",
+                "AMG_STREAMING_ANALYSIS_MAX_HEIGHT",
+                "AMG_STREAMING_SEGMENT_COUNT",
+                "AMG_STREAMING_SEGMENT_MIN_DURATION_SEC",
+                "AMG_STREAMING_FUSED_AI_WEIGHT",
+                "AMG_STREAMING_FUSED_SHARP_WEIGHT",
+                "AMG_STREAMING_ZONE_BONUS_FINISH",
+                "AMG_STREAMING_ZONE_BONUS_BUILDUP",
+                "AMG_STREAMING_POST_AI_SHARP_PERCENTILE",
+                "AMG_POD_MAX_ACTIVE_PIPELINES",
+            ]
+            for env_name in forwarded_env:
+                if env_name in os.environ:
+                    spec_env[env_name] = os.environ[env_name]
+            spec_env["AMG_POD_AUTH_TOKEN"] = self._auth_token
+            spec.env = spec_env
+            pod = self._client.provision_pod(
+                spec,
+                ready_timeout=self._provision_timeout_sec,
+                poll_interval=self._poll_interval_sec,
+            )
+            new_pod_id = pod["id"]
+            with self._lifecycle_lock:
+                self._warm_pod_id = new_pod_id
+                self._active_jobs += 1
+            return new_pod_id
 
     def _release_pod(self, pod_id: str, *, success: bool, on_log: LogHook) -> None:
         with self._lifecycle_lock:
@@ -1025,7 +1055,31 @@ class RunpodBackend(JobBackend):
                 on_progress(30 + int(0.55 * float(pct)))
             status = body.get("status")
             if status == "done":
-                return body.get("result") or {}
+                result = body.get("result") or {}
+                if isinstance(result, dict):
+                    pod_timing = {
+                        key: body.get(key)
+                        for key in (
+                            "source_kind",
+                            "created_at",
+                            "started_at",
+                            "finished_at",
+                            "created_at_ts",
+                            "started_at_ts",
+                            "finished_at_ts",
+                            "download_started_at_ts",
+                            "download_finished_at_ts",
+                            "pipeline_wait_started_at_ts",
+                            "pipeline_started_at_ts",
+                            "pipeline_finished_at_ts",
+                            "download_pct",
+                            "progress_pct",
+                        )
+                        if key in body
+                    }
+                    if any(k.endswith("_ts") or k in {"created_at", "started_at", "finished_at"} for k in pod_timing):
+                        result["_pod_job_timing"] = pod_timing
+                return result
             if status == "error":
                 raise RuntimeError(
                     f"pod-side pipeline failed: {body.get('error') or 'unknown error'}"
