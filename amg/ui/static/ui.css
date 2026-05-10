@@ -2,6 +2,48 @@
   margin-bottom: 10px;
 }
 
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+html body .wrap,
+html body .topbar-inner,
+html body .footbar-inner {
+  width: min(100%, 1440px);
+  max-width: 100%;
+}
+
+html body .wrap {
+  padding-left: clamp(14px, 2vw, 18px);
+  padding-right: clamp(14px, 2vw, 18px);
+}
+
+.grid,
+.grid > *,
+.between > * {
+  min-width: 0;
+}
+
+.dropzone {
+  max-width: 100%;
+}
+
+.dropzone .path-row {
+  width: min(640px, 100%);
+  max-width: 100%;
+}
+
+.dropzone .path-row input {
+  min-width: 0;
+}
+
+pre.log {
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+}
+
 .content-max {
   max-width: 1440px;
   margin: 0 auto;
@@ -117,12 +159,23 @@
   margin-bottom: 10px;
 }
 
-.process-main-grid {
-  grid-template-columns: 42% 58%;
+html body .process-main-grid {
+  width: 100%;
+  max-width: 100%;
+  grid-template-columns: minmax(0, 42fr) minmax(0, 58fr);
   align-items: start;
 }
 
+.process-left-col,
+.process-right-col,
+#process-jobs-panel {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .process-board {
+  min-width: 0;
+  max-width: 100%;
   border: 1.5px solid color-mix(in oklab, var(--line) 18%, transparent);
   border-radius: var(--radius);
   padding: 10px;
@@ -131,12 +184,16 @@
 
 .process-board-top {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+  align-items: center;
   margin-bottom: 10px;
 }
 
 .process-lane {
+  min-width: 0;
+  max-width: 100%;
   border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
   border-radius: 8px;
   margin-bottom: 10px;
@@ -152,6 +209,8 @@
 }
 
 .process-recent-scene {
+  min-width: 0;
+  max-width: 100%;
   border-color: color-mix(in oklab, var(--line) 16%, transparent);
 }
 
@@ -160,21 +219,27 @@
 }
 
 .process-timings-card {
+  min-width: 0;
+  max-width: 100%;
   border-color: color-mix(in oklab, var(--line) 18%, transparent);
 }
 
 .process-jobs-stack .process-job-card {
+  min-width: 0;
   border: 1.5px solid color-mix(in oklab, var(--line) 18%, transparent);
   padding: 10px;
   margin-bottom: 8px;
 }
 
 .process-job-path {
+  min-width: 0;
   opacity: 0.95;
+  overflow-wrap: anywhere;
 }
 
 .process-job-message {
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .process-job-meta {
@@ -259,7 +324,7 @@
 }
 
 @media (max-width: 1100px) {
-  .process-main-grid {
+  html body .process-main-grid {
     grid-template-columns: 1fr;
   }
   .scene-head-row {
