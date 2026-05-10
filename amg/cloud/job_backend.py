@@ -1269,11 +1269,120 @@ class RunpodBackend(JobBackend):
         if target.exists():
             shutil.rmtree(target)
         tmp.rename(target)
+        self._rewrite_extracted_artifact_paths(target, decision_log_dest)
         log.info(
             f"Extracted pod result for scene {scene_id}: work_dir={target}, "
             f"decision_log={decision_log_dest}, layout={'bundle' if bundle_layout else 'v0_flat'}"
         )
         return {"work_dir": target, "decision_log_path": decision_log_dest}
+
+    def _rewrite_extracted_artifact_paths(
+        self,
+        work_dir: Path,
+        decision_log_path: Optional[Path],
+    ) -> None:
+        """Rewrite pod-local artifact paths inside extracted JSON files.
+
+        Pod bundles preserve JSON generated on the worker, where artifact
+        paths point under ``/data/pod_uploads/.../<scene>_amg_v11``. After the
+        controller extracts the bundle, those files live under
+        ``DATA_DIR/work_dirs/<scene>``. Rewriting keeps review links, preview
+        paths, and decision-log references valid in the controller UI.
+        """
+        json_paths = list(Path(work_dir).rglob("*.json"))
+        if decision_log_path is not None:
+            json_paths.append(Path(decision_log_path))
+
+        loaded: list[tuple[Path, Any]] = []
+        strings: list[str] = []
+        for path in json_paths:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 - artifact JSON rewrite is best-effort
+                continue
+            loaded.append((path, data))
+            strings.extend(self._iter_json_strings(data))
+
+        pod_work_dir = self._infer_pod_work_dir_from_paths(strings)
+        if not pod_work_dir:
+            return
+        controller_work_dir = str(Path(work_dir))
+        if pod_work_dir == controller_work_dir:
+            return
+
+        for path, data in loaded:
+            rewritten = self._replace_json_path_prefix(data, pod_work_dir, controller_work_dir)
+            if rewritten == data:
+                continue
+            try:
+                path.write_text(
+                    json.dumps(rewritten, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except Exception as exc:  # noqa: BLE001 - do not fail artifact extraction
+                log.warn(f"Failed to rewrite extracted artifact paths in {path}: {exc}")
+
+    @staticmethod
+    def _iter_json_strings(value: Any) -> list[str]:
+        out: list[str] = []
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            for item in value.values():
+                out.extend(RunpodBackend._iter_json_strings(item))
+        elif isinstance(value, list):
+            for item in value:
+                out.extend(RunpodBackend._iter_json_strings(item))
+        return out
+
+    @staticmethod
+    def _infer_pod_work_dir_from_paths(values: list[str]) -> Optional[str]:
+        candidates: list[str] = []
+        markers = ("/covers/", "/previews/", "/evidence/")
+        for value in values:
+            if not value.startswith("/"):
+                continue
+            normalized = value.replace("\\", "/")
+            for marker in markers:
+                if marker in normalized:
+                    candidates.append(normalized.split(marker, 1)[0])
+            for filename in (
+                "/scene_analysis.json",
+                "/insight.json",
+                "/provided_thumbnails.json",
+                "/soft_thumbnail.json",
+            ):
+                if normalized.endswith(filename):
+                    candidates.append(normalized[: -len(filename)])
+        if not candidates:
+            return None
+        # Prefer the most specific repeated root.
+        counts: dict[str, int] = {}
+        for candidate in candidates:
+            counts[candidate] = counts.get(candidate, 0) + 1
+        return sorted(counts, key=lambda c: (counts[c], len(c)), reverse=True)[0]
+
+    @staticmethod
+    def _replace_json_path_prefix(value: Any, old_prefix: str, new_prefix: str) -> Any:
+        if isinstance(value, str):
+            normalized = value.replace("\\", "/")
+            if normalized == old_prefix:
+                return new_prefix
+            if normalized.startswith(old_prefix + "/"):
+                suffix = normalized[len(old_prefix):].lstrip("/")
+                return str(Path(new_prefix, *suffix.split("/"))) if suffix else new_prefix
+            return value
+        if isinstance(value, dict):
+            return {
+                key: RunpodBackend._replace_json_path_prefix(item, old_prefix, new_prefix)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                RunpodBackend._replace_json_path_prefix(item, old_prefix, new_prefix)
+                for item in value
+            ]
+        return value
 
 
 # ---------- factory ----------

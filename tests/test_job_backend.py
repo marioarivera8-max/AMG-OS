@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List
@@ -532,10 +533,33 @@ def test_runpod_backend_bundle_layout_drops_decision_log_at_canonical_path(
         "covers_saved": 8,
         "decision_log_path": "/data/decision_logs/scene-bundle.json",  # pod-side path
     }
+    pod_work_dir = "/data/pod_uploads/j1/scene-bundle/video_amg_v11"
     bundle_zip = _make_zip_bytes({
         "work_dir/covers/cover_001.jpg": b"cover-bytes",
         "work_dir/insight.json": b'{"i":1}',
-        "decision_log.json": b'{"scene_id": "scene-bundle", "execution": {"phases": {}}}',
+        "work_dir/scene_analysis.json": json.dumps({
+            "preview_outputs": [
+                {"path": f"{pod_work_dir}/previews/preview_01.mp4"}
+            ],
+            "evidence": [
+                {"frame_path": f"{pod_work_dir}/covers/cover_001.jpg"}
+            ],
+        }).encode(),
+        "work_dir/previews/preview_manifest.json": json.dumps({
+            "outputs": [
+                {"path": f"{pod_work_dir}/previews/preview_01.mp4"}
+            ]
+        }).encode(),
+        "decision_log.json": json.dumps({
+            "scene_id": "scene-bundle",
+            "execution": {"phases": {}},
+            "analysis_path": f"{pod_work_dir}/scene_analysis.json",
+            "outcomes": {
+                "saved_covers": [
+                    {"path": f"{pod_work_dir}/covers/cover_001.jpg"}
+                ]
+            },
+        }).encode(),
     })
 
     session.queue(
@@ -563,6 +587,14 @@ def test_runpod_backend_bundle_layout_drops_decision_log_at_canonical_path(
     dlog_dest = DECISION_LOGS_DIR / "scene-bundle.json"
     assert dlog_dest.is_file(), f"decision log not landed at {dlog_dest}"
     assert "scene-bundle" in dlog_dest.read_text()
+    dlog = json.loads(dlog_dest.read_text())
+    assert dlog["analysis_path"] == str(extracted / "scene_analysis.json")
+    assert dlog["outcomes"]["saved_covers"][0]["path"] == str(extracted / "covers" / "cover_001.jpg")
+    analysis = json.loads((extracted / "scene_analysis.json").read_text())
+    assert analysis["preview_outputs"][0]["path"] == str(extracted / "previews" / "preview_01.mp4")
+    assert analysis["evidence"][0]["frame_path"] == str(extracted / "covers" / "cover_001.jpg")
+    manifest = json.loads((extracted / "previews" / "preview_manifest.json").read_text())
+    assert manifest["outputs"][0]["path"] == str(extracted / "previews" / "preview_01.mp4")
     # Result paths point to the controller's local extracted artifacts.
     assert Path(result["work_dir"]) == extracted
     assert Path(result["decision_log_path"]) == dlog_dest

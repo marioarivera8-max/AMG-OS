@@ -291,6 +291,7 @@ def select_quota_fill(
     segment_pick_count = 0
     bucket_pick_count = 0
     topoff_count = 0
+    relaxed_topoff_count = 0
 
     # Pass 0: temporal position coverage. Every detected position run gets
     # first claim on up to three strong shots before generic top-off ranking.
@@ -372,6 +373,26 @@ def select_quota_fill(
             per_bucket[_bucket_of(c)] = per_bucket.get(_bucket_of(c), 0) + 1
             topoff_count += 1
 
+    # Pass 3: the cover floor is a harder promise than spacing. If eligible
+    # candidates remain after the normal spaced top-off, fill the floor by
+    # score without the min-gap rule rather than returning fewer covers.
+    if len(selected) < min_total:
+        for c in sorted_candidates:
+            if len(selected) >= min_total or len(selected) >= effective_max_total:
+                break
+            if id(c) in selected_ids:
+                continue
+            if _ts_of(c) is None:
+                continue
+            _annotate_analysis_hint(c)
+            selected.append(c)
+            selected_ids.add(id(c))
+            ts = _ts_of(c)
+            if ts is not None:
+                selected_ts.append(ts)
+            per_bucket[_bucket_of(c)] = per_bucket.get(_bucket_of(c), 0) + 1
+            relaxed_topoff_count += 1
+
     stats = {
         "max_total": max_total,
         "effective_max_total": effective_max_total,
@@ -380,6 +401,8 @@ def select_quota_fill(
         "segment_pick_count": segment_pick_count,
         "bucket_pick_count": bucket_pick_count,
         "topoff_count": topoff_count,
+        "relaxed_topoff_count": relaxed_topoff_count,
+        "floor_unfilled_count": max(0, min_total - len(selected)),
         "position_segment_coverage": bool(position_segments),
         "position_segments": len(position_segments),
         **{f"bucket_{k}": v for k, v in per_bucket.items()},

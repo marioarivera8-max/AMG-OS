@@ -69,3 +69,23 @@ def test_oral_sex_position_labels_count_as_position_bucket():
     assert len(selected) == 3
     assert stats["bucket_positions"] == 3
     assert stats["position_segment_ORAL_BJ_01"] == 3
+
+
+def test_relaxed_topoff_preserves_cover_floor_when_spacing_blocks_candidates():
+    candidates = [
+        _candidate(float(i * 5), 95.0 - i, "OTHER", type_="COMPOSITION")
+        for i in range(18)
+    ]
+    quota = QuotaSpec(
+        posterpose=0,
+        buildup=0,
+        finish=0,
+        min_gap_sec=120.0,
+        position_segment_coverage=False,
+    )
+
+    selected, stats = select_quota_fill(candidates, max_total=15, min_total=15, quota=quota)
+
+    assert len(selected) == 15
+    assert stats["floor_unfilled_count"] == 0
+    assert stats["relaxed_topoff_count"] > 0
