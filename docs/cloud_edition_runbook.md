@@ -15,8 +15,8 @@ Browser (https://amg.exoticplug.app)
 
 - controller host: `5.161.231.249`
 - controller service: `amg-controller` active/running
-- controller image: `ghcr.io/marioarivera8-max/amg-controller:main-9619578`
-- pod image: `ghcr.io/marioarivera8-max/amg-pod:main-4f564ce`
+- controller image: `ghcr.io/marioarivera8-max/amg-controller:main-595ea4a`
+- pod image: `ghcr.io/marioarivera8-max/amg-pod:main-595ea4a`
 
 Controller env defaults in production:
 

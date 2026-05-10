@@ -28,7 +28,7 @@ From `/etc/amg/controller.env`, service state, and live deploy validation on
 2026-05-10:
 
 - `AMG_JOB_BACKEND=runpod`
-- `AMG_RUNPOD_IMAGE=ghcr.io/marioarivera8-max/amg-pod:main-4f564ce`
+- `AMG_RUNPOD_IMAGE=ghcr.io/marioarivera8-max/amg-pod:main-595ea4a`
 - `AMG_PROCESSING_PROFILE=fast`
 - `AMG_STREAMING_SCAN=1`
 - `AMG_RUNPOD_VIDEO_BACKEND=ffmpeg_cuda`
@@ -46,15 +46,22 @@ From `/etc/amg/controller.env`, service state, and live deploy validation on
 Controller service:
 
 - `amg-controller` active/running
-- controller image pinned at `ghcr.io/marioarivera8-max/amg-controller:main-9619578`
+- controller image pinned at `ghcr.io/marioarivera8-max/amg-controller:main-595ea4a`
 
 ## Latest Deployed Change
 
-Commit `9619578` adds controller disk maintenance:
+Commit `595ea4a` warms the pod vision model before accepting jobs:
 
-- Controller image is pinned at `main-9619578`.
-- Runpod pod image remains pinned at `main-4f564ce`; this disk cleanup change
-  does not require pulling a new pod image.
+- Controller and Runpod pod images are pinned at `main-595ea4a`.
+- Pod `/readyz` now waits for a tiny real vision inference warmup, not just
+  Ollama `/api/tags`, before the controller submits scene jobs.
+- Controller readiness logs now surface the `vision-warmup` phase.
+- This was added after a cold H100 pod accepted the first job with the model
+  present but not inference-warm, causing `E_AI_TIMEOUT` on all stream AI calls
+  and fallback D.
+
+Current disk maintenance state:
+
 - `amg clean` can dry-run or apply conservative AMG data cleanup.
 - `/root/amg_deploy/scripts/controller_disk_maintenance.py` is installed on
   the Hetzner host for host-side Docker image tag pruning. It protects the
@@ -63,11 +70,14 @@ Commit `9619578` adds controller disk maintenance:
 - The daily systemd cleanup timer is not installed yet; it needs explicit
   operator approval because it creates ongoing automated deletion.
 
-Previous pipeline quality checkpoint `4f564ce` remains the active pod runtime:
+2026-05-10 cold/warm pod observations:
 
-- Optimized streaming scan and metadata factsheets.
-- Taxonomy/position coverage and cover-quality gates remain active in the
-  pipeline code shipped to the current pod image.
+- Cold H100 pod `q307t9htdqsi6n` took roughly 19 minutes before `/healthz`
+  served; during that window Runpod already reported desiredStatus `RUNNING`.
+- First cold scene `JPOV_0389...` completed with fallback D: pipeline `455.97s`
+  for `1768.97s` source (`257.8 ms/video-sec`) because stream AI timed out.
+- Second warm scene `JPOV_0375...` completed without fallbacks: pipeline
+  `219.27s` for `1382.10s` source (`158.6 ms/video-sec`), with zero AI errors.
 
 ## AMG_OS v1 Performance Baseline
 
