@@ -46,6 +46,66 @@ L0.12 — **AMG individual_subscriber pricing band locked at premium positioning
 
 Comparison anchor: TSS pricing is $34.95/mo, $99/3mo, $349/yr (cited in `docs/competitive/tss_business_analysis.md`, commit 69ca048). AMG's premium of ~43% over TSS at the Basic tier is justified by: (a) unified onboarding verification overhead per L0.11, (b) AI inference costs per L0.10 reliability moat, (c) captcha bypass + bot-detection evasion operations, (d) tier-aware compliance routing infrastructure, (e) custodian-of-records architecture for Tier 2 customers. Pricing is reviewable at end of beta cohort; pricing changes require operator decision register entry and CLAUDE.md auto-update trigger.
 
+L0.12.A — **Pricing model amendment 2026-05-09 (USAGE-BASED quota envelopes).** Operator-locked 2026-05-09 per DR-017 (paired with AMG_OS_NEXT decision register entry, same date). Stage 1 — spec-amendment lock-in (this commit); Stage 2 — live activation deferred to Phase 4.x with new DR-022 at activation moment per DR-017 two-stage activation discipline. **This amendment is ADDITIVE to L0.12 and does not change L0.12 headline prices.** L0.12 Basic ($49.99/mo, $499/yr) and Pro ($99.99/mo, $999/yr) remain unchanged. L0.12.A adds: multi-axis quota envelopes, overage rates per axis per tier, two new tiers (Studio Tier 2, Platform Enterprise), and an optional cold-storage tier toggle (per DR-021).
+
+```
+L0.12.A — Pricing model amendment 2026-05-09 (USAGE-BASED quota envelopes)
+
+This amendment is ADDITIVE to L0.12 and does not change L0.12 headline prices.
+It is required to honor operator directives D1-D7 from the 2026-05-09 strategy
+session (committed to docs/strategy/proposal_5_tier_structure.md):
+
+  D1 — Internal Employee tier remains FREE (unchanged).
+  D2 — Pricing must be USAGE-BASED, not flat-only.
+  D3 — Quota envelope is multi-axis: max(GB processed, GPU-hours, video count)
+       — whichever fills first triggers overage on that axis only.
+  D4 — Existing L0.12 flat $99 Pro is bad unit economics for high-volume
+       users; quota + overage resolve this.
+  D5 — Compute time pricing direction: $1-$3/hr with 30-minute minimum
+       blocks (validated against Runpod RTX 4090 actual cost in
+       docs/strategy/research/amg_actual_unit_cost.md).
+  D6 — What each tier unlocks (capacity envelope) is explicit in tier-table
+       below.
+  D7 — Pricing is COMPETITIVE (not gouge) and SUSTAINABLE (3x cost minimum
+       margin design).
+
+Tier table (L0.12.A canonical):
+
+  AMG Internal Employee — FREE (D1, unchanged)
+  AMG Basic Creator — $49.99/mo or $499/yr (-16.8%) (L0.12 unchanged)
+    quota: 50 videos OR 100 GB OR 5 GPU-hr (whichever fills first)
+    overage: $2.50/GPU-hr (30-min min) or $0.50/extra HD video / $1.00/extra 4K video
+    overage compute uses lower of GPU-hr-rate or per-video-rate (customer-fair)
+  AMG Pro Creator — $99.99/mo or $999/yr (-16.8%) (L0.12 unchanged)
+    quota: 200 videos OR 400 GB OR 20 GPU-hr (whichever fills first)
+    overage: $2.00/GPU-hr (30-min min) or $0.40/extra HD / $0.80/extra 4K
+  AMG Studio Tier 2 — $399/mo or $3,990/yr (-16.8%) + $500 onboarding
+    (refundable on rollout, NOXO pilot pattern)
+    quota: 1,000 videos OR 2 TB OR 100 GPU-hr (whichever fills first)
+    overage: $1.50/GPU-hr (30-min min) or $0.30/extra HD / $0.60/extra 4K
+  AMG Platform Enterprise — from $1,499/mo (custom uplift expected) +
+    $5,000 onboarding (refundable)
+    quota: 10,000 videos OR 20 TB OR 1,000 GPU-hr (whichever fills first)
+    overage: $1.00/GPU-hr (30-min min) or $0.20/extra HD / $0.40/extra 4K
+
+Storage overage (when GB-axis is the binding constraint):
+  Basic: $0.030/GB/mo
+  Pro: $0.025/GB/mo
+  Studio Tier 2: $0.020/GB/mo
+  Platform Enterprise: $0.015/GB/mo
+  Cold-storage tier (≥90 days no access): 50% off active rate (optional toggle)
+
+Annual prepay discount preserved at 16.8% (L0.12 unchanged for Basic + Pro;
+applied identically to Studio Tier 2; Platform Enterprise custom).
+
+Egress overage: per Hetzner pass-through ~$1/TB after included quota, or
+custom for Enterprise. Detail per docs/strategy/research/vendor_pricing_gpu_storage.md.
+
+# evidence: operator decision 2026-05-09, batch-pricing-amendment-1.A
+```
+
+Cross-references: AMG_OS_NEXT decision register entries DR-017 (parent), DR-006 amendment (Stripe price IDs), DR-018 (beta-user grandfathering), DR-019 (refundable onboarding fees), DR-020 (Platform Enterprise from-framing), DR-021 (cold-storage toggle). Proposal language source: `~/AMG_OS_NEXT/docs/strategy/proposal_L0_amendment_and_migration.md` §2.2 (verbatim). Stage-2 activation will land via Phase 4 Track E billing module + new DR-022.
+
 L0.11 — **Unified onboarding verification gate.** Operator-locked 2026-05-08. Every subscriber, regardless of tier, completes full compliance verification before payment unlocks and before any submission can route through the pipeline. Verification requires: (a) subscriber's valid government-issued photo ID, (b) photo ID for every performer who will appear in any submitted content, (c) signed performer release per performer, (d) co-performer consent form when a scene contains multiple performers, (e) subscriber attestation of producer-of-record status appropriate to their tier. Verification records are stored in the AMG vault (SOPS-encrypted, vault-pathed). Tier 1 subscribers retain primary custodianship of their own records; AMG's vault copies are defensive co-records. Tier 2 subscriptions transfer custodianship to Amy Lew. The intake gate (Phase 3 Gate 1) refuses any submission where every performer in the scene does not already have a verified onboarding record on file.
 
 L0.9 — **Five correctness invariants** (cross-cutting, encoded in Phase 3 Track B.8 and inherited by Phase 4 through `ComplianceEngine.run()`):
