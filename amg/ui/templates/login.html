@@ -1,302 +1,401 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="bone" data-mode="light">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Sign in · AMG OS</title>
+    <title>Sign in - AMG OS</title>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;450;500;600;700&family=Geist+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/ui.css" />
     <style>
       :root {
-        --paper: #1d2128;
-        --paper-2: #262b34;
-        --paper-3: #2f3540;
-        --ink: #f4f1e8;
-        --ink-2: #b9b6ad;
-        --ink-3: #7a7c83;
-        --line: #f4f1e8;
-        --line-soft: #44474f;
-        --accent: oklch(0.78 0.16 70);
-        --accent-soft: oklch(0.34 0.06 70);
-        --accent-ink: oklch(0.82 0.16 75);
-        --err: oklch(0.68 0.18 25);
-        --err-soft: color-mix(in oklab, var(--err) 16%, transparent);
-        --warn: oklch(0.80 0.14 80);
-        --warn-soft: color-mix(in oklab, var(--warn) 16%, transparent);
-        --radius: 10px;
+        --login-hero-bg: #1a1612;
+        --login-hero-bg-2: #241e18;
+        --login-hero-ink: #f0ebe2;
+        --login-hero-ink-2: #c6b9a8;
+        --login-hero-ink-3: #827768;
+        --login-hero-line: rgba(240, 235, 226, 0.12);
+      }
 
-        --bg-0: var(--paper);
-        --bg-1: var(--paper);
-        --bg-2: var(--paper-2);
-        --bg-3: var(--paper-3);
-        --text: var(--ink);
-        --muted: var(--ink-2);
-        --muted-2: var(--ink-3);
-      }
-      * { box-sizing: border-box; }
-      html, body { margin: 0; padding: 0; height: 100%; }
       body {
-        font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Display", "Segoe UI", sans-serif;
-        background: var(--bg-0);
-        color: var(--text);
-        font-size: 14px;
-        line-height: 1.45;
-        min-height: 100%;
+        min-height: 100vh;
         padding: 10px;
+        background: var(--bg-0);
       }
+
       .login-shell {
-        min-height: calc(100vh - 20px);
-        width: 100%;
         display: grid;
-        grid-template-columns: 58% 42%;
-        border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
-        border-radius: 14px;
+        grid-template-columns: 1.05fr 1fr;
+        min-height: calc(100vh - 20px);
         overflow: hidden;
+        background: var(--bg-1);
+        border: 1px solid var(--line);
+        border-radius: 14px;
       }
-      .login-left {
-        background: linear-gradient(180deg, color-mix(in oklab, var(--bg-2) 88%, transparent), color-mix(in oklab, var(--bg-1) 96%, transparent));
-        padding: 28px;
+
+      .login-hero {
+        position: relative;
         display: flex;
         flex-direction: column;
+        padding: 34px;
+        color: var(--login-hero-ink);
+        background:
+          radial-gradient(circle at 18% 14%, rgba(212,160,86,0.28), transparent 30%),
+          radial-gradient(circle at 82% 78%, rgba(178,91,58,0.24), transparent 34%),
+          linear-gradient(180deg, var(--login-hero-bg), #0f0c09);
       }
-      .login-right {
-        border-left: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
-        padding: 28px;
+
+      .login-hero::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0.34;
+        background-image:
+          linear-gradient(var(--login-hero-line) 1px, transparent 1px),
+          linear-gradient(90deg, var(--login-hero-line) 1px, transparent 1px);
+        background-size: 40px 40px;
+        mask-image: radial-gradient(circle at 45% 45%, black 22%, transparent 72%);
+      }
+
+      .login-hero > * {
+        position: relative;
+        z-index: 1;
+      }
+
+      .login-brand {
         display: flex;
-        flex-direction: column;
-        justify-content: center;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
       }
-      .login-card {
-        width: 100%;
-        max-width: 460px;
+
+      .login-brand-lockup {
+        display: flex;
+        align-items: center;
+        gap: 12px;
       }
-      .brand {
+
+      .login-logo {
+        display: grid;
+        place-items: center;
+        width: 44px;
+        height: 44px;
+        background: var(--login-hero-bg-2);
+        border: 1px solid var(--login-hero-line);
+        border-radius: 11px;
+      }
+
+      .login-wordmark {
+        color: var(--login-hero-ink);
+        font-family: "Instrument Serif", serif;
+        font-size: 22px;
+        line-height: 1;
+      }
+
+      .login-wordmark em {
+        color: var(--accent);
+        font-style: italic;
+      }
+
+      .login-build {
+        color: var(--login-hero-ink-2);
+        background: var(--login-hero-bg-2);
+        border: 1px solid var(--login-hero-line);
+      }
+
+      .login-hero-main {
+        max-width: 470px;
+        margin: auto 0;
+      }
+
+      .login-eyebrow {
         display: flex;
         align-items: center;
         gap: 10px;
-        margin: 0 0 22px;
-        font-weight: 600;
-        font-size: 15px;
+        margin-bottom: 20px;
+        color: var(--login-hero-ink-3);
+        font-size: 10px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
       }
-      .brand-glyph {
-        width: 22px; height: 22px;
-        background: linear-gradient(135deg, var(--accent), var(--accent-ink));
-        clip-path: polygon(50% 0, 100% 100%, 0 100%);
+
+      .login-eyebrow::before,
+      .login-eyebrow::after {
+        content: "";
+        width: 36px;
+        height: 1px;
+        background: var(--login-hero-line);
       }
-      h1 {
-        margin: 0 0 4px;
-        font-size: 20px;
-        font-weight: 600;
-        letter-spacing: -0.01em;
+
+      .login-title {
+        margin: 0;
+        color: var(--login-hero-ink);
+        font-family: "Instrument Serif", serif;
+        font-size: clamp(42px, 5vw, 60px);
+        font-weight: 400;
+        line-height: 0.98;
+        letter-spacing: -0.025em;
       }
-      .sub {
-        color: var(--muted);
+
+      .login-title em {
+        color: var(--accent);
+        font-style: italic;
+      }
+
+      .login-copy {
+        max-width: 410px;
+        margin: 16px 0 0;
+        color: var(--login-hero-ink-2);
+        font-size: 13.5px;
+      }
+
+      .login-system {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: auto;
+      }
+
+      .login-system-cell {
+        padding: 12px;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid var(--login-hero-line);
+        border-radius: 8px;
+      }
+
+      .login-system-cell label {
+        display: block;
+        color: var(--login-hero-ink-3);
+        font-size: 9px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .login-system-cell strong {
+        display: block;
+        margin-top: 5px;
+        color: var(--login-hero-ink);
+        font-family: "Geist Mono", ui-monospace, monospace;
         font-size: 13px;
-        margin: 0 0 22px;
       }
-      label.field {
+
+      .login-form-pane {
         display: flex;
         flex-direction: column;
-        gap: 5px;
-        font-size: 12px;
-        color: var(--muted);
-        margin-bottom: 14px;
+        justify-content: center;
+        padding: 40px 56px;
       }
-      input[type="text"], input[type="password"] {
-        background: var(--bg-1);
-        color: var(--text);
-        border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
-        border-radius: 8px;
-        padding: 10px 12px;
-        font-size: 14px;
-        font-family: inherit;
-        outline: none;
-      }
-      input:focus {
-        border-color: color-mix(in oklab, var(--accent) 78%, var(--line) 22%);
-        box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 36%, transparent);
-      }
-      button.primary {
-        width: 100%;
-        background: var(--accent);
-        color: #1f1710;
-        border: 1px solid var(--accent);
-        border-radius: 8px;
-        padding: 11px 14px;
-        font-size: 14px;
-        font-weight: 600;
-        cursor: pointer;
-        font-family: inherit;
-        margin-top: 4px;
-      }
-      button.primary:hover {
-        background: color-mix(in oklab, var(--accent) 88%, white 12%);
-        border-color: color-mix(in oklab, var(--accent) 88%, white 12%);
-      }
-      .alert {
-        font-size: 13px;
-        padding: 10px 12px;
-        border-radius: 8px;
-        margin: 0 0 14px;
-        border: 1px solid var(--line);
-      }
-      .alert.err {
-        color: var(--err);
-        background: var(--err-soft);
-        border-color: rgba(242, 154, 154, 0.3);
-      }
-      .alert.warn {
-        color: var(--warn);
-        background: var(--warn-soft);
-        border-color: rgba(246, 207, 117, 0.3);
-      }
-      .alert.info {
-        color: var(--accent-ink);
-        background: var(--accent-soft);
-        border-color: color-mix(in oklab, var(--accent) 40%, transparent);
-      }
-      .alert code {
-        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-        font-size: 12px;
-        background: rgba(0,0,0,0.3);
-        padding: 1px 6px;
-        border-radius: 4px;
-      }
-      .footer-hint {
-        margin-top: auto;
-        font-size: 11px;
-        color: var(--muted-2);
-        text-align: left;
-        letter-spacing: 0.02em;
-      }
-      .login-splash {
-        margin: 0 0 16px;
-        border: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
-        border-radius: 10px;
-        padding: 10px 12px;
-        background: color-mix(in oklab, var(--bg-3) 55%, transparent);
-      }
-      .login-splash h2 {
-        margin: 0;
-        font-size: 12px;
-        letter-spacing: 0.02em;
-      }
-      .login-splash p {
-        margin: 6px 0 0;
-        font-size: 12px;
-        color: var(--muted);
-      }
-      .left-hero {
-        margin-top: auto;
-        margin-bottom: auto;
-        max-width: 660px;
-      }
-      .left-hero h2 {
-        margin: 0;
-        font-size: 48px;
-        line-height: 1.1;
-        letter-spacing: -0.02em;
-      }
-      .left-hero .mark {
-        background: color-mix(in oklab, var(--accent-soft) 90%, transparent);
-        color: var(--accent-ink);
-        padding: 0 6px;
-      }
-      .left-kpis {
-        margin-top: 16px;
+
+      .login-form-top,
+      .login-form-foot {
         display: flex;
-        gap: 18px;
+        justify-content: space-between;
+        align-items: center;
+        gap: 14px;
+        color: var(--ink-3);
+        font-size: 10px;
       }
-      .left-kpis .k {
-        min-width: 80px;
+
+      .login-card {
+        width: 100%;
+        max-width: 390px;
+        margin: auto 0;
       }
-      .left-kpis .k label {
-        display: block;
-        font-size: 11px;
-        color: var(--muted);
+
+      .login-greet {
+        margin-bottom: 14px;
+        color: var(--ink-3);
+        font-size: 10px;
+        letter-spacing: 0.16em;
         text-transform: uppercase;
-        letter-spacing: 0.04em;
       }
-      .left-kpis .k strong {
-        display: block;
-        font-size: 36px;
+
+      .login-card h1 {
+        margin: 0 0 10px;
+        color: var(--ink);
+        font-family: "Instrument Serif", serif;
+        font-size: 38px;
+        font-weight: 400;
         line-height: 1.05;
       }
-      @media (max-width: 1050px) {
+
+      .login-sub {
+        margin: 0 0 22px;
+        color: var(--ink-3);
+        font-size: 13px;
+      }
+
+      .operator-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-bottom: 18px;
+      }
+
+      .operator-card {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 11px;
+        color: var(--ink-2);
+        background: var(--bg-2);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      .operator-card.active {
+        color: var(--ink);
+        border-color: var(--accent);
+        box-shadow: inset 0 0 0 1px var(--accent);
+      }
+
+      .operator-avatar {
+        display: grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        color: var(--accent-ink);
+        background: var(--accent);
+        border-radius: 50%;
+        font-weight: 600;
+      }
+
+      .operator-role {
+        color: var(--ink-3);
+        font-size: 9.5px;
+      }
+
+      .login-alert {
+        margin-bottom: 14px;
+      }
+
+      .login-field {
+        margin-bottom: 14px;
+      }
+
+      .login-field-head {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 5px;
+        color: var(--ink-3);
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .login-field input {
+        width: 100%;
+        padding: 11px 12px;
+        background: var(--bg-elev);
+      }
+
+      .login-submit {
+        width: 100%;
+        margin-top: 4px;
+        padding: 12px 14px;
+      }
+
+      .login-form-foot {
+        margin-top: auto;
+        padding-top: 24px;
+        border-top: 1px solid var(--line-soft);
+      }
+
+      @media (max-width: 900px) {
         .login-shell {
           grid-template-columns: 1fr;
         }
-        .login-right {
-          border-left: 0;
-          border-top: 1.5px solid color-mix(in oklab, var(--line) 16%, transparent);
+
+        .login-hero {
+          display: none;
         }
-        .left-hero h2 {
-          font-size: 34px;
+
+        .login-form-pane {
+          min-height: calc(100vh - 20px);
+          padding: 28px;
         }
       }
     </style>
   </head>
   <body>
     <div class="login-shell">
-      <div class="login-left">
-        <div class="brand">
-          <span class="brand-glyph"></span>
-          <span>AMG OS</span>
-          <span class="muted" style="font-size: 11px; border: 1px solid color-mix(in oklab, var(--line) 16%, transparent); border-radius: 999px; padding: 1px 6px;">v11.3</span>
-        </div>
-        <div class="left-hero">
-          <h2>Last batch <span class="mark">finished at 11:42pm.</span></h2>
-          <p class="sub" style="margin-top: 8px;">6 scenes ready for your review · 1 failed · est ~12 min to clear the queue.</p>
-          <div class="left-kpis">
-            <div class="k"><label>Ready</label><strong>6</strong></div>
-            <div class="k"><label>Failed</label><strong>1</strong></div>
-            <div class="k"><label>Disk</label><strong>412</strong></div>
+      <section class="login-hero">
+        <div class="login-brand">
+          <div class="login-brand-lockup">
+            <div class="login-logo"><span class="brand-glyph"></span></div>
+            <div>
+              <div class="login-wordmark">AMG<em>OS</em></div>
+              <div class="mono" style="color: var(--login-hero-ink-3); font-size: 10px; margin-top: 5px;">Operator workstation</div>
+            </div>
           </div>
+          <span class="pill login-build"><span class="dot ok"></span>v11.3</span>
         </div>
-        <div class="footer-hint">Local-first · single-tenant · all data stays on this machine.</div>
-      </div>
-      <div class="login-right">
+
+        <div class="login-hero-main">
+          <div class="login-eyebrow mono">Ingest - classify - curate</div>
+          <h2 class="login-title">A quiet workstation for <em>messy</em> footage.</h2>
+          <p class="login-copy">Run the local model, review the AI picks, and keep the final publishing call in human hands.</p>
+        </div>
+
+        <div class="login-system">
+          <div class="login-system-cell"><label>Ollama</label><strong>local</strong></div>
+          <div class="login-system-cell"><label>Library</label><strong>manual review</strong></div>
+          <div class="login-system-cell"><label>Mode</label><strong>private</strong></div>
+        </div>
+      </section>
+
+      <section class="login-form-pane">
+        <div class="login-form-top mono">
+          <a href="/">Back to dashboard</a>
+          <span class="pill ok">Secure session</span>
+        </div>
+
         <div class="login-card">
           {% if auth_disabled %}
-            <div class="alert info">
-              Auth is disabled (<code>AMG_AUTH_DISABLED=1</code>). The login screen is
-              shown for testing only — every request is authenticated as a local
-              operator.
+            <div class="card login-alert">
+              Auth is disabled (<code>AMG_AUTH_DISABLED=1</code>). The login screen is shown for testing only.
             </div>
-            <a href="{{ next or '/' }}"><button type="button" class="primary">Continue</button></a>
+            <a href="{{ next or '/' }}"><button type="button" class="btn-primary login-submit">Continue</button></a>
           {% else %}
+            <div class="login-greet mono">Local operator access</div>
             <h1>Sign in</h1>
-            <div class="sub">Welcome back.</div>
-            <div class="login-splash">
-              <h2>Single-operator secure access</h2>
-              <p>This workspace runs in manual-review mode and saves corrections locally for model improvement.</p>
+            <p class="login-sub">Pick an operator and unlock the workstation.</p>
+
+            <div class="operator-grid" aria-hidden="true">
+              <div class="operator-card active"><span class="operator-avatar">M</span><span>Mario R.<br><span class="operator-role mono">admin</span></span></div>
+              <div class="operator-card"><span class="operator-avatar">C</span><span>Curator<br><span class="operator-role mono">review</span></span></div>
             </div>
 
             {% if no_users %}
-              <div class="alert warn">
-                No users have been created yet. From a shell with the AMG environment
-                active, run <code>amg user add &lt;username&gt;</code> to create the
-                first account.
+              <div class="card login-alert pill warn" style="display:block;">
+                No users have been created yet. From a shell with the AMG environment active, run <code>amg user add &lt;username&gt;</code> to create the first account.
               </div>
             {% endif %}
 
             {% if error %}
-              <div class="alert err">{{ error }}</div>
+              <div class="card login-alert pill err" style="display:block;">{{ error }}</div>
             {% endif %}
 
             <form method="POST" action="/login">
               <input type="hidden" name="next" value="{{ next or '/' }}" />
-              <label class="field">
-                Username
+              <label class="login-field">
+                <span class="login-field-head mono"><span>Username</span></span>
                 <input type="text" name="username" autocomplete="username" required autofocus />
               </label>
-              <label class="field">
-                Password
+              <label class="login-field">
+                <span class="login-field-head mono"><span>Passphrase</span><span>local only</span></span>
                 <input type="password" name="password" autocomplete="current-password" required />
               </label>
-              <button type="submit" class="primary">Sign in</button>
+              <button type="submit" class="btn-primary login-submit">Sign in</button>
             </form>
           {% endif %}
         </div>
-      </div>
+
+        <div class="login-form-foot mono">
+          <span>Last sign-in - localhost</span>
+          <span>Logs - review - 2257 records</span>
+        </div>
+      </section>
     </div>
   </body>
 </html>

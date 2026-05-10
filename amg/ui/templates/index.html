@@ -1,10 +1,15 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 {% block content %}
 
 <div class="page-head between">
   <div>
-    <h1>Process a Scene</h1>
-    <div class="sub">Drop a video, pick a folder, or paste a path. Add as many as you like — they line up and run one at a time in order (good for overnight batches).</div>
+    <div class="eyebrow mono">01 / process</div>
+    <h1>Process new footage.</h1>
+    <div class="sub">Drop a video, pick a folder, or paste a path. Add as many as you like; they line up and run one at a time for clean overnight batches.</div>
+  </div>
+  <div class="row">
+    <a href="/cloud" class="btn btn-ghost">Cloud picker</a>
+    <a href="/feedback" class="btn btn-ghost">Feedback</a>
   </div>
 </div>
 
@@ -16,11 +21,11 @@
   hx-encoding="multipart/form-data"
 >
   <div id="dropzone" class="dropzone">
-    <div class="glyph">↑</div>
+    <div class="glyph">UP</div>
     <h2>Drop a video file or scene folder</h2>
-    <p>Or click to browse · MP4, MOV, MKV up to 50 GB · Local-only · No upload to the cloud</p>
+    <p>MP4, MOV, MKV, AVI, M4V, WEBM up to 50 GB. Local review stays operator-controlled.</p>
 
-    <div class="or">OR</div>
+    <div class="or"><span>or paste a path</span></div>
     <div class="path-row">
       <input id="path-input" type="text" name="path" placeholder="Paste a path: /Users/.../incoming/.../Scene Folder" />
       <button type="submit" class="btn-primary">Run</button>
@@ -28,6 +33,7 @@
     <div class="row row-center mt-10">
       <label for="file-input" class="btn btn-ghost" style="cursor: pointer;">Choose video(s)</label>
       <label for="folder-input" class="btn btn-ghost" style="cursor: pointer;">Choose folder</label>
+      <span class="muted mono section-subtle">Longest video is selected automatically</span>
     </div>
     <input
       id="file-input"
@@ -65,7 +71,7 @@
   <div class="process-right-col">
     <div class="between process-panel-head" style="margin-bottom: 10px;">
       <h3 class="card-section-title" style="margin: 0;">Recent Scenes</h3>
-      <a href="/library" style="font-size: 12px;">All scenes →</a>
+      <a href="/library" style="font-size: 12px;">All scenes</a>
     </div>
     <div class="stack">
       {% for s in recent_scenes[:8] %}
@@ -77,7 +83,7 @@
           </div>
           <div style="flex: 1; min-width: 0;">
             <div class="cover-title" title="{{ s.scene_id }}">{{ s.scene_id }}</div>
-            <div class="cover-meta">{{ s.covers }} covers · top {{ s.top_score }}{% if s.studio %} · {{ s.studio }}{% endif %}</div>
+            <div class="cover-meta">{{ s.covers }} covers - top {{ s.top_score }}{% if s.studio %} - {{ s.studio }}{% endif %}</div>
           </div>
           <span class="pill {{ s.status_cls }}">{{ s.status }}</span>
         </a>
@@ -99,7 +105,7 @@
             {% for p in slowest_phases %}
               <div class="between" style="font-size: 12px;">
                 <span><span class="pill warn">{{ p.phase }}</span></span>
-                <span class="mono muted">{{ p.avg_h }} avg · {{ p.max_h }} max · n={{ p.count }}</span>
+                <span class="mono muted">{{ p.avg_h }} avg - {{ p.max_h }} max - n={{ p.count }}</span>
               </div>
             {% endfor %}
           </div>
@@ -114,7 +120,7 @@
               <span class="pill {{ 'ok' if r.status == 'done' else 'err' }}">{{ r.status or "unknown" }}</span>
             </div>
             <div class="muted" style="margin-top: 4px;">
-              pipeline {{ r.pipeline_total_h or "—" }} · wall {{ r.elapsed_h or "—" }} · {{ r.timestamp_ago or "" }}
+              pipeline {{ r.pipeline_total_h or "-" }} - wall {{ r.elapsed_h or "-" }} - {{ r.timestamp_ago or "" }}
             </div>
           </div>
         {% else %}
@@ -167,7 +173,7 @@
       }).length;
       var sample = files[0] ? files[0].name : '';
       fnLabel.textContent =
-        '📁 ' + sourceLabel + ': ' + fileCount + ' files (' + humanMB(totalBytes) + ' MB), ' +
+        'ðŸ“ ' + sourceLabel + ': ' + fileCount + ' files (' + humanMB(totalBytes) + ' MB), ' +
         videoCount + ' video(s). Run picks the longest video automatically. Example: ' + sample;
     }
 
