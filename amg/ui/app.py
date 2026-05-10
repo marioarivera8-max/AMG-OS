@@ -37,6 +37,7 @@ from amg.ingest.inventory import VIDEO_EXTENSIONS, discover_scenes
 from amg.learning.feedback_eval import evaluate_feedback, load_feedback_rows
 from amg.learning.example_bank import export_approved_example_bank
 from amg.scoring.insight_pipeline import generate_scene_insight_payload
+from amg.analysis.scene_analysis import build_analysis_summary, load_scene_analysis as load_scene_analysis_sidecar
 from amg.review.distribution_gate import validate_metadata_for_platforms
 from amg.utils.logging import get_logger
 from amg.cloud.job_backend import get_backend
@@ -68,6 +69,11 @@ PHASES: List[str] = [
     "position_classifier",
     "quota_fill",
     "output",
+    "scene_analysis",
+    "ocr_policy",
+    "preview_generation",
+    "scene_insight",
+    "soft_thumbnail",
 ]
 _PHASE_RE = re.compile(r"\[(" + "|".join(PHASES) + r")\]")
 
@@ -780,6 +786,15 @@ def _load_insight(work_dir: Optional[Path]) -> Optional[dict]:
             return json.load(f)
     except Exception:
         return None
+
+
+def _load_scene_analysis(work_dir: Optional[Path]) -> Optional[dict]:
+    data = load_scene_analysis_sidecar(work_dir)
+    if not isinstance(data, dict):
+        return None
+    data = dict(data)
+    data["summary"] = build_analysis_summary(data)
+    return data
 
 
 def _load_provided_thumb_report(work_dir: Optional[Path]) -> Optional[dict]:
@@ -1500,14 +1515,17 @@ def _record_run_timing(job: dict, result: Optional[dict]) -> None:
                 decision_log_path = str(p)
 
         execution = {}
+        input_blob = {}
         if decision_log_path:
             try:
                 with open(decision_log_path, "r") as f:
                     dlog = json.load(f)
                 execution = (dlog.get("execution") or {}) if isinstance(dlog, dict) else {}
+                input_blob = (dlog.get("input") or {}) if isinstance(dlog, dict) else {}
             except Exception as e:
                 log.warn("Failed to load decision log for run timing", path=str(decision_log_path), error=str(e))
                 execution = {}
+                input_blob = {}
 
         phase_durations = {}
         for name, phase in (execution.get("phases") or {}).items():
@@ -1517,6 +1535,16 @@ def _record_run_timing(job: dict, result: Optional[dict]) -> None:
                 except (TypeError, ValueError):
                     phase_durations[name] = 0.0
 
+        video_duration = _safe_float(input_blob.get("duration_sec")) if input_blob else None
+        if video_duration is None and isinstance(result, dict):
+            video_duration = _safe_float(result.get("source_duration_sec"))
+        pipeline_total = (
+            execution.get("total_duration_sec")
+            if execution
+            else (result or {}).get("total_duration_sec")
+        )
+        pipeline_total_f = _safe_float(pipeline_total)
+
         row = {
             "timestamp": _utc_now_isoz(),
             "job_id": job.get("job_id"),
@@ -1524,15 +1552,16 @@ def _record_run_timing(job: dict, result: Optional[dict]) -> None:
             "status": job.get("status"),
             "source_mode": job.get("source_mode"),
             "video_path": job.get("video_path"),
+            "video_duration_sec": video_duration,
             "elapsed_sec": elapsed,
-            "pipeline_total_sec": execution.get("total_duration_sec")
-            if execution
-            else (result or {}).get("total_duration_sec"),
+            "pipeline_total_sec": pipeline_total,
             "phase_durations_sec": phase_durations,
             "covers_saved": (result or {}).get("covers_saved"),
             "error_codes": (result or {}).get("error_codes", []),
             "decision_log_path": decision_log_path,
         }
+        if pipeline_total_f is not None and video_duration and video_duration > 0:
+            row["latency_ms_per_video_sec"] = round((pipeline_total_f * 1000.0) / video_duration, 1)
         pod_timing = (result or {}).get("_pod_job_timing") if isinstance(result, dict) else None
         if isinstance(pod_timing, dict):
             row["pod_job_timing"] = pod_timing
@@ -1767,6 +1796,84 @@ def _summarize_slowest_phases(runs: List[dict], top_n: int = 5) -> List[dict]:
         )
     out.sort(key=lambda x: x["avg_sec"], reverse=True)
     return out[: max(1, int(top_n))]
+
+
+def _recent_latency_snapshot(runs: Optional[List[dict]] = None, limit: int = 12) -> dict:
+    rows = runs if runs is not None else _load_recent_run_timings(limit=limit)
+    samples = []
+    for row in rows or []:
+        val = _safe_float(row.get("latency_ms_per_video_sec"))
+        if val is None:
+            pipeline = _safe_float(row.get("pipeline_total_sec"))
+            duration = _safe_float(row.get("video_duration_sec"))
+            if pipeline is not None and duration and duration > 0:
+                val = (pipeline * 1000.0) / duration
+        if val is not None and val > 0:
+            samples.append(float(val))
+        if len(samples) >= limit:
+            break
+    avg = (sum(samples) / len(samples)) if samples else None
+    return {
+        "sample_count": len(samples),
+        "latency_ms_per_video_sec": round(avg, 1) if avg is not None else None,
+        "label": f"{round(avg):.0f} ms/video-sec" if avg is not None else "no samples",
+    }
+
+
+def _backend_status_snapshot() -> dict:
+    with _backend_lock:
+        backend = _backend_instance
+    if backend is not None and hasattr(backend, "status_snapshot"):
+        try:
+            return backend.status_snapshot(probe_worker=True, timeout_sec=0.75)
+        except Exception as exc:  # noqa: BLE001 - display-only
+            return {
+                "backend": getattr(backend, "name", os.environ.get("AMG_JOB_BACKEND", "local")),
+                "warm_pod_status": "unknown",
+                "error": str(exc)[:160],
+            }
+    return {
+        "backend": os.environ.get("AMG_JOB_BACKEND", "local"),
+        "warm_pod_status": "not-created",
+        "active_jobs": 0,
+    }
+
+
+def _process_observability_snapshot(*, running: List[dict], queued: List[dict]) -> dict:
+    max_active = _dispatcher_max_active_jobs()
+    used = min(1.0, (len(running) + len(queued) * 0.25) / max(1, max_active))
+    backend = _backend_status_snapshot()
+    pod_capacity = backend.get("pod_capacity") if isinstance(backend.get("pod_capacity"), dict) else {}
+    pod_latency = backend.get("pod_latency") if isinstance(backend.get("pod_latency"), dict) else {}
+    latency = pod_latency or _recent_latency_snapshot(limit=12)
+    used_capacity = pod_capacity.get("used_system_capacity")
+    if used_capacity is None:
+        used_capacity = used
+    current_phase = None
+    for job in running:
+        if job.get("current_phase"):
+            current_phase = str(job.get("current_phase")).replace("_", " ")
+            break
+    return {
+        "backend": backend.get("backend") or os.environ.get("AMG_JOB_BACKEND", "local"),
+        "warm_pod_status": backend.get("warm_pod_status") or "unknown",
+        "warm_pod_id": backend.get("warm_pod_id"),
+        "active_jobs": pod_capacity.get("active_jobs", len(running)),
+        "queued_jobs": pod_capacity.get("queued_jobs", len(queued)),
+        "max_active_jobs": pod_capacity.get("max_active_jobs", max_active),
+        "readiness_state": pod_capacity.get("readiness_state") or ("working" if running or queued else "idle"),
+        "used_capacity": round(float(used_capacity or 0.0), 3),
+        "used_capacity_pct": int(round(float(used_capacity or 0.0) * 100)),
+        "latency_label": (
+            f"{round(float(latency.get('latency_ms_per_unit'))):.0f} ms/video-sec"
+            if latency.get("latency_ms_per_unit") is not None
+            else latency.get("label", "no samples")
+        ),
+        "latency_sample_count": latency.get("sample_count", 0),
+        "slowest_current_phase": current_phase,
+        "pod_capacity_error": backend.get("pod_capacity_error"),
+        "pod_latency_error": backend.get("pod_latency_error"),
+    }
 
 
 def _latest_run_log_for_scene(scene_id: str) -> Optional[Path]:
@@ -2381,6 +2488,7 @@ def _process_jobs_view() -> dict:
         "completed_jobs": completed_jobs,
         "running_count": len(running),
         "queued_count": len(queued),
+        "observability": _process_observability_snapshot(running=running, queued=queued),
     }
 
 
@@ -3025,6 +3133,7 @@ def create_app() -> FastAPI:
         finalized_items: list[dict] = []
         contact_sheet = None
         insight = None
+        analysis = None
         provided_thumb_report = None
         soft_thumbnail = None
         kept_bundle = {"kept_count": 0, "kept_folder_path": None, "kept_zip_path": None}
@@ -3035,6 +3144,7 @@ def create_app() -> FastAPI:
             if sheets:
                 contact_sheet = sheets[0]
             insight = _load_insight(work_dir)
+            analysis = _load_scene_analysis(work_dir)
             provided_thumb_report = _load_provided_thumb_report(work_dir)
             soft_thumbnail = _load_soft_thumbnail(work_dir)
             reviewed_kept = []
@@ -3077,6 +3187,7 @@ def create_app() -> FastAPI:
                 "covers": covers,
                 "contact_sheet": contact_sheet,
                 "insight": insight,
+                "analysis": analysis,
                 "provided_thumb_report": provided_thumb_report,
                 "soft_thumbnail": soft_thumbnail,
                 "reviewed": reviewed,

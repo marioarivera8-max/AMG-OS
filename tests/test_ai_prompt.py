@@ -20,6 +20,11 @@ class TestBuildScoringPrompt:
         assert "POSITION:" in prompt
         assert "GENRES:" in prompt
         assert "SUBGENRES:" in prompt
+        assert "CONTENT_FLAGS:" in prompt
+        assert "CONTENT_FLAG_CONFIDENCE:" in prompt
+        assert "BLOOD" in prompt
+        assert "URINE" in prompt
+        assert "FECES" in prompt
         assert "DOGGY_STYLE" in prompt
         assert "BLOWJOB_KNEELING" in prompt
         assert "STEP_FAMILY" in prompt
@@ -53,6 +58,7 @@ class TestBuildScoringPrompt:
         assert "PENETRATION_VISIBLE:" in prompt
         assert "POSITION:" in prompt
         assert "GENRES:" in prompt
+        assert "CONTENT_FLAGS:" in prompt
         # Should be much shorter than full prompt
         full = build_scoring_prompt()
         assert len(prompt) < len(full) / 2
@@ -109,6 +115,8 @@ class TestParseAiResponse:
         POSITION_CONFIDENCE: 0.82
         GENRES: straight, group
         SUBGENRES: teen, squirting, casting_couch, unknown_tag
+        CONTENT_FLAGS: pee, poop, blood, nope
+        CONTENT_FLAG_CONFIDENCE: 0.76
         END
         """
         result = parse_ai_response(text)
@@ -117,6 +125,18 @@ class TestParseAiResponse:
         assert result.position_confidence == 0.82
         assert result.genre_tags == ["STRAIGHT", "GROUP"]
         assert result.subgenre_tags == ["TEEN_18_PLUS", "SQUIRTING", "CASTING_COUCH"]
+        assert result.sensitive_content_flags == ["URINE", "FECES", "BLOOD"]
+        assert result.sensitive_content_confidence == 0.76
+
+    def test_position_aliases_normalize_for_coverage(self):
+        from amg.config import normalize_position_label
+
+        assert normalize_position_label("side") == "SPOON"
+        assert normalize_position_label("doggy") == "DOGGY_STYLE"
+        assert normalize_position_label("oral") == "ORAL_BJ"
+        assert normalize_position_label("pussy licking") == "ORAL_CUNN"
+        assert normalize_position_label("vibrator") == "TOY"
+        assert normalize_position_label("group sex") == "GROUP"
 
     def test_tier_a_fail(self):
         text = """

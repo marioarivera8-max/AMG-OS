@@ -7,7 +7,12 @@ capped at 100, with calibration text to reduce score compression in the
 DUAL/TRIPLE; GAZE label for filenames only).
 """
 from typing import List, Optional
-from amg.config import GENRE_LABELS, POSITION_LABELS, SUBGENRE_LABELS
+from amg.config import (
+    GENRE_LABELS,
+    POSITION_LABELS,
+    SENSITIVE_CONTENT_FLAG_LABELS,
+    SUBGENRE_LABELS,
+)
 from amg.scoring.market_profile import build_market_profile_note
 
 
@@ -23,12 +28,18 @@ def _taxonomy_section() -> str:
     position_labels = ", ".join(POSITION_LABELS)
     genre_labels = ", ".join(GENRE_LABELS)
     subgenre_labels = ", ".join(SUBGENRE_LABELS)
+    sensitive_labels = ", ".join(SENSITIVE_CONTENT_FLAG_LABELS)
     return f"""
 POSITION / GENRE TAXONOMY
 
 Return one POSITION label from the allowed list below. Choose the most specific
-visible position; if the frame is a transition, unclear, or not a sex-act
-frame, use OTHER with low confidence.
+visible position or sex act. Use OTHER only when the frame is a transition,
+not a sex-act/nude retail frame, or genuinely unclear after inspection.
+
+Do not overuse OTHER. If the visible act is clear, map common descriptions to
+the closest allowed label: doggy/from-behind -> DOGGY_STYLE, side/spooning ->
+SPOON, blowjob/oral on male -> ORAL_BJ, cunnilingus/oral on female ->
+ORAL_CUNN, toy/dildo/vibrator -> TOY, multi-performer action -> GROUP.
 
 Allowed POSITION labels:
 {position_labels}
@@ -42,6 +53,15 @@ Allowed GENRES:
 
 Allowed SUBGENRES:
 {subgenre_labels}
+
+CONTENT WARNING FLAGS
+
+Flag visible blood, urine, or feces/scat for operator review. These are review
+warnings, not automatic rejection. Do not penalize score solely because a flag
+is present; still score thumbnail quality normally.
+
+Allowed CONTENT_FLAGS:
+{sensitive_labels}
 """
 
 
@@ -218,6 +238,8 @@ POSITION: <one allowed POSITION label>
 POSITION_CONFIDENCE: <0.00-1.00>
 GENRES: <comma-separated allowed GENRES, or NONE>
 SUBGENRES: <comma-separated allowed SUBGENRES, or NONE>
+CONTENT_FLAGS: <comma-separated allowed CONTENT_FLAGS, or NONE>
+CONTENT_FLAG_CONFIDENCE: <0.00-1.00>
 END
 
 GAZE field semantics (v11.1.1 — be conservative):
@@ -285,6 +307,8 @@ POSITION: <one allowed POSITION label>
 POSITION_CONFIDENCE: <0.00-1.00>
 GENRES: <comma-separated allowed GENRES, or NONE>
 SUBGENRES: <comma-separated allowed SUBGENRES, or NONE>
+CONTENT_FLAGS: <comma-separated allowed CONTENT_FLAGS, or NONE>
+CONTENT_FLAG_CONFIDENCE: <0.00-1.00>
 END
 """
 
@@ -354,6 +378,7 @@ def build_enriched_title_prompt(
     n_suggestions: int = 5,
     top_examples: Optional[List[dict]] = None,
     retrieval_scope: str = "titles",
+    analysis_context: str = "",
 ) -> str:
     """Title-generation prompt enriched with vision insight + position rollup.
 
@@ -411,6 +436,7 @@ SCENE CONTEXT:
   Action summary: {action}
   Mood: {mood}
   Position rollup across selected covers: {pos_str}
+  AMG scene analysis: {analysis_context or "(none)"}
   Seed categories from scene signals: {seed_categories}
   Seed tags from scene signals: {seed_tags}
   Retrieval scope: {retrieval_scope}

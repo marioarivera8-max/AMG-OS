@@ -19,6 +19,7 @@ Usage:
 import json
 import logging
 import sys
+import io
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -29,6 +30,22 @@ from amg.config import LOGS_DIR, LOG_LEVEL, LOG_DATE_FORMAT
 # Module-level state
 _initialized = False
 _current_run_log_path: Optional[Path] = None
+
+
+def _configure_text_stream(stream):
+    try:
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        return stream
+    except Exception:
+        pass
+    try:
+        buffer = getattr(stream, "buffer", None)
+        if buffer is not None:
+            return io.TextIOWrapper(buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    except Exception:
+        pass
+    return stream
 
 
 def init_logging(level: str = None, run_log_name: Optional[str] = None) -> None:
@@ -44,7 +61,7 @@ def init_logging(level: str = None, run_log_name: Optional[str] = None) -> None:
     log_level = getattr(logging, (level or LOG_LEVEL).upper(), logging.INFO)
 
     # Console handler (human-readable)
-    console = logging.StreamHandler(sys.stdout)
+    console = logging.StreamHandler(_configure_text_stream(sys.stdout))
     console.setLevel(log_level)
     console.setFormatter(_HumanFormatter())
 
@@ -54,7 +71,7 @@ def init_logging(level: str = None, run_log_name: Optional[str] = None) -> None:
     structured_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
     structured_path = structured_dir / f"{today}.jsonl"
-    structured_handler = logging.FileHandler(structured_path)
+    structured_handler = logging.FileHandler(structured_path, encoding="utf-8")
     structured_handler.setLevel(logging.DEBUG)  # Capture everything in structured log
     structured_handler.setFormatter(_JSONFormatter())
 
@@ -74,7 +91,7 @@ def init_logging(level: str = None, run_log_name: Optional[str] = None) -> None:
         # Sanitize run_log_name
         safe_name = "".join(c if c.isalnum() or c in "_-." else "_" for c in run_log_name)[:80]
         run_path = runs_dir / f"{safe_name}_{ts}.log"
-        run_handler = logging.FileHandler(run_path)
+        run_handler = logging.FileHandler(run_path, encoding="utf-8")
         run_handler.setLevel(logging.DEBUG)
         run_handler.setFormatter(_HumanFormatter())
         root.addHandler(run_handler)

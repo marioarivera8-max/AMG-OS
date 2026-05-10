@@ -206,6 +206,16 @@ def check_distribution_ready(scene_id: str, verbose: bool = True) -> dict:
         result["warnings"].append(f"Only {cover_count} covers (below {COVER_FLOOR})")
 
     # ── Check 6: Per-platform readiness ──
+    sensitive = ((decision_log.get("review_flags") or {}).get("sensitive_content") or {})
+    if sensitive.get("flagged"):
+        flags = ", ".join(sensitive.get("flags") or [])
+        result["checks"].append({
+            "name": "Sensitive content review flags",
+            "passed": True,
+            "detail": flags or "flagged",
+        })
+        result["warnings"].append(f"Sensitive content flagged for review: {flags}")
+
     target_platforms = review_meta["target_platforms"]
     if not target_platforms:
         result["warnings"].append("No target platforms selected")
@@ -307,6 +317,11 @@ def _validate_platform_metadata(
         compliance = (decision_log or {}).get("execution", {}).get("error_codes", [])
         if "E_COMPLIANCE_NO_2257" in compliance:
             blockers.append("Missing 2257 documentation")
+
+    sensitive = (((decision_log or {}).get("review_flags") or {}).get("sensitive_content") or {})
+    if sensitive.get("flagged"):
+        flags = ", ".join(sensitive.get("flags") or [])
+        warnings.append(f"Sensitive content flagged for operator/platform review: {flags}")
 
     # Individual model releases
     if reqs.get("requires_individual_releases", False):

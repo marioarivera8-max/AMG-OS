@@ -509,6 +509,60 @@ class RunpodBackend(JobBackend):
         except Exception:  # noqa: BLE001 - best-effort
             pass
 
+    def status_snapshot(self, *, probe_worker: bool = False, timeout_sec: float = 1.0) -> Dict[str, Any]:
+        """Return a cheap controller-side view of warm-pod state.
+
+        When ``probe_worker`` is true and a warm pod exists, this also asks the
+        pod worker for its AMG-native capacity and recent latency snapshots.
+        """
+        with self._lifecycle_lock:
+            pod_id = self._warm_pod_id
+            active_jobs = self._active_jobs
+            idle_timer_active = self._idle_timer is not None
+        try:
+            max_active_jobs = int(
+                os.environ.get(
+                    "AMG_RUNPOD_MAX_ACTIVE_PIPELINES",
+                    os.environ.get("AMG_POD_MAX_ACTIVE_PIPELINES", "1"),
+                )
+            )
+        except (TypeError, ValueError):
+            max_active_jobs = 1
+        snap: Dict[str, Any] = {
+            "backend": self.name,
+            "warm_pod_id": pod_id,
+            "warm_pod_status": "warm" if pod_id else "none",
+            "active_jobs": active_jobs,
+            "idle_timer_active": idle_timer_active,
+            "idle_terminate_sec": self._idle_terminate_sec,
+            "max_active_jobs": max(1, max_active_jobs),
+        }
+        if not probe_worker or not pod_id:
+            return snap
+        base = self._pod_base_url(pod_id)
+        try:
+            r = self._session.get(
+                f"{base}/used-system-capacity",
+                headers=self._headers(),
+                timeout=timeout_sec,
+            )
+            if r.status_code == 200:
+                snap["pod_capacity"] = r.json()
+        except Exception as exc:  # noqa: BLE001 - UI-only snapshot
+            snap["pod_capacity_error"] = str(exc)[:160]
+        try:
+            r = self._session.get(
+                f"{base}/latency",
+                params={"media_type": "video"},
+                headers=self._headers(),
+                timeout=timeout_sec,
+            )
+            if r.status_code == 200:
+                snap["pod_latency"] = r.json()
+        except Exception as exc:  # noqa: BLE001 - UI-only snapshot
+            snap["pod_latency_error"] = str(exc)[:160]
+        return snap
+
     # ----- helpers -----
 
     def _pod_base_url(self, pod_id: str) -> str:
@@ -603,9 +657,25 @@ class RunpodBackend(JobBackend):
                 "AMG_ENABLE_POSITION_CLASSIFIER",
                 "AMG_ENABLE_SCENE_INSIGHT",
                 "AMG_ENABLE_PROVIDED_THUMBNAIL_SCORING",
+                "AMG_ENABLE_SCENE_ANALYSIS",
+                "AMG_ENABLE_ANALYSIS_OCR_POLICY",
+                "AMG_ANALYSIS_OCR_MAX_FRAMES",
+                "AMG_ENABLE_PREVIEW_GENERATION",
+                "AMG_PREVIEW_CLIP_COUNT",
+                "AMG_PREVIEW_CLIP_DURATION_SEC",
+                "AMG_PREVIEW_GIF_ENABLED",
+                "AMG_PREVIEW_FFMPEG_BIN",
                 "AMG_SOFT_THUMB_ENABLED",
                 "AMG_SOFT_THUMB_SAMPLE_COUNT",
                 "AMG_COVER_NEARBY_POLISH_ENABLED",
+                "AMG_COVER_BLUR_RESCUE_ENABLED",
+                "AMG_COVER_BLUR_RESCUE_MIN_SCORE",
+                "AMG_COVER_BLUR_RESCUE_SHARPNESS_FLOOR",
+                "AMG_COVER_PRESENCE_GATE_ENABLED",
+                "AMG_COVER_PRESENCE_GATE_MODE",
+                "AMG_COVER_SUSPICIOUS_RECHECK_ENABLED",
+                "AMG_COVER_SUSPICIOUS_RECHECK_MAX",
+                "AMG_COVER_MIN_PENETRATION_CONFIDENCE",
                 "AMG_PROVIDED_THUMB_MAX_SCAN",
                 "AMG_PROVIDED_THUMB_MAX_ACCEPT",
                 "AMG_VISION_MODEL_OVERRIDE",
@@ -623,6 +693,8 @@ class RunpodBackend(JobBackend):
                 "AMG_STREAMING_ANALYSIS_MAX_HEIGHT",
                 "AMG_STREAMING_SEGMENT_COUNT",
                 "AMG_STREAMING_SEGMENT_MIN_DURATION_SEC",
+                "AMG_STREAMING_DEFER_CALIBRATION",
+                "AMG_STREAMING_EARLY_STOP_ENABLED",
                 "AMG_STREAMING_FUSED_AI_WEIGHT",
                 "AMG_STREAMING_FUSED_SHARP_WEIGHT",
                 "AMG_STREAMING_ZONE_BONUS_FINISH",

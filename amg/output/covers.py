@@ -31,6 +31,10 @@ from amg.config import (
     COVER_NEARBY_POLISH_OFFSETS_SEC,
     COVER_NEARBY_POLISH_MIN_SHARPNESS_GAIN,
     COVER_NEARBY_POLISH_MIN_SHARPNESS_GAIN_PCT,
+    COVER_BLUR_RESCUE_ENABLED,
+    COVER_BLUR_RESCUE_MIN_SCORE,
+    COVER_BLUR_RESCUE_SHARPNESS_FLOOR,
+    COVER_BLUR_RESCUE_OFFSETS_SEC,
 )
 from amg.video.reader import VideoReader
 from amg.video.frames import measure_sharpness, is_frame_too_dark
@@ -153,11 +157,6 @@ def save_covers(
 
     saved = []
     base_timestamps = [float(entry.get("timestamp_sec", 0) or 0) for entry in sorted_candidates]
-    polish_timestamps = (
-        _collect_polish_timestamps(sorted_candidates)
-        if COVER_NEARBY_POLISH_ENABLED
-        else []
-    )
 
     cache_hits = 0
     cache_misses = 0
@@ -183,40 +182,52 @@ def save_covers(
         base_disk_indices = list(range(len(base_timestamps)))
         base_disk_timestamps = list(base_timestamps)
 
-    polish_disk_timestamps: List[float] = []
-    if COVER_NEARBY_POLISH_ENABLED and polish_timestamps:
-        if frame_cache is not None:
-            for ts in polish_timestamps:
-                cached = frame_cache.get_full(ts)
-                if cached is not None:
-                    nearby_frame_map[round(float(ts), 3)] = cached
-                    cache_hits += 1
-                else:
-                    polish_disk_timestamps.append(ts)
-                    cache_misses += 1
-        else:
-            polish_disk_timestamps = list(polish_timestamps)
-
-    need_disk_pass = bool(base_disk_timestamps) or bool(polish_disk_timestamps)
+    need_disk_pass = bool(base_disk_timestamps)
     if need_disk_pass:
         with VideoReader(video_path) as vr:
             if base_disk_timestamps:
                 disk_frames = vr.get_frames_at(base_disk_timestamps)
                 for idx_in_sorted, frame in zip(base_disk_indices, disk_frames):
                     base_frame_by_idx[idx_in_sorted] = frame
-            if polish_disk_timestamps:
-                polish_frames = vr.get_frames_at(polish_disk_timestamps)
-                for ts, frame in zip(polish_disk_timestamps, polish_frames):
-                    if frame is None:
-                        continue
-                    nearby_frame_map[round(float(ts), 3)] = frame
+
+    base_sharpness_by_idx: Dict[int, float] = {}
+    for idx, entry in enumerate(sorted_candidates):
+        frame = base_frame_by_idx.get(idx)
+        if frame is None and not entry.get("_analysis_frame_only"):
+            frame = entry.get("frame")
+        if frame is None:
+            continue
+        base_sharpness_by_idx[idx] = measure_sharpness(frame)
+
+    nearby_timestamps = _collect_needed_nearby_timestamps(sorted_candidates, base_sharpness_by_idx)
+    nearby_disk_timestamps: List[float] = []
+    if nearby_timestamps:
+        if frame_cache is not None:
+            for ts in nearby_timestamps:
+                cached = frame_cache.get_full(ts)
+                if cached is not None:
+                    nearby_frame_map[round(float(ts), 3)] = cached
+                    cache_hits += 1
+                else:
+                    nearby_disk_timestamps.append(ts)
+                    cache_misses += 1
+        else:
+            nearby_disk_timestamps = list(nearby_timestamps)
+    if nearby_disk_timestamps:
+        with VideoReader(video_path) as vr:
+            nearby_frames = vr.get_frames_at(nearby_disk_timestamps)
+            for ts, frame in zip(nearby_disk_timestamps, nearby_frames):
+                if frame is None:
+                    continue
+                nearby_frame_map[round(float(ts), 3)] = frame
 
     if frame_cache is not None:
         log.info(
             "save_covers cache stats",
             hits=cache_hits,
             misses=cache_misses,
-            re_decode=need_disk_pass,
+            re_decode=bool(base_disk_timestamps or nearby_disk_timestamps),
+            nearby_requested=len(nearby_timestamps),
         )
 
     for rank, entry in enumerate(sorted_candidates, start=1):
@@ -231,8 +242,25 @@ def save_covers(
             continue
 
         score = scored.score if scored else 0
-        if COVER_NEARBY_POLISH_ENABLED and score >= COVER_NEARBY_POLISH_MIN_SCORE:
-            ts, full_frame = _polish_nearby_frame(ts, full_frame, nearby_frames_by_ts=nearby_frame_map)
+        blur_rescue = {}
+        polish = {}
+        if COVER_BLUR_RESCUE_ENABLED and score >= COVER_BLUR_RESCUE_MIN_SCORE:
+            ts, full_frame, blur_rescue = _rescue_blurry_frame(
+                ts,
+                full_frame,
+                nearby_frames_by_ts=nearby_frame_map,
+            )
+        if (
+            COVER_NEARBY_POLISH_ENABLED
+            and score >= COVER_NEARBY_POLISH_MIN_SCORE
+            and not blur_rescue.get("applied")
+        ):
+            ts, full_frame, polish = _polish_nearby_frame(
+                ts,
+                full_frame,
+                nearby_frames_by_ts=nearby_frame_map,
+            )
+        output_sharpness = measure_sharpness(full_frame)
         type_ = scored.type_ if scored else "UNKNOWN"
         gaze = scored.gaze if scored else "UNKNOWN"
         tier = entry.get("tier", "")
@@ -262,6 +290,9 @@ def save_covers(
             "filename": filename,
             "timestamp_sec": ts,
             "score": score,
+            "output_sharpness": round(float(output_sharpness), 2),
+            "blur_rescue": blur_rescue or None,
+            "nearby_polish": polish or None,
             "type": type_,
             "gaze": gaze,
             "tier": tier,
@@ -271,11 +302,20 @@ def save_covers(
             "position_segment_label": entry.get("position_segment_label"),
             "position_segment_start_sec": entry.get("position_segment_start_sec"),
             "position_segment_end_sec": entry.get("position_segment_end_sec"),
+            "analysis_section_tag": entry.get("analysis_section_tag"),
             "genre_tags": list(entry.get("genre_tags", []) or []),
             "subgenre_tags": list(entry.get("subgenre_tags", []) or []),
+            "sensitive_content_flags": list(
+                entry.get("sensitive_content_flags", getattr(scored, "sensitive_content_flags", [])) or []
+            ),
+            "sensitive_content_confidence": entry.get(
+                "sensitive_content_confidence",
+                getattr(scored, "sensitive_content_confidence", 0.0),
+            ),
             "penetration_visible": bool(getattr(scored, "penetration_visible", False)) if scored else False,
             "penetration_confidence": float(getattr(scored, "penetration_confidence", 0.0) or 0.0) if scored else 0.0,
             "action_evidence": getattr(scored, "action_evidence", "NONE") if scored else "NONE",
+            "cover_validation": entry.get("cover_validation"),
             "verified": verified,
             "verification_error": error,
         })
@@ -289,14 +329,14 @@ def _polish_nearby_frame(
     base_frame,
     *,
     nearby_frames_by_ts: Optional[Dict[float, Any]] = None,
-) -> tuple[float, Any]:
+) -> tuple[float, Any, dict]:
     """
     Try a few nearby timestamps and keep the sharpest frame if meaningfully better.
 
     This is a localized rescue for near-miss blur on otherwise strong picks.
     """
     if base_frame is None:
-        return ts, base_frame
+        return ts, base_frame, {"applied": False, "reason": "missing_base_frame"}
 
     base_sharp = measure_sharpness(base_frame)
     best_ts = ts
@@ -326,20 +366,124 @@ def _polish_nearby_frame(
             sharp_from=round(float(base_sharp), 1),
             sharp_to=round(float(best_sharp), 1),
         )
-        return best_ts, best_frame
-    return ts, base_frame
+        return best_ts, best_frame, {
+            "applied": True,
+            "from_ts": round(float(ts), 3),
+            "to_ts": round(float(best_ts), 3),
+            "sharpness_before": round(float(base_sharp), 2),
+            "sharpness_after": round(float(best_sharp), 2),
+        }
+    return ts, base_frame, {
+        "applied": False,
+        "sharpness_before": round(float(base_sharp), 2),
+        "sharpness_after": round(float(best_sharp), 2),
+    }
 
 
-def _collect_polish_timestamps(candidates: List[dict]) -> List[float]:
+def _rescue_blurry_frame(
+    ts: float,
+    base_frame,
+    *,
+    nearby_frames_by_ts: Optional[Dict[float, Any]] = None,
+) -> tuple[float, Any, dict]:
+    if base_frame is None:
+        return ts, base_frame, {"applied": False, "reason": "missing_base_frame"}
+    floor = float(COVER_BLUR_RESCUE_SHARPNESS_FLOOR or 0.0)
+    if floor <= 0:
+        return ts, base_frame, {"applied": False, "reason": "disabled_floor"}
+
+    base_sharp = measure_sharpness(base_frame)
+    if base_sharp >= floor:
+        return ts, base_frame, {
+            "applied": False,
+            "reason": "already_sharp",
+            "sharpness_before": round(float(base_sharp), 2),
+            "sharpness_floor": round(floor, 2),
+        }
+
+    for dt in sorted(COVER_BLUR_RESCUE_OFFSETS_SEC, key=lambda x: (abs(float(x)), float(x) < 0)):
+        cand_ts = max(0.0, float(ts) + float(dt))
+        cand = nearby_frames_by_ts.get(round(cand_ts, 3)) if nearby_frames_by_ts else None
+        if cand is None or is_frame_too_dark(cand):
+            continue
+        sharp = measure_sharpness(cand)
+        if sharp >= floor:
+            log.info(
+                "Blur rescue selected closest sharp nearby frame",
+                from_ts=round(float(ts), 3),
+                to_ts=round(float(cand_ts), 3),
+                sharp_from=round(float(base_sharp), 1),
+                sharp_to=round(float(sharp), 1),
+                floor=round(floor, 1),
+            )
+            return cand_ts, cand, {
+                "applied": True,
+                "from_ts": round(float(ts), 3),
+                "to_ts": round(float(cand_ts), 3),
+                "offset_sec": round(float(dt), 3),
+                "sharpness_before": round(float(base_sharp), 2),
+                "sharpness_after": round(float(sharp), 2),
+                "sharpness_floor": round(floor, 2),
+            }
+
+    return ts, base_frame, {
+        "applied": False,
+        "reason": "no_nearby_frame_cleared_floor",
+        "sharpness_before": round(float(base_sharp), 2),
+        "sharpness_floor": round(floor, 2),
+    }
+
+
+def _collect_nearby_timestamps(candidates: List[dict]) -> List[float]:
     out: List[float] = []
     seen: set[float] = set()
     for entry in candidates:
         scored = entry.get("scored_frame")
         score = float(scored.score) if scored and getattr(scored, "score", None) is not None else 0.0
-        if score < COVER_NEARBY_POLISH_MIN_SCORE:
-            continue
         base_ts = float(entry.get("timestamp_sec", 0) or 0)
-        for dt in COVER_NEARBY_POLISH_OFFSETS_SEC:
+        offsets: List[float] = []
+        if COVER_BLUR_RESCUE_ENABLED and score >= COVER_BLUR_RESCUE_MIN_SCORE:
+            offsets.extend(float(x) for x in COVER_BLUR_RESCUE_OFFSETS_SEC)
+        if COVER_NEARBY_POLISH_ENABLED and score >= COVER_NEARBY_POLISH_MIN_SCORE:
+            offsets.extend(float(x) for x in COVER_NEARBY_POLISH_OFFSETS_SEC)
+        for dt in offsets:
+            ts = round(max(0.0, base_ts + float(dt)), 3)
+            if ts in seen:
+                continue
+            seen.add(ts)
+            out.append(ts)
+    return out
+
+
+def _collect_needed_nearby_timestamps(
+    candidates: List[dict],
+    base_sharpness_by_idx: Dict[int, float],
+) -> List[float]:
+    """Return only nearby timestamps that can affect final output.
+
+    Blur rescue only needs neighbors when the full-res selected frame is
+    actually below the rescue floor. This keeps fast streaming runs from
+    decoding ten nearby frames for every already-sharp cover.
+    """
+    out: List[float] = []
+    seen: set[float] = set()
+    floor = float(COVER_BLUR_RESCUE_SHARPNESS_FLOOR or 0.0)
+    for idx, entry in enumerate(candidates):
+        scored = entry.get("scored_frame")
+        score = float(scored.score) if scored and getattr(scored, "score", None) is not None else 0.0
+        base_ts = float(entry.get("timestamp_sec", 0) or 0)
+        base_sharp = float(base_sharpness_by_idx.get(idx, 0.0) or 0.0)
+        offsets: List[float] = []
+        if (
+            COVER_BLUR_RESCUE_ENABLED
+            and score >= COVER_BLUR_RESCUE_MIN_SCORE
+            and floor > 0
+            and base_sharp < floor
+        ):
+            offsets.extend(float(x) for x in COVER_BLUR_RESCUE_OFFSETS_SEC)
+        if COVER_NEARBY_POLISH_ENABLED and score >= COVER_NEARBY_POLISH_MIN_SCORE:
+            offsets.extend(float(x) for x in COVER_NEARBY_POLISH_OFFSETS_SEC)
+        for dt in offsets:
             ts = round(max(0.0, base_ts + float(dt)), 3)
             if ts in seen:
                 continue
@@ -481,6 +625,8 @@ def score_and_save_provided_thumbnails(
                 "position_segment_end_sec": None,
                 "genre_tags": list(getattr(scored, "genre_tags", []) or []),
                 "subgenre_tags": list(getattr(scored, "subgenre_tags", []) or []),
+                "sensitive_content_flags": list(getattr(scored, "sensitive_content_flags", []) or []),
+                "sensitive_content_confidence": float(getattr(scored, "sensitive_content_confidence", 0.0) or 0.0),
                 "penetration_visible": bool(scored.penetration_visible),
                 "penetration_confidence": float(scored.penetration_confidence or 0.0),
                 "action_evidence": scored.action_evidence,

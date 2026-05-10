@@ -31,10 +31,12 @@ from typing import Dict, List, Optional
 
 from amg.config import (
     GENRE_LABELS,
+    SENSITIVE_CONTENT_FLAG_LABELS,
     SUBGENRE_LABELS,
     SCORE_MAX,
     normalize_genre_label,
     normalize_position_label,
+    normalize_sensitive_content_flag,
     normalize_subgenre_label,
 )
 
@@ -60,6 +62,8 @@ class ScoredFrame:
     position_confidence: float = 0.0
     genre_tags: List[str] = field(default_factory=list)
     subgenre_tags: List[str] = field(default_factory=list)
+    sensitive_content_flags: List[str] = field(default_factory=list)
+    sensitive_content_confidence: float = 0.0
 
     parse_succeeded: bool = False
     model_score_raw: Optional[float] = None
@@ -84,6 +88,8 @@ _RE_POSITION = re.compile(r'POSITION:\s*([A-Z0-9_\- ]+)', re.IGNORECASE)
 _RE_POS_CONF = re.compile(r'POSITION_CONFIDENCE:\s*(-?\d+\.?\d*)', re.IGNORECASE)
 _RE_GENRES = re.compile(r'^\s*GENRES:\s*([^\r\n]+)', re.IGNORECASE | re.MULTILINE)
 _RE_SUBGENRES = re.compile(r'^\s*SUBGENRES:\s*([^\r\n]+)', re.IGNORECASE | re.MULTILINE)
+_RE_CONTENT_FLAGS = re.compile(r'^\s*CONTENT_FLAGS:\s*([^\r\n]+)', re.IGNORECASE | re.MULTILINE)
+_RE_CONTENT_FLAG_CONF = re.compile(r'CONTENT_FLAG_CONFIDENCE:\s*(-?\d+\.?\d*)', re.IGNORECASE)
 
 _RETAIL_BASE = 34.0
 _TIER_B_WEIGHTS: Dict[str, float] = {
@@ -235,6 +241,22 @@ def parse_ai_response(raw_text: str) -> ScoredFrame:
             normalize_subgenre_label,
             set(SUBGENRE_LABELS),
         )
+
+    content_flags_match = _RE_CONTENT_FLAGS.search(raw_text)
+    if content_flags_match:
+        result.sensitive_content_flags = _parse_taxonomy_tags(
+            content_flags_match.group(1),
+            normalize_sensitive_content_flag,
+            set(SENSITIVE_CONTENT_FLAG_LABELS),
+        )
+
+    content_conf_match = _RE_CONTENT_FLAG_CONF.search(raw_text)
+    if content_conf_match:
+        try:
+            conf = float(content_conf_match.group(1))
+            result.sensitive_content_confidence = max(0.0, min(1.0, conf))
+        except ValueError:
+            pass
 
     # Backward compatibility: older prompts may emit TYPE=PENETRATION without
     # the explicit penetration fields. In that case, infer visible=true with

@@ -53,6 +53,16 @@ def _score_of(c: dict) -> float:
     return float(scored.score) if scored else 0.0
 
 
+def _selection_rank(c: dict) -> tuple[float, float, float]:
+    """Primary rank is the existing score; later fields only break ties."""
+    motion = 0.0
+    try:
+        motion = float(c.get("motion") or 0.0)
+    except (TypeError, ValueError):
+        motion = 0.0
+    return (_score_of(c), _position_conf_of(c), motion)
+
+
 def _ts_of(c: dict) -> Optional[float]:
     ts = c.get("timestamp_sec")
     return float(ts) if ts is not None else None
@@ -171,6 +181,18 @@ def _mark_segment(c: dict, segment: PositionSegment) -> None:
     c["position_segment_label"] = segment.label
     c["position_segment_start_sec"] = round(segment.start_sec, 3)
     c["position_segment_end_sec"] = round(segment.end_sec, 3)
+    c["analysis_section_tag"] = segment.label
+
+
+def _annotate_analysis_hint(c: dict) -> None:
+    label = _position_label_of(c)
+    if label and label != "OTHER":
+        c.setdefault("analysis_section_tag", label)
+        return
+    scored = c.get("scored_frame")
+    type_ = (getattr(scored, "type_", "") if scored else "").strip().upper()
+    if type_:
+        c.setdefault("analysis_section_tag", type_)
 
 
 def quota_progress(
@@ -227,7 +249,7 @@ def select_quota_fill(
         return [], {"max_total": max_total, "min_total": min_total}
 
     # Sort once by score, highest first.
-    sorted_candidates = sorted(candidates, key=_score_of, reverse=True)
+    sorted_candidates = sorted(candidates, key=_selection_rank, reverse=True)
     position_segments = _build_position_segments(sorted_candidates, quota) if quota.position_segment_coverage else []
     effective_max_total = max_total
     if position_segments:
@@ -266,13 +288,16 @@ def select_quota_fill(
     per_bucket: Dict[str, int] = {k: 0 for k in ["posterpose", "positions", "buildup", "finish", "other"]}
     per_position: Dict[str, int] = {label: 0 for label in selected_labels}
     per_segment: Dict[str, int] = {seg.segment_id: 0 for seg in position_segments}
+    segment_pick_count = 0
+    bucket_pick_count = 0
+    topoff_count = 0
 
     # Pass 0: temporal position coverage. Every detected position run gets
     # first claim on up to three strong shots before generic top-off ranking.
     for segment in position_segments:
         if len(selected) >= effective_max_total:
             break
-        segment_candidates = sorted(segment.candidates, key=_score_of, reverse=True)
+        segment_candidates = sorted(segment.candidates, key=_selection_rank, reverse=True)
         for min_gap in (quota.min_gap_sec, min(8.0, quota.min_gap_sec)):
             for c in segment_candidates:
                 if len(selected) >= effective_max_total:
@@ -287,12 +312,14 @@ def select_quota_fill(
                 if not _is_far_enough(ts, selected_ts, min_gap):
                     continue
                 _mark_segment(c, segment)
+                _annotate_analysis_hint(c)
                 selected.append(c)
                 selected_ids.add(id(c))
                 selected_ts.append(ts)
                 per_bucket["positions"] += 1
                 per_position[segment.label] = per_position.get(segment.label, 0) + 1
                 per_segment[segment.segment_id] += 1
+                segment_pick_count += 1
             if per_segment[segment.segment_id] >= quota.position_segment_target:
                 break
 
@@ -316,10 +343,12 @@ def select_quota_fill(
                 continue
         if not _is_far_enough(ts, selected_ts, quota.min_gap_sec):
             continue
+        _annotate_analysis_hint(c)
         selected.append(c)
         selected_ids.add(id(c))
         selected_ts.append(ts)
         per_bucket[bucket] += 1
+        bucket_pick_count += 1
         if bucket == "positions":
             label = _position_label_of(c)
             per_position[label] = per_position.get(label, 0) + 1
@@ -336,16 +365,21 @@ def select_quota_fill(
                 continue
             if not _is_far_enough(ts, selected_ts, quota.min_gap_sec):
                 continue
+            _annotate_analysis_hint(c)
             selected.append(c)
             selected_ids.add(id(c))
             selected_ts.append(ts)
             per_bucket[_bucket_of(c)] = per_bucket.get(_bucket_of(c), 0) + 1
+            topoff_count += 1
 
     stats = {
         "max_total": max_total,
         "effective_max_total": effective_max_total,
         "min_total": min_total,
         "selected": len(selected),
+        "segment_pick_count": segment_pick_count,
+        "bucket_pick_count": bucket_pick_count,
+        "topoff_count": topoff_count,
         "position_segment_coverage": bool(position_segments),
         "position_segments": len(position_segments),
         **{f"bucket_{k}": v for k, v in per_bucket.items()},

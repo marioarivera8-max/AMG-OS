@@ -112,6 +112,11 @@ def score_frames_parallel(
         entry["position_label_confidence"] = round(float(getattr(scored, "position_confidence", 0.0) or 0.0), 3)
         entry["genre_tags"] = list(getattr(scored, "genre_tags", []) or [])
         entry["subgenre_tags"] = list(getattr(scored, "subgenre_tags", []) or [])
+        entry["sensitive_content_flags"] = list(getattr(scored, "sensitive_content_flags", []) or [])
+        entry["sensitive_content_confidence"] = round(
+            float(getattr(scored, "sensitive_content_confidence", 0.0) or 0.0),
+            3,
+        )
         return idx, entry
 
     def budget_exhausted(batch_start: float) -> bool:

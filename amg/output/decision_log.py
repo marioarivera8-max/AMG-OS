@@ -37,6 +37,8 @@ def write_decision_log(
     fallbacks_used: List[str],
     error_codes: List[str],
     total_duration_sec: float,
+    analysis_path: Optional[Path] = None,
+    analysis_summary: Optional[dict] = None,
     operator: str = None,
     machine_id: str = None,
 ) -> Optional[Path]:
@@ -65,6 +67,8 @@ def write_decision_log(
         fallbacks_used=fallbacks_used,
         error_codes=error_codes,
         total_duration_sec=total_duration_sec,
+        analysis_path=analysis_path,
+        analysis_summary=analysis_summary,
         operator=operator or DEFAULT_OPERATOR,
         machine_id=machine_id or DEFAULT_MACHINE_ID,
     )
@@ -82,7 +86,8 @@ def write_decision_log(
 def _build_record(
     scene_id, scene_path, metadata, studio_info, performer_info, title_info,
     calibration, phase_results, final_candidates, saved_covers,
-    fallbacks_used, error_codes, total_duration_sec, operator, machine_id,
+    fallbacks_used, error_codes, total_duration_sec, analysis_path,
+    analysis_summary, operator, machine_id,
 ) -> dict:
     """Assemble the full decision log record."""
     return {
@@ -99,7 +104,13 @@ def _build_record(
             total_duration_sec, calibration, phase_results, error_codes,
         ),
 
-        "outcomes": _summarize_outcomes(final_candidates, saved_covers, fallbacks_used),
+        "outcomes": _summarize_outcomes(final_candidates, saved_covers, fallbacks_used, phase_results),
+
+        "review_flags": _summarize_review_flags(phase_results),
+        "cover_validation_summary": _summarize_cover_validation(phase_results),
+
+        "analysis_path": str(analysis_path) if analysis_path else None,
+        "analysis_summary": analysis_summary or {},
 
         "resource_usage": _summarize_resources(phase_results),
 
@@ -164,7 +175,7 @@ def _summarize_execution(total_duration_sec, calibration, phase_results, error_c
     }
 
 
-def _summarize_outcomes(final_candidates, saved_covers, fallbacks_used):
+def _summarize_outcomes(final_candidates, saved_covers, fallbacks_used, phase_results=None):
     if not saved_covers:
         return {
             "covers_delivered": 0,
@@ -173,6 +184,7 @@ def _summarize_outcomes(final_candidates, saved_covers, fallbacks_used):
             "top_pick_type": None,
             "top_pick_timestamp_sec": None,
             "fallbacks_used": fallbacks_used or [],
+            "cover_validation_summary": _summarize_cover_validation(phase_results),
         }
 
     scores = [c.get("score", 0) for c in saved_covers]
@@ -197,6 +209,63 @@ def _summarize_outcomes(final_candidates, saved_covers, fallbacks_used):
         "top_pick_type": top.get("type") if top else None,
         "top_pick_timestamp_sec": top.get("timestamp_sec") if top else None,
         "fallbacks_used": fallbacks_used or [],
+        "cover_validation_summary": _summarize_cover_validation(phase_results),
+    }
+
+
+def _summarize_cover_validation(phase_results):
+    data = (phase_results or {}).get("cover_validation")
+    if not isinstance(data, dict):
+        return {
+            "enabled": False,
+            "total_checked": 0,
+            "rejected": 0,
+            "suspicious": 0,
+            "rechecked": 0,
+        }
+    recheck = data.get("recheck") if isinstance(data.get("recheck"), dict) else {}
+    return {
+        "enabled": bool(data.get("enabled")),
+        "mode": data.get("mode"),
+        "total_checked": int(data.get("total_checked", 0) or 0),
+        "eligible": int(data.get("eligible", 0) or 0),
+        "rejected": int(data.get("rejected", 0) or 0),
+        "suspicious": int(data.get("suspicious", 0) or 0),
+        "rechecked": int(recheck.get("attempted", data.get("rechecked", 0)) or 0),
+        "recheck_rejected": int(recheck.get("rejected", data.get("recheck_rejected", 0)) or 0),
+        "reject_counts": data.get("reject_counts", {}),
+        "warning_counts": data.get("warning_counts", {}),
+    }
+
+
+def _summarize_review_flags(phase_results):
+    content = (phase_results or {}).get("content_flags")
+    cover_validation = _summarize_cover_validation(phase_results)
+    cover_needs_review = bool(
+        cover_validation.get("rejected")
+        or cover_validation.get("suspicious")
+        or cover_validation.get("recheck_rejected")
+    )
+    if not isinstance(content, dict):
+        return {
+            "requires_review": cover_needs_review,
+            "sensitive_content": {
+                "flagged": False,
+                "flags": [],
+            },
+            "cover_validation": cover_validation,
+        }
+    return {
+        "requires_review": bool(content.get("flagged")) or cover_needs_review,
+        "sensitive_content": {
+            "flagged": bool(content.get("flagged")),
+            "flags": list(content.get("flags", []) or []),
+            "max_confidence": content.get("max_confidence", 0.0),
+            "max_confidence_by_flag": content.get("max_confidence_by_flag", {}),
+            "counts_by_flag": content.get("counts_by_flag", {}),
+            "evidence": content.get("evidence", []),
+        },
+        "cover_validation": cover_validation,
     }
 
 

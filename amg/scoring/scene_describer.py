@@ -128,6 +128,7 @@ def generate_titles_with_insight(
     language: str = "en",
     ai_client: Optional[AIClient] = None,
     rule_pack: Optional[Dict[str, Any]] = None,
+    analysis_context: str = "",
 ) -> Dict[str, Any]:
     """Generate richer titles using vision insight + position rollup.
 
@@ -200,6 +201,7 @@ def generate_titles_with_insight(
         n_suggestions=n_suggestions,
         top_examples=top_examples,
         retrieval_scope=retrieval_scope if retrieval_scope != "off" else "titles",
+        analysis_context=analysis_context,
     )
     response = ai_client.generate_text(prompt)
     if not response.success:

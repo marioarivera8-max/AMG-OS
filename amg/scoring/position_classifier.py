@@ -41,20 +41,34 @@ def _is_candidate_worthy(entry: dict) -> bool:
         return False
     if scored.score < POSITION_CLASSIFIER_MIN_SCORE:
         return False
-    # Hard gate: we only classify position for penetration-positive frames.
-    if not bool(getattr(scored, "penetration_visible", False)):
+    current_label = normalize_position_label(
+        entry.get("position_label") or getattr(scored, "position_label", "OTHER")
+    )
+    current_conf = float(
+        entry.get("position_label_confidence", getattr(scored, "position_confidence", 0.0)) or 0.0
+    )
+    if current_label != "OTHER" and current_conf >= POSITION_CLASSIFIER_MIN_LABEL_CONF:
         return False
-    if float(getattr(scored, "penetration_confidence", 0.0) or 0.0) < POSITION_CLASSIFIER_MIN_PEN_CONF:
-        return False
-    return True
+
+    type_ = str(getattr(scored, "type_", "") or "").upper()
+    evidence = str(getattr(scored, "action_evidence", "") or "").upper()
+    if type_ == "PENETRATION":
+        if not bool(getattr(scored, "penetration_visible", False)):
+            return False
+        if float(getattr(scored, "penetration_confidence", 0.0) or 0.0) < POSITION_CLASSIFIER_MIN_PEN_CONF:
+            return False
+        return True
+    if type_ in {"SEX_ACT", "FINISH", "BUILDUP"}:
+        return evidence in {"ORAL_CONTACT", "EXPLICIT_PENETRATION", "POSE_NO_CONTACT"} or scored.score >= 75.0
+    return False
 
 
 def _build_prompt() -> str:
     labels = ", ".join(POSITION_LABELS)
     return (
-        "Classify the primary explicit sexual position shown in this frame.\n"
-        "This frame is already penetration-positive, but position can still be uncertain.\n"
-        "If uncertain, choose OTHER.\n"
+        "Classify the primary visible sexual position or sex act shown in this frame.\n"
+        "Use OTHER only for transitions, non-sex-act frames, or genuinely unclear frames.\n"
+        "Prefer the closest allowed specific label when body position or oral/toy/group act is visible.\n"
         f"Allowed labels: {labels}\n\n"
         "Respond exactly in this format:\n"
         "POSITION: <ONE_LABEL>\n"

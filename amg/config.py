@@ -520,7 +520,7 @@ POSITION_CLASSIFIER_MAX_CANDIDATES = _profile_int(
     "AMG_POSITION_CLASSIFIER_MAX_CANDIDATES",
     0,
     balanced=0,
-    fast=0,
+    fast=24,
     turbo=0,
 )
 POSITION_CLASSIFIER_MIN_SCORE = 60.0
@@ -600,11 +600,22 @@ POSITION_LABEL_ALIASES = {
     "FELLATIO": "ORAL_BJ",
     "ORAL": "ORAL_BJ",
     "ORAL_SEX": "ORAL_BJ",
+    "ORAL_MALE": "ORAL_BJ",
+    "SUCKING": "ORAL_BJ",
+    "CUNNILINGUS_ORAL": "ORAL_CUNN",
+    "PUSSY_LICKING": "ORAL_CUNN",
+    "EATING_OUT": "ORAL_CUNN",
+    "ORAL_FEMALE": "ORAL_CUNN",
     "THROAT_FUCK": "FACE_FUCK",
     "RIMMING": "RIM_JOB",
     "ANALINGUS": "RIM_JOB",
     "TEA_BAG": "BALL_LICK",
     "TEABAG": "BALL_LICK",
+    "DILDO": "TOY",
+    "VIBRATOR": "TOY",
+    "TOYS": "TOY",
+    "GROUP_SEX": "GROUP",
+    "MULTI_PERSON": "GROUP",
     "DOUBLE_PENETRATION": "DP",
     "TRIPLE_PENETRATION": "AIRTIGHT",
     "BUKKAKE": "BUKKAKE_CIRCLE",
@@ -723,6 +734,25 @@ SUBGENRE_LABEL_ALIASES = {
 ALL_SUBGENRE_TAGS = sorted(set(SUBGENRE_LABELS))
 ALL_GENRE_TAGS = sorted(set(GENRE_LABELS + SUBGENRE_LABELS))
 
+SENSITIVE_CONTENT_FLAG_LABELS = [
+    "BLOOD",
+    "URINE",
+    "FECES",
+]
+SENSITIVE_CONTENT_FLAG_ALIASES = {
+    "PEE": "URINE",
+    "PISS": "URINE",
+    "WATERSPORTS": "URINE",
+    "WATER_SPORTS": "URINE",
+    "POOP": "FECES",
+    "SCAT": "FECES",
+    "FECAL": "FECES",
+}
+SENSITIVE_CONTENT_FLAG_MIN_CONF = _profile_float(
+    "AMG_SENSITIVE_CONTENT_FLAG_MIN_CONF",
+    0.50,
+)
+
 
 def _normalize_taxonomy_label(raw: str, allowed: list[str], aliases: dict[str, str], default: str) -> str:
     label = str(raw or "").strip().upper().replace("-", "_").replace(" ", "_")
@@ -741,6 +771,15 @@ def normalize_genre_label(raw: str) -> str:
 
 def normalize_subgenre_label(raw: str) -> str:
     return _normalize_taxonomy_label(raw, SUBGENRE_LABELS, SUBGENRE_LABEL_ALIASES, "")
+
+
+def normalize_sensitive_content_flag(raw: str) -> str:
+    return _normalize_taxonomy_label(
+        raw,
+        SENSITIVE_CONTENT_FLAG_LABELS,
+        SENSITIVE_CONTENT_FLAG_ALIASES,
+        "",
+    )
 
 # Fallback thresholds
 ZERO_RATE_FALLBACK_C_TRIGGER = 0.6
@@ -843,6 +882,73 @@ COVER_NEARBY_POLISH_MIN_SCORE = 75.0
 COVER_NEARBY_POLISH_OFFSETS_SEC = (-0.30, -0.15, 0.15, 0.30)
 COVER_NEARBY_POLISH_MIN_SHARPNESS_GAIN = 35.0
 COVER_NEARBY_POLISH_MIN_SHARPNESS_GAIN_PCT = 0.12
+
+# Output-stage blur rescue. Unlike polish, this is active in fast mode because
+# it only runs on already-selected high-value covers and swaps to the closest
+# nearby frame that clears the full-resolution sharpness floor.
+COVER_BLUR_RESCUE_ENABLED = _profile_bool(
+    "AMG_COVER_BLUR_RESCUE_ENABLED",
+    True,
+    fast=True,
+    turbo=False,
+)
+COVER_BLUR_RESCUE_MIN_SCORE = _profile_float(
+    "AMG_COVER_BLUR_RESCUE_MIN_SCORE",
+    70.0,
+    fast=60.0,
+    turbo=90.0,
+)
+COVER_BLUR_RESCUE_SHARPNESS_FLOOR = _profile_float(
+    "AMG_COVER_BLUR_RESCUE_SHARPNESS_FLOOR",
+    250.0,
+    fast=220.0,
+    turbo=0.0,
+)
+COVER_BLUR_RESCUE_OFFSETS_SEC = (-0.12, 0.12, -0.25, 0.25, -0.50, 0.50, -0.75, 0.75, -1.00, 1.00)
+
+# Final cover validity gate. This is deliberately backend-side, not just prompt
+# wording: high-scoring contradictory frames should never be saved as covers.
+COVER_PRESENCE_GATE_ENABLED = _profile_bool(
+    "AMG_COVER_PRESENCE_GATE_ENABLED",
+    True,
+    fast=True,
+    turbo=True,
+)
+COVER_PRESENCE_GATE_MODE = os.environ.get("AMG_COVER_PRESENCE_GATE_MODE", "hard_block").strip().lower()
+if COVER_PRESENCE_GATE_MODE not in {"hard_block", "demote"}:
+    COVER_PRESENCE_GATE_MODE = "hard_block"
+COVER_SUSPICIOUS_RECHECK_ENABLED = _profile_bool(
+    "AMG_COVER_SUSPICIOUS_RECHECK_ENABLED",
+    True,
+    fast=True,
+    turbo=False,
+)
+COVER_SUSPICIOUS_RECHECK_MAX = _profile_int(
+    "AMG_COVER_SUSPICIOUS_RECHECK_MAX",
+    8,
+    fast=8,
+    turbo=0,
+)
+COVER_MIN_PENETRATION_CONFIDENCE = _profile_float(
+    "AMG_COVER_MIN_PENETRATION_CONFIDENCE",
+    0.60,
+)
+
+# Streaming speed flags. Deferring calibration is safe because the streaming
+# path uses its own rolling sharpness floor; calibration is computed lazily only
+# if a fallback needs classic thresholds.
+STREAMING_DEFER_CALIBRATION = _profile_bool(
+    "AMG_STREAMING_DEFER_CALIBRATION",
+    True,
+    fast=True,
+    turbo=True,
+)
+STREAMING_EARLY_STOP_ENABLED = _profile_bool(
+    "AMG_STREAMING_EARLY_STOP_ENABLED",
+    False,
+    fast=False,
+    turbo=False,
+)
 
 # Enhancement values (subtle)
 ENHANCE_SATURATION = 1.10  # +10%
@@ -1126,7 +1232,7 @@ ENABLE_POSITION_CLASSIFIER = _profile_bool(
     "AMG_ENABLE_POSITION_CLASSIFIER",
     False,
     balanced=False,
-    fast=False,
+    fast=True,
     turbo=False,
 )
 ENABLE_SCENE_INSIGHT = _profile_bool(
@@ -1156,6 +1262,50 @@ SOFT_THUMB_SAMPLE_COUNT = _profile_int(
 )
 SOFT_THUMB_MIN_SCORE = 72.0
 SOFT_THUMB_FILENAME = "00_soft_thumbnail.jpg"
+
+# NOXO-inspired AMG-native analysis sidecars. The sidecar itself is cheap and
+# enabled by default; expensive enrichments stay opt-in.
+ENABLE_SCENE_ANALYSIS = _profile_bool(
+    "AMG_ENABLE_SCENE_ANALYSIS",
+    True,
+)
+ENABLE_ANALYSIS_OCR_POLICY = _profile_bool(
+    "AMG_ENABLE_ANALYSIS_OCR_POLICY",
+    False,
+    fast=False,
+    turbo=False,
+)
+ANALYSIS_OCR_MAX_FRAMES = _profile_int(
+    "AMG_ANALYSIS_OCR_MAX_FRAMES",
+    8,
+    fast=4,
+    turbo=0,
+)
+ENABLE_PREVIEW_GENERATION = _profile_bool(
+    "AMG_ENABLE_PREVIEW_GENERATION",
+    False,
+    fast=False,
+    turbo=False,
+)
+PREVIEW_CLIP_COUNT = _profile_int(
+    "AMG_PREVIEW_CLIP_COUNT",
+    3,
+    fast=2,
+    turbo=0,
+)
+PREVIEW_CLIP_DURATION_SEC = _profile_float(
+    "AMG_PREVIEW_CLIP_DURATION_SEC",
+    6.0,
+    fast=5.0,
+    turbo=4.0,
+)
+PREVIEW_GIF_ENABLED = _profile_bool(
+    "AMG_PREVIEW_GIF_ENABLED",
+    False,
+    fast=False,
+    turbo=False,
+)
+PREVIEW_FFMPEG_BIN = os.environ.get("AMG_PREVIEW_FFMPEG_BIN", "ffmpeg")
 
 # DVD compilation
 DVD_OUTPUT_DIR_NAME = "DVD_Output"

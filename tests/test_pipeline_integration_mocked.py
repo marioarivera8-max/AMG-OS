@@ -143,3 +143,26 @@ def test_process_scene_mocked_smoke(monkeypatch, tmp_path):
     assert result["success"] is True
     assert result["covers_saved"] == 1
     assert result["decision_log_path"] == tmp_path / "decision.json"
+    assert result["analysis_path"] == tmp_path / "work" / "scene_analysis.json"
+    assert result["analysis_summary"]["sections_count"] >= 1
+    assert (tmp_path / "work" / "scene_analysis.json").exists()
+
+
+def test_sensitive_content_summary_flags_review():
+    import amg.pipeline as p
+
+    scored = SimpleNamespace(
+        parse_succeeded=True,
+        score=82.0,
+        type_="SEX_ACT",
+        sensitive_content_flags=["PEE", "BLOOD"],
+        sensitive_content_confidence=0.81,
+    )
+    entry = {"timestamp_sec": 42.0, "scored_frame": scored}
+
+    summary = p._summarize_sensitive_content([entry])
+
+    assert summary["flagged"] is True
+    assert summary["flags"] == ["BLOOD", "URINE"]
+    assert summary["max_confidence"] == 0.81
+    assert summary["evidence"][0]["timestamp_sec"] == 42.0

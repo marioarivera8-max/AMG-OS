@@ -295,6 +295,116 @@
     <div class="scene-insight-block">
       {% include "_insight_panel.html" %}
     </div>
+
+    {% if analysis %}
+      <div class="card stage-section" style="margin-top: 12px;">
+        <div class="between" style="align-items: center;">
+          <h3 class="card-section-title" style="margin: 0;">Analysis & Evidence</h3>
+          {% if work_dir %}
+            <a class="btn btn-ghost" href="/artifact?path={{ (work_dir / 'scene_analysis.json') | urlencode }}">sidecar JSON</a>
+          {% endif %}
+        </div>
+
+        <div class="row" style="margin-top: 10px; gap: 8px; flex-wrap: wrap;">
+          <span class="pill info">{{ analysis.summary.sections_count or 0 }} sections</span>
+          <span class="pill neutral">{{ analysis.summary.evidence_count or 0 }} evidence</span>
+          <span class="pill {{ 'warn' if (analysis.summary.policy_flags_count or 0) else 'ok' }}">
+            {{ analysis.summary.policy_flags_count or 0 }} warnings
+          </span>
+          <span class="pill neutral">{{ analysis.summary.preview_outputs_count or 0 }} previews</span>
+        </div>
+
+        {% if analysis.sections %}
+          <div style="margin-top: 12px;">
+            <div class="muted" style="font-size: 12px; margin-bottom: 6px;">Sections</div>
+            <div class="row" style="gap: 8px; flex-wrap: wrap;">
+              {% for sec in analysis.sections[:10] %}
+                <span class="pill">
+                  {{ sec.section_tag }}
+                  {% if sec.thumbnail_timestamp is not none %} @ {{ (sec.thumbnail_timestamp or 0)|round(1) }}s{% endif %}
+                  {% if sec.confidence is not none %} · {{ ((sec.confidence or 0) * 100)|round(0)|int }}%{% endif %}
+                </span>
+              {% endfor %}
+            </div>
+          </div>
+        {% endif %}
+
+        {% if analysis.policy_flags %}
+          <div style="margin-top: 12px;">
+            <div class="muted" style="font-size: 12px; margin-bottom: 6px;">Policy Warnings</div>
+            <div class="stack">
+              {% for flag in analysis.policy_flags[:8] %}
+                <div class="pill warn" style="display: block;">
+                  {{ flag.flag or flag.type }}
+                  {% if flag.timestamp_sec is not none %} · t={{ (flag.timestamp_sec or 0)|round(1) }}s{% endif %}
+                  {% if flag.confidence is not none %} · {{ ((flag.confidence or 0) * 100)|round(0)|int }}%{% endif %}
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        {% endif %}
+
+        {% if analysis.ocr_results %}
+          <div style="margin-top: 12px;">
+            <div class="muted" style="font-size: 12px; margin-bottom: 6px;">OCR</div>
+            <div class="stack">
+              {% for row in analysis.ocr_results[:5] %}
+                <div style="font-size: 12px; border: 1px solid var(--line-soft); border-radius: 6px; padding: 8px;">
+                  <div>{{ row.full_text }}</div>
+                  <div class="muted" style="margin-top: 4px;">
+                    {{ row.source or "ocr" }}
+                    {% if row.time_segment %} · {{ (row.time_segment.start_seconds or 0)|round(1) }}s{% endif %}
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        {% endif %}
+
+        {% if analysis.preview_outputs %}
+          <div style="margin-top: 12px;">
+            <div class="muted" style="font-size: 12px; margin-bottom: 6px;">Previews</div>
+            <div class="grid grid-2" style="gap: 10px;">
+              {% for preview in analysis.preview_outputs %}
+                {% if preview.status == "ok" and preview.path %}
+                  <div style="border: 1px solid var(--line-soft); border-radius: 6px; padding: 8px;">
+                    <video controls preload="metadata" style="width: 100%; border-radius: 6px; border: 1px solid var(--line-soft);">
+                      <source src="/artifact?path={{ preview.path | urlencode }}" type="video/mp4" />
+                    </video>
+                    <div class="cover-meta mono" style="font-size: 11px; margin-top: 6px;">
+                      preview {{ "%02d"|format(preview.index or loop.index) }} · t={{ (preview.timestamp_sec or 0)|round(1) }}s · {{ (preview.duration_sec or 0)|round(1) }}s
+                    </div>
+                    {% if preview.gif_path %}
+                      <a href="/artifact?path={{ preview.gif_path | urlencode }}" style="font-size: 12px;">GIF</a>
+                    {% endif %}
+                  </div>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </div>
+        {% endif %}
+
+        {% if analysis.evidence %}
+          <div style="margin-top: 12px;">
+            <div class="muted" style="font-size: 12px; margin-bottom: 6px;">Key Evidence</div>
+            <div class="stack">
+              {% for ev in analysis.evidence[:10] %}
+                <div class="between" style="font-size: 12px; gap: 10px;">
+                  <span>
+                    <span class="pill neutral">{{ ev.kind }}</span>
+                    {% if ev.timestamp_sec is not none %} t={{ (ev.timestamp_sec or 0)|round(1) }}s{% endif %}
+                    {% if ev.tags %} · {{ ev.tags|join(", ") }}{% endif %}
+                  </span>
+                  {% if ev.frame_path %}
+                    <a href="/artifact?path={{ ev.frame_path | urlencode }}">frame</a>
+                  {% endif %}
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        {% endif %}
+      </div>
+    {% endif %}
   </div>
 
     <details class="card stage-section" style="margin-top: 12px;">
@@ -322,6 +432,23 @@
               {% if not decision_log.input.genres %}<span class="muted">No tags</span>{% endif %}
             </div>
           </div>
+
+          {% set sensitive = (decision_log.review_flags or {}).get('sensitive_content', {}) %}
+          {% if sensitive.flagged %}
+            <div class="card scene-side-card">
+              <h3 class="card-section-title">Review flags</h3>
+              <div class="stack">
+                <div>
+                  {% for f in sensitive.flags or [] %}
+                    <span class="pill warn">{{ f }}</span>
+                  {% endfor %}
+                </div>
+                <div class="muted" style="font-size: 12px;">
+                  Detected in scored frames; review before distribution.
+                </div>
+              </div>
+            </div>
+          {% endif %}
 
           <div class="card scene-side-card">
             <h3 class="card-section-title">Notes</h3>

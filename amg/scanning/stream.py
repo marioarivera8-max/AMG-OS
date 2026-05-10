@@ -516,6 +516,11 @@ def run_stream_scan(
         candidate["position_label_confidence"] = round(float(getattr(scored, "position_confidence", 0.0) or 0.0), 3)
         candidate["genre_tags"] = list(getattr(scored, "genre_tags", []) or [])
         candidate["subgenre_tags"] = list(getattr(scored, "subgenre_tags", []) or [])
+        candidate["sensitive_content_flags"] = list(getattr(scored, "sensitive_content_flags", []) or [])
+        candidate["sensitive_content_confidence"] = round(
+            float(getattr(scored, "sensitive_content_confidence", 0.0) or 0.0),
+            3,
+        )
 
         # Capture the response when scoring "succeeded" but produced
         # nothing the selector can use. This is the silent failure mode

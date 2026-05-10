@@ -3,7 +3,19 @@
   <div class="process-board-top">
     <span class="pill ok">{{ running_count }} running</span>
     <span class="pill">{{ queued_count }} queued</span>
-    <span class="pill neutral">avg 134s/scene</span>
+    <span class="pill neutral">backend {{ observability.backend if observability else "local" }}</span>
+    <span class="pill {{ 'ok' if observability and observability.readiness_state in ['idle', 'working'] else 'warn' }}">
+      warm pod {{ observability.warm_pod_status if observability else "unknown" }}
+    </span>
+    <span class="pill info">
+      capacity {{ observability.used_capacity_pct if observability else 0 }}%
+    </span>
+    <span class="pill neutral">
+      latency {{ observability.latency_label if observability else "no samples" }}
+    </span>
+    {% if observability and observability.slowest_current_phase %}
+      <span class="pill warn">phase {{ observability.slowest_current_phase }}</span>
+    {% endif %}
   </div>
 
   <div class="process-lane">

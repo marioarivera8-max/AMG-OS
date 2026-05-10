@@ -279,6 +279,65 @@ class TestJobs:
         assert "scene" in final["work_dir"]  # original download dir kept
 
 
+class TestObservability:
+    def test_capacity_endpoint_reports_queue_and_running(self, pod_env, tmp_path):
+        pw = pod_env["module"]
+        tracker = pw._JobTracker()
+        tracker.create(
+            "queued1",
+            scene_id="queued",
+            video_path=tmp_path / "queued.mp4",
+            work_dir=tmp_path,
+        )
+        tracker.create(
+            "running1",
+            scene_id="running",
+            video_path=tmp_path / "running.mp4",
+            work_dir=tmp_path,
+        )
+        tracker.update("running1", status="running")
+
+        app = pw.create_app(auth_token=pod_env["token"], tracker=tracker)
+        client = TestClient(app)
+        client.headers["Authorization"] = f"Bearer {pod_env['token']}"
+
+        r = client.get("/used-system-capacity")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["running_jobs"] == 1
+        assert body["queued_jobs"] == 1
+        assert body["max_active_jobs"] >= 1
+        assert 0 <= body["used_system_capacity"] <= 1
+
+    def test_latency_endpoint_uses_completed_video_jobs(self, pod_env, tmp_path):
+        pw = pod_env["module"]
+        tracker = pw._JobTracker()
+        tracker.create(
+            "done1",
+            scene_id="scene",
+            video_path=tmp_path / "scene.mp4",
+            work_dir=tmp_path,
+        )
+        tracker.update(
+            "done1",
+            status="done",
+            pipeline_started_at_ts=100.0,
+            pipeline_finished_at_ts=110.0,
+            result={"success": True, "source_duration_sec": 50.0},
+        )
+
+        app = pw.create_app(auth_token=pod_env["token"], tracker=tracker)
+        client = TestClient(app)
+        client.headers["Authorization"] = f"Bearer {pod_env['token']}"
+
+        r = client.get("/latency?media_type=video")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["unit"] == "video_second"
+        assert body["latency_ms_per_unit"] == 200.0
+        assert body["sample_count"] == 1
+
+
 # --- /jobs/{id}/zip ---------------------------------------------------------
 
 
@@ -301,6 +360,9 @@ class TestJobZip:
         (work_dir / "out").mkdir(parents=True, exist_ok=True)
         (work_dir / "out" / "cover_001.jpg").write_bytes(b"cover-bytes")
         (work_dir / "out" / "insight.json").write_text('{"k":"v"}')
+        (work_dir / "out" / "scene_analysis.json").write_text('{"schema_version":"1.0"}')
+        (work_dir / "out" / "previews").mkdir(parents=True, exist_ok=True)
+        (work_dir / "out" / "previews" / "preview_manifest.json").write_text('{"outputs":[]}')
 
         r = client.get(f"/jobs/{job_id}/zip")
         assert r.status_code == 200
@@ -310,6 +372,8 @@ class TestJobZip:
         names = zf.namelist()
         assert "work_dir/out/cover_001.jpg" in names
         assert "work_dir/out/insight.json" in names
+        assert "work_dir/out/scene_analysis.json" in names
+        assert "work_dir/out/previews/preview_manifest.json" in names
         assert zf.read("work_dir/out/cover_001.jpg") == b"cover-bytes"
 
     def test_zip_includes_decision_log_when_pipeline_returns_path(

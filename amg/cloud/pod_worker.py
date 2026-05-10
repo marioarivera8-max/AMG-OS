@@ -55,6 +55,7 @@ Configuration (env):
 from __future__ import annotations
 
 import io
+import json
 import os
 import secrets as _secrets
 import threading
@@ -66,7 +67,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -105,6 +106,35 @@ def _pod_pipeline_limit() -> int:
         return max(1, int(raw))
     except (TypeError, ValueError):
         return 1
+
+
+def _safe_float(raw: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        if raw is None:
+            return default
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _duration_from_job_result(job: Dict[str, Any]) -> float:
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    for key in ("source_duration_sec", "duration_sec", "video_duration_sec"):
+        val = _safe_float(result.get(key), None)
+        if val and val > 0:
+            return val
+
+    decision_log_path = result.get("decision_log_path")
+    if decision_log_path:
+        try:
+            with open(decision_log_path, "r", encoding="utf-8") as f:
+                dlog = json.load(f)
+            val = _safe_float(((dlog.get("input") or {}).get("duration_sec")), None)
+            if val and val > 0:
+                return val
+        except Exception:
+            pass
+    return 0.0
 
 
 def _get_pipeline_semaphore() -> threading.BoundedSemaphore:
@@ -246,6 +276,77 @@ class _JobTracker:
     def list_ids(self) -> List[str]:
         with self._lock:
             return list(self._order)
+
+    def capacity_snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            jobs = [dict(j) for j in self._jobs.values()]
+        max_active = _pod_pipeline_limit()
+        queued = sum(1 for j in jobs if j.get("status") == "queued")
+        waiting = sum(1 for j in jobs if j.get("status") == "waiting_pipeline")
+        downloading = sum(1 for j in jobs if j.get("status") == "downloading")
+        running = sum(1 for j in jobs if j.get("status") == "running")
+        active = waiting + downloading + running
+        used = min(1.0, (active + queued * 0.25) / max(1, max_active))
+        if running >= max_active:
+            readiness = "busy"
+        elif active or queued:
+            readiness = "working"
+        else:
+            readiness = "idle"
+        return {
+            "active_jobs": active,
+            "queued_jobs": queued,
+            "waiting_jobs": waiting,
+            "downloading_jobs": downloading,
+            "running_jobs": running,
+            "max_active_jobs": max_active,
+            "readiness_state": readiness,
+            "used_system_capacity": round(used, 3),
+        }
+
+    def latency_snapshot(self, media_type: str = "video") -> Dict[str, Any]:
+        media = str(media_type or "video").strip().lower()
+        with self._lock:
+            jobs = [dict(j) for j in self._jobs.values()]
+        samples: List[float] = []
+        recent_rows: List[Dict[str, Any]] = []
+        for job in sorted(jobs, key=lambda j: j.get("pipeline_finished_at_ts") or 0, reverse=True):
+            if job.get("status") != "done":
+                continue
+            start = _safe_float(job.get("pipeline_started_at_ts"), None)
+            finish = _safe_float(job.get("pipeline_finished_at_ts"), None)
+            if start is None or finish is None or finish <= start:
+                continue
+            pipeline_ms = (finish - start) * 1000.0
+            if media == "video":
+                duration = _duration_from_job_result(job)
+                if duration <= 0:
+                    continue
+                value = pipeline_ms / duration
+                unit = "video_second"
+            else:
+                value = pipeline_ms
+                unit = "job"
+            samples.append(value)
+            recent_rows.append(
+                {
+                    "job_id": job.get("job_id"),
+                    "scene_id": job.get("scene_id"),
+                    "pipeline_ms": round(pipeline_ms, 1),
+                    "media_duration_sec": round(_duration_from_job_result(job), 3) if media == "video" else None,
+                    "latency_ms_per_unit": round(value, 1),
+                }
+            )
+            if len(samples) >= 10:
+                break
+        avg = (sum(samples) / len(samples)) if samples else None
+        return {
+            "media_type": media,
+            "unit": unit if samples else ("video_second" if media == "video" else "job"),
+            "latency_ms_per_unit": round(avg, 1) if avg is not None else None,
+            "sample_count": len(samples),
+            "recent": recent_rows,
+        }
 
 
 # ---------- runner ----------
@@ -586,6 +687,17 @@ def create_app(*, auth_token: Optional[str] = None, tracker: Optional[_JobTracke
         if not payload["ok"]:
             raise HTTPException(status_code=503, detail=payload)
         return payload
+
+    @app.get("/used-system-capacity")
+    async def used_system_capacity() -> Dict[str, Any]:
+        return track.capacity_snapshot()
+
+    @app.get("/latency")
+    async def latency(media_type: str = Query("video")) -> Dict[str, Any]:
+        media = str(media_type or "video").strip().lower()
+        if media not in {"video", "image"}:
+            raise HTTPException(status_code=400, detail="media_type must be video or image")
+        return track.latency_snapshot(media_type=media)
 
     @app.post("/jobs/cloud")
     @app.post("/jobs-cloud")

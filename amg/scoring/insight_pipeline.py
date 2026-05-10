@@ -28,6 +28,7 @@ from amg.scoring.scene_describer import (
 )
 from amg.learning.rule_packs import resolve_rule_pack_for_scene
 from amg.review.distribution_gate import validate_metadata_for_platforms
+from amg.analysis.scene_analysis import build_analysis_summary, compact_prompt_context, load_scene_analysis
 from amg.utils.logging import get_logger
 
 log = get_logger("scoring.insight_pipeline")
@@ -72,6 +73,8 @@ def generate_scene_insight_payload(
     cover_paths = [Path(c["path"]) for c in (saved_covers or []) if c.get("path")]
     rule_resolution = resolve_rule_pack_for_scene(video_path.parent.name or video_path.stem)
     active_rule_pack = rule_resolution.get("rule_pack") if isinstance(rule_resolution, dict) else None
+    analysis = load_scene_analysis(work_dir)
+    analysis_context = compact_prompt_context(analysis)
 
     insight_obj = describe_scene_from_covers(
         contact_sheet_path=contact_sheet,
@@ -90,6 +93,7 @@ def generate_scene_insight_payload(
         title_tone=title_tone,
         ai_client=ai_client,
         rule_pack=active_rule_pack,
+        analysis_context=analysis_context,
     )
     target_platforms = list(PLATFORM_REQUIREMENTS.keys())
     metadata_initial = _validate_generated_metadata(
@@ -144,6 +148,8 @@ def generate_scene_insight_payload(
         },
         "insight": insight_obj.to_dict() if insight_obj else None,
         "position_summary": position_summary,
+        "analysis_context": analysis_context,
+        "analysis_summary": build_analysis_summary(analysis) if isinstance(analysis, dict) else {},
         "ai_titles": title_payload.get("titles", []),
         "long_description": title_payload.get("long_description", ""),
         "title_tone": title_payload.get("title_tone", title_tone),

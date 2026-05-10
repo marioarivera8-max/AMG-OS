@@ -110,6 +110,13 @@ def test_distribution_gate_passes_publishable_metadata(monkeypatch, tmp_path):
             "outcomes": {"covers_delivered": 18},
             "input": {"resolution": "1920x1080"},
             "execution": {"error_codes": []},
+            "review_flags": {
+                "requires_review": True,
+                "sensitive_content": {
+                    "flagged": True,
+                    "flags": ["URINE"],
+                },
+            },
         },
     )
     _write_json(
@@ -132,6 +139,8 @@ def test_distribution_gate_passes_publishable_metadata(monkeypatch, tmp_path):
     assert result["overall_ready"] is True
     assert result["per_platform"]["AEBN"]["ready"] is True
     assert result["per_platform"]["AEBN"]["blockers"] == []
+    assert any("Sensitive content flagged" in w for w in result["warnings"])
+    assert any("Sensitive content flagged" in w for w in result["per_platform"]["AEBN"]["warnings"])
 
 
 def test_shared_metadata_validator_marks_skipped_platforms(monkeypatch):

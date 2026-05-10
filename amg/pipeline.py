@@ -41,11 +41,28 @@ from amg.config import (
     ENABLE_POSITION_CLASSIFIER,
     ENABLE_SCENE_INSIGHT,
     ENABLE_PROVIDED_THUMBNAIL_SCORING,
+    ENABLE_SCENE_ANALYSIS,
+    ENABLE_ANALYSIS_OCR_POLICY,
+    ANALYSIS_OCR_MAX_FRAMES,
+    ENABLE_PREVIEW_GENERATION,
+    PREVIEW_CLIP_COUNT,
+    PREVIEW_CLIP_DURATION_SEC,
+    PREVIEW_GIF_ENABLED,
+    STREAMING_DEFER_CALIBRATION,
+    STREAMING_EARLY_STOP_ENABLED,
+    COVER_SUSPICIOUS_RECHECK_MAX,
     SOFT_THUMB_SAMPLE_COUNT,
     SOFT_THUMB_MIN_SCORE,
     SOFT_THUMB_FILENAME,
     STREAMING_SCAN_ENABLED,
+    SENSITIVE_CONTENT_FLAG_MIN_CONF,
     normalize_position_label,
+    normalize_sensitive_content_flag,
+)
+from amg.analysis.scene_analysis import (
+    build_scene_analysis,
+    run_ocr_policy_scan,
+    write_scene_analysis as write_scene_analysis_sidecar,
 )
 from amg.ingest.inventory import find_companion_files, make_work_dir, make_covers_dir
 from amg.ingest.studio_profiles import detect_studio, get_or_create_profile
@@ -72,7 +89,13 @@ from amg.compliance.doc_2257 import verify_2257
 from amg.compliance.audit_log import audit_event
 from amg.output.covers import save_covers, score_and_save_provided_thumbnails
 from amg.output.contact_sheet import build_contact_sheet
+from amg.output.cover_validation import (
+    apply_cover_validation,
+    recheck_suspicious_selected,
+    summarize_cover_validation,
+)
 from amg.output.decision_log import write_decision_log
+from amg.output.previews import generate_preview_outputs
 from amg.output.quota_fill import select_quota_fill, quota_satisfied, quota_progress
 from amg.learning.recorder import record_scene_outcome
 from amg.utils.timing import phase_timer, format_duration
@@ -117,11 +140,84 @@ def _sync_candidate_taxonomy(candidates: List[dict]) -> dict:
         else:
             entry.setdefault("subgenre_tags", [])
 
+        flags = list(getattr(scored, "sensitive_content_flags", []) or [])
+        conf = float(getattr(scored, "sensitive_content_confidence", 0.0) or 0.0)
+        if flags:
+            entry["sensitive_content_flags"] = flags
+            entry["sensitive_content_confidence"] = round(conf, 3)
+            synced += 1
+        else:
+            entry.setdefault("sensitive_content_flags", [])
+            entry.setdefault("sensitive_content_confidence", round(conf, 3))
+
     return {
         "candidates_seen": len(candidates),
         "taxonomy_synced": synced,
         "position_labeled": position_labeled,
         "genre_labeled": genre_labeled,
+    }
+
+
+def _entry_sensitive_flags(entry: dict) -> tuple[list[str], float]:
+    flags = list(entry.get("sensitive_content_flags") or [])
+    conf = entry.get("sensitive_content_confidence")
+    scored = entry.get("scored_frame")
+    if not flags and scored is not None:
+        flags = list(getattr(scored, "sensitive_content_flags", []) or [])
+    flags = [normalize_sensitive_content_flag(flag) for flag in flags]
+    flags = [flag for flag in flags if flag]
+    if conf is None and scored is not None:
+        conf = getattr(scored, "sensitive_content_confidence", 0.0)
+    try:
+        conf_f = max(0.0, min(1.0, float(conf or 0.0)))
+    except (TypeError, ValueError):
+        conf_f = 0.0
+    return flags, conf_f
+
+
+def _summarize_sensitive_content(entries: List[dict]) -> dict:
+    seen = set()
+    frames_checked = 0
+    counts: dict[str, int] = {}
+    max_conf: dict[str, float] = {}
+    evidence = []
+
+    for entry in entries or []:
+        key = id(entry)
+        if key in seen:
+            continue
+        seen.add(key)
+        scored = entry.get("scored_frame")
+        if scored is not None and not getattr(scored, "parse_succeeded", False):
+            continue
+        frames_checked += 1
+        flags, conf = _entry_sensitive_flags(entry)
+        strong_flags = [f for f in flags if conf >= SENSITIVE_CONTENT_FLAG_MIN_CONF]
+        if not strong_flags:
+            continue
+        for flag in strong_flags:
+            counts[flag] = counts.get(flag, 0) + 1
+            max_conf[flag] = max(max_conf.get(flag, 0.0), conf)
+        if len(evidence) < 12:
+            evidence.append({
+                "timestamp_sec": entry.get("timestamp_sec"),
+                "flags": strong_flags,
+                "confidence": round(conf, 3),
+                "score": float(getattr(scored, "score", 0.0) or 0.0) if scored else 0.0,
+                "type": getattr(scored, "type_", None) if scored else None,
+            })
+
+    flags = sorted(counts.keys())
+    return {
+        "enabled": True,
+        "flagged": bool(flags),
+        "flags": flags,
+        "min_confidence": SENSITIVE_CONTENT_FLAG_MIN_CONF,
+        "max_confidence": round(max(max_conf.values()), 3) if max_conf else 0.0,
+        "max_confidence_by_flag": {k: round(v, 3) for k, v in sorted(max_conf.items())},
+        "counts_by_flag": {k: counts[k] for k in sorted(counts)},
+        "frames_checked": frames_checked,
+        "evidence": evidence,
     }
 
 
@@ -273,22 +369,49 @@ def process_scene(
     _emit_progress(10)
 
     # --- PHASE 4: CALIBRATION ---
-    with phase_timer("calibration", PHASE_HARD_TIMEOUT_SEC["calibration"]) as t:
-        calibration = calibrate_thresholds(video_path, duration_sec)
-
-    phase_results["calibration"] = {
-        "duration_sec": t.elapsed,
-        "tier_1_floor": calibration["tier_1_floor"],
+    calibration = {
+        "tier_1_floor": 0.0,
+        "tier_2_floor": 0.0,
+        "tier_3_floor": 0.0,
+        "sharpness_samples": [],
+        "samples_collected": 0,
+        "no_variation": False,
+        "all_blurry": False,
+        "skipped": True,
     }
-    log.info("Calibration complete",
-             tier_1=int(calibration["tier_1_floor"]),
-             tier_2=int(calibration["tier_2_floor"]),
-             tier_3=int(calibration["tier_3_floor"]),
-             samples=calibration["samples_collected"])
 
-    if calibration["all_blurry"]:
-        warnings.append("Source appears entirely blurry")
-        error_codes.append("E_CALIB_ALL_BLURRY")
+    def _ensure_calibration(reason: str = "initial") -> dict:
+        nonlocal calibration
+        if calibration and not calibration.get("skipped"):
+            return calibration
+        with phase_timer("calibration", PHASE_HARD_TIMEOUT_SEC["calibration"]) as t_cal:
+            calibration = calibrate_thresholds(video_path, duration_sec)
+        phase_results["calibration"] = {
+            "duration_sec": t_cal.elapsed,
+            "tier_1_floor": calibration["tier_1_floor"],
+            "deferred": reason != "initial",
+            "reason": reason,
+        }
+        log.info("Calibration complete",
+                 tier_1=int(calibration["tier_1_floor"]),
+                 tier_2=int(calibration["tier_2_floor"]),
+                 tier_3=int(calibration["tier_3_floor"]),
+                 samples=calibration["samples_collected"],
+                 deferred=reason != "initial")
+        if calibration.get("all_blurry") and "E_CALIB_ALL_BLURRY" not in error_codes:
+            warnings.append("Source appears entirely blurry")
+            error_codes.append("E_CALIB_ALL_BLURRY")
+        return calibration
+
+    if STREAMING_SCAN_ENABLED and STREAMING_DEFER_CALIBRATION:
+        phase_results["calibration"] = {
+            "duration_sec": 0.0,
+            "skipped": True,
+            "reason": "streaming_deferred",
+        }
+        log.info("Calibration deferred for streaming scan")
+    else:
+        _ensure_calibration("initial")
     _emit_progress(20)
 
     # Verify Ollama is alive before scoring
@@ -393,6 +516,8 @@ def process_scene(
             "selector_pool": stream_result["selector_stats"].get("scored_pool", 0),
             "sharpness_floor_used": stream_result.get("sharpness_floor_used", 0.0),
             "gate_relaxed": stream_result.get("gate_relaxed", False),
+            "validation_early_stop_enabled": bool(STREAMING_EARLY_STOP_ENABLED),
+            "early_stop_applied": False,
             # NOTE: this snapshot is taken at end-of-scan; we re-snap
             # after save_covers() below so the operator can see the
             # actual hit-rate the output phase achieved.
@@ -425,6 +550,7 @@ def process_scene(
                 "running fallback cascade"
             )
             with phase_timer("floor_enforcement") as t:
+                calibration = _ensure_calibration("streaming_floor_enforcement")
                 cascade_result = run_floor_enforcement_cascade(
                     video_path, duration_sec, candidates, all_scored, calibration,
                     target_count=COVER_FLOOR, deadline_sec=deadline,
@@ -626,14 +752,46 @@ def process_scene(
 
     taxonomy_stats = _sync_candidate_taxonomy(candidates)
     phase_results["taxonomy_metadata"] = taxonomy_stats
+    content_flag_stats = _summarize_sensitive_content(list(all_scored or []) + list(candidates or []))
+    phase_results["content_flags"] = content_flag_stats
+    if content_flag_stats.get("flagged"):
+        flagged = ", ".join(content_flag_stats.get("flags", []))
+        warnings.append(f"Sensitive content flagged for review: {flagged}")
+
+    validation_pool = list(candidates)
+    validation_stats = apply_cover_validation(validation_pool)
+    eligible_candidates = [
+        c for c in validation_pool
+        if isinstance(c.get("cover_validation"), dict)
+        and c["cover_validation"].get("eligible")
+    ]
+    rejected_count = len(validation_pool) - len(eligible_candidates)
+    phase_results["cover_validation"] = {
+        **validation_stats,
+        "pre_quota_candidates": len(validation_pool),
+        "pre_quota_eligible": len(eligible_candidates),
+        "pre_quota_rejected": rejected_count,
+    }
+    if rejected_count:
+        warnings.append(f"Cover validation rejected {rejected_count} invalid candidate(s)")
+        log.warn(
+            "Cover validation removed invalid candidates",
+            before=len(validation_pool),
+            eligible=len(eligible_candidates),
+            rejected=rejected_count,
+        )
+    if len(eligible_candidates) < COVER_FLOOR:
+        warnings.append(
+            f"Cover validation left {len(eligible_candidates)}/{COVER_FLOOR} eligible candidates before quota-fill"
+        )
 
     # Position classifier pass (bounded): attach `position_label` to top
     # position-like candidates so quota-fill can target 3-per-position.
-    if ENABLE_POSITION_CLASSIFIER and candidates and time.time() < deadline:
+    if ENABLE_POSITION_CLASSIFIER and eligible_candidates and time.time() < deadline:
         with phase_timer("position_classifier") as t:
-            pos_stats = classify_candidate_positions(candidates, ai_client=ai_client)
+            pos_stats = classify_candidate_positions(eligible_candidates, ai_client=ai_client)
         phase_results["position_classifier"] = {"duration_sec": t.elapsed, **pos_stats}
-    elif candidates:
+    elif eligible_candidates:
         phase_results["position_classifier"] = {
             "duration_sec": 0.0,
             "skipped": True,
@@ -644,13 +802,60 @@ def process_scene(
     # scoring metadata (tier + TYPE) and keeps a minimum time gap between picks.
     # It is intentionally conservative: if we can't fill the target buckets,
     # we top off by score to at least meet COVER_FLOOR.
-    before_select = len(candidates)
+    before_select = len(eligible_candidates)
     candidates, quota_stats = select_quota_fill(
-        candidates,
+        eligible_candidates,
         max_total=cover_cap,
         min_total=COVER_FLOOR,
     )
-    phase_results["quota_fill"] = {"before": before_select, **quota_stats}
+    pre_recheck_selected = len(candidates)
+    recheck_totals = {
+        "enabled": False,
+        "attempted": 0,
+        "rejected": 0,
+        "errors": 0,
+        "passes": 0,
+    }
+    max_recheck_passes = 2
+    for _pass_idx in range(max_recheck_passes):
+        remaining_rechecks = max(0, int(COVER_SUSPICIOUS_RECHECK_MAX) - recheck_totals["attempted"])
+        if remaining_rechecks <= 0:
+            break
+        recheck_stats = recheck_suspicious_selected(
+            candidates,
+            ai_client=ai_client,
+            system_prompt=SYSTEM_PROMPT,
+            max_rechecks=remaining_rechecks,
+        )
+        recheck_totals["enabled"] = bool(recheck_stats.get("enabled"))
+        recheck_totals["attempted"] += int(recheck_stats.get("attempted", 0) or 0)
+        recheck_totals["rejected"] += int(recheck_stats.get("rejected", 0) or 0)
+        recheck_totals["errors"] += int(recheck_stats.get("errors", 0) or 0)
+        if int(recheck_stats.get("attempted", 0) or 0) > 0:
+            recheck_totals["passes"] += 1
+        if int(recheck_stats.get("rejected", 0) or 0) <= 0:
+            break
+        eligible_candidates = [
+            c for c in eligible_candidates
+            if isinstance(c.get("cover_validation"), dict)
+            and c["cover_validation"].get("eligible")
+        ]
+        candidates, quota_stats = select_quota_fill(
+            eligible_candidates,
+            max_total=cover_cap,
+            min_total=COVER_FLOOR,
+        )
+    phase_results["cover_validation"].update(summarize_cover_validation(validation_pool))
+    phase_results["cover_validation"]["recheck"] = recheck_totals
+    phase_results["quota_fill"] = {
+        "before": before_select,
+        **quota_stats,
+        "pre_recheck_selected": pre_recheck_selected,
+        "post_recheck_selected": len(candidates),
+        "recheck_rejected": recheck_totals["rejected"],
+        "topoff_after_recheck": max(0, len(candidates) - (pre_recheck_selected - recheck_totals["rejected"])),
+        "validation_rejected": rejected_count,
+    }
     if before_select != len(candidates):
         log.info("Quota-fill selected covers", before=before_select, after=len(candidates), cap=cover_cap)
 
@@ -750,6 +955,153 @@ def process_scene(
         }
     _emit_progress(92)
 
+    # --- PHASE 10b: CANONICAL SCENE ANALYSIS SIDECAR ---
+    analysis_path = None
+    analysis_summary = {}
+    analysis_ocr_results: List[dict] = []
+    analysis_policy_flags: List[dict] = []
+    preview_outputs: List[dict] = []
+    analysis_payload = None
+
+    if not dry_run and ENABLE_SCENE_ANALYSIS and work_dir:
+        try:
+            with phase_timer("scene_analysis") as t_analysis:
+                analysis_payload = build_scene_analysis(
+                    scene_id=scene_id,
+                    video_path=video_path,
+                    metadata=metadata,
+                    phase_results=phase_results,
+                    all_scored=all_scored,
+                    candidates=candidates,
+                    saved_covers=saved_covers,
+                )
+                analysis_path, analysis_summary = write_scene_analysis_sidecar(
+                    work_dir=work_dir,
+                    scene_id=scene_id,
+                    video_path=video_path,
+                    metadata=metadata,
+                    phase_results=phase_results,
+                    all_scored=all_scored,
+                    candidates=candidates,
+                    saved_covers=saved_covers,
+                )
+            phase_results["scene_analysis"] = {
+                "duration_sec": t_analysis.elapsed,
+                "written": bool(analysis_path),
+                "path": str(analysis_path) if analysis_path else None,
+                "sections_count": analysis_summary.get("sections_count", 0),
+                "evidence_count": analysis_summary.get("evidence_count", 0),
+            }
+            if analysis_path is None:
+                warnings.append("Scene analysis sidecar write failed")
+        except Exception as e:  # noqa: BLE001
+            log.warn(f"[scene_analysis] failed: {e}")
+            phase_results["scene_analysis"] = {"duration_sec": 0.0, "error": str(e)}
+
+        if analysis_payload and ENABLE_ANALYSIS_OCR_POLICY and ANALYSIS_OCR_MAX_FRAMES > 0:
+            try:
+                with phase_timer("ocr_policy") as t_ocr:
+                    ocr_payload = run_ocr_policy_scan(
+                        video_path=video_path,
+                        analysis=analysis_payload,
+                        ai_client=ai_client,
+                        max_frames=ANALYSIS_OCR_MAX_FRAMES,
+                        system_prompt=SYSTEM_PROMPT,
+                    )
+                analysis_ocr_results = list(ocr_payload.get("ocr_results", []) or [])
+                analysis_policy_flags = list(ocr_payload.get("policy_flags", []) or [])
+                phase_results["ocr_policy"] = {
+                    "duration_sec": t_ocr.elapsed,
+                    "frames_scanned": ocr_payload.get("frames_scanned", 0),
+                    "ocr_results": len(analysis_ocr_results),
+                    "policy_flags": len(analysis_policy_flags),
+                    "skipped": bool(ocr_payload.get("skipped", False)),
+                    "reason": ocr_payload.get("reason"),
+                    "error": ocr_payload.get("error"),
+                }
+            except Exception as e:  # noqa: BLE001
+                log.warn(f"[ocr_policy] failed: {e}")
+                phase_results["ocr_policy"] = {"duration_sec": 0.0, "error": str(e)}
+        elif analysis_payload:
+            phase_results["ocr_policy"] = {
+                "duration_sec": 0.0,
+                "skipped": True,
+                "reason": "disabled",
+            }
+
+        if analysis_payload:
+            next_analysis_path, analysis_summary = write_scene_analysis_sidecar(
+                work_dir=work_dir,
+                scene_id=scene_id,
+                video_path=video_path,
+                metadata=metadata,
+                phase_results=phase_results,
+                all_scored=all_scored,
+                candidates=candidates,
+                saved_covers=saved_covers,
+                ocr_results=analysis_ocr_results,
+                policy_flags=analysis_policy_flags,
+            )
+            if next_analysis_path is not None:
+                analysis_path = next_analysis_path
+            analysis_payload = build_scene_analysis(
+                scene_id=scene_id,
+                video_path=video_path,
+                metadata=metadata,
+                phase_results=phase_results,
+                all_scored=all_scored,
+                candidates=candidates,
+                saved_covers=saved_covers,
+                ocr_results=analysis_ocr_results,
+                policy_flags=analysis_policy_flags,
+            )
+
+        if analysis_payload and ENABLE_PREVIEW_GENERATION and PREVIEW_CLIP_COUNT > 0:
+            try:
+                with phase_timer("preview_generation") as t_preview:
+                    preview_manifest = generate_preview_outputs(
+                        video_path=video_path,
+                        work_dir=work_dir,
+                        analysis=analysis_payload,
+                        clip_count=PREVIEW_CLIP_COUNT,
+                        clip_duration_sec=PREVIEW_CLIP_DURATION_SEC,
+                        gif_enabled=PREVIEW_GIF_ENABLED,
+                    )
+                preview_outputs = list(preview_manifest.get("outputs", []) or [])
+                phase_results["preview_generation"] = {
+                    "duration_sec": t_preview.elapsed,
+                    "outputs": len([o for o in preview_outputs if o.get("status") == "ok"]),
+                    "attempted": len(preview_outputs),
+                    "errors": len(preview_manifest.get("errors", []) or []),
+                    "skipped": len(preview_manifest.get("skipped", []) or []),
+                }
+            except Exception as e:  # noqa: BLE001
+                log.warn(f"[preview_generation] failed: {e}")
+                phase_results["preview_generation"] = {"duration_sec": 0.0, "error": str(e)}
+        elif analysis_payload:
+            phase_results["preview_generation"] = {
+                "duration_sec": 0.0,
+                "skipped": True,
+                "reason": "disabled",
+            }
+
+        if analysis_payload:
+            next_analysis_path, analysis_summary = write_scene_analysis_sidecar(
+                work_dir=work_dir,
+                scene_id=scene_id,
+                video_path=video_path,
+                metadata=metadata,
+                phase_results=phase_results,
+                all_scored=all_scored,
+                candidates=candidates,
+                saved_covers=saved_covers,
+                ocr_results=analysis_ocr_results,
+                policy_flags=analysis_policy_flags,
+                preview_outputs=preview_outputs,
+            )
+            if next_analysis_path is not None:
+                analysis_path = next_analysis_path
+
     # --- PHASE 11: SCENE INSIGHT + AI TITLE/DESCRIPTION ---
     # Best-effort. Always degrades safely on AI offline / parse fail.
     insight_dict = None
@@ -811,6 +1163,36 @@ def process_scene(
     if soft_thumb_info:
         title_info["soft_thumbnail"] = soft_thumb_info
 
+    if not dry_run and ENABLE_SCENE_ANALYSIS and work_dir and analysis_payload is not None:
+        try:
+            next_analysis_path, analysis_summary = write_scene_analysis_sidecar(
+                work_dir=work_dir,
+                scene_id=scene_id,
+                video_path=video_path,
+                metadata=metadata,
+                phase_results=phase_results,
+                all_scored=all_scored,
+                candidates=candidates,
+                saved_covers=saved_covers,
+                insight=insight_dict,
+                ocr_results=analysis_ocr_results,
+                policy_flags=analysis_policy_flags,
+                preview_outputs=preview_outputs,
+            )
+            if next_analysis_path is not None:
+                analysis_path = next_analysis_path
+            if isinstance(phase_results.get("scene_analysis"), dict):
+                phase_results["scene_analysis"].update(
+                    {
+                        "path": str(analysis_path) if analysis_path else None,
+                        "sections_count": analysis_summary.get("sections_count", 0),
+                        "evidence_count": analysis_summary.get("evidence_count", 0),
+                        "preview_outputs_count": analysis_summary.get("preview_outputs_count", 0),
+                    }
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warn(f"[scene_analysis] final rewrite failed: {e}")
+
     # --- DECISION LOG ---
     total_duration = time.time() - pipeline_start
     decision_log_path = write_decision_log(
@@ -827,6 +1209,8 @@ def process_scene(
         fallbacks_used=fallbacks_used,
         error_codes=error_codes,
         total_duration_sec=total_duration,
+        analysis_path=analysis_path,
+        analysis_summary=analysis_summary,
         operator=operator,
         machine_id=machine_id,
     )
@@ -896,11 +1280,15 @@ def process_scene(
         covers_saved=n_saved,
         top_pick_score=saved_covers[0]["score"] if saved_covers else 0,
         total_duration_sec=total_duration,
+        source_duration_sec=duration_sec,
         error_codes=error_codes,
         warnings=warnings,
         fallbacks_used=fallbacks_used,
         work_dir=work_dir,
         decision_log_path=decision_log_path,
+        analysis_path=analysis_path,
+        analysis_summary=analysis_summary,
+        preview_outputs=preview_outputs,
     )
 
 
