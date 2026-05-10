@@ -534,10 +534,12 @@ def test_runpod_backend_bundle_layout_drops_decision_log_at_canonical_path(
         "decision_log_path": "/data/decision_logs/scene-bundle.json",  # pod-side path
     }
     pod_work_dir = "/data/pod_uploads/j1/scene-bundle/video_amg_v11"
+    pod_source_path = "/data/pod_uploads/j1/scene-bundle/v.mp4"
     bundle_zip = _make_zip_bytes({
         "work_dir/covers/cover_001.jpg": b"cover-bytes",
         "work_dir/insight.json": b'{"i":1}',
         "work_dir/scene_analysis.json": json.dumps({
+            "source": {"path": pod_source_path},
             "preview_outputs": [
                 {"path": f"{pod_work_dir}/previews/preview_01.mp4"}
             ],
@@ -546,12 +548,14 @@ def test_runpod_backend_bundle_layout_drops_decision_log_at_canonical_path(
             ],
         }).encode(),
         "work_dir/previews/preview_manifest.json": json.dumps({
+            "video_path": pod_source_path,
             "outputs": [
                 {"path": f"{pod_work_dir}/previews/preview_01.mp4"}
             ]
         }).encode(),
         "decision_log.json": json.dumps({
             "scene_id": "scene-bundle",
+            "scene_path": pod_source_path,
             "execution": {"phases": {}},
             "analysis_path": f"{pod_work_dir}/scene_analysis.json",
             "outcomes": {
@@ -578,6 +582,7 @@ def test_runpod_backend_bundle_layout_drops_decision_log_at_canonical_path(
     video = video_dir / "v.mp4"
     video.write_bytes(b"v")
     result = backend.run_job(video)
+    source_reference = str(video.resolve())
 
     extracted = work_root / "work_dirs" / "scene-bundle"
     assert (extracted / "covers" / "cover_001.jpg").read_bytes() == b"cover-bytes"
@@ -588,12 +593,15 @@ def test_runpod_backend_bundle_layout_drops_decision_log_at_canonical_path(
     assert dlog_dest.is_file(), f"decision log not landed at {dlog_dest}"
     assert "scene-bundle" in dlog_dest.read_text()
     dlog = json.loads(dlog_dest.read_text())
+    assert dlog["scene_path"] == source_reference
     assert dlog["analysis_path"] == str(extracted / "scene_analysis.json")
     assert dlog["outcomes"]["saved_covers"][0]["path"] == str(extracted / "covers" / "cover_001.jpg")
     analysis = json.loads((extracted / "scene_analysis.json").read_text())
+    assert analysis["source"]["path"] == source_reference
     assert analysis["preview_outputs"][0]["path"] == str(extracted / "previews" / "preview_01.mp4")
     assert analysis["evidence"][0]["frame_path"] == str(extracted / "covers" / "cover_001.jpg")
     manifest = json.loads((extracted / "previews" / "preview_manifest.json").read_text())
+    assert manifest["video_path"] == source_reference
     assert manifest["outputs"][0]["path"] == str(extracted / "previews" / "preview_01.mp4")
     # Result paths point to the controller's local extracted artifacts.
     assert Path(result["work_dir"]) == extracted
@@ -840,7 +848,20 @@ class TestRunpodBackendCloud:
         monkeypatch.setattr(jb.time, "sleep", lambda _s: None)
 
         final_result = {"success": True, "scene_id": "scene-cloud", "covers_saved": 5}
-        zip_bytes = _make_zip_bytes({"out/cover_001.jpg": b"jpg"})
+        pod_work_dir = "/data/pod_uploads/j1/scene-cloud/video_amg_v11"
+        pod_source_path = "/data/pod_uploads/j1/scene-cloud/scene4.mp4"
+        zip_bytes = _make_zip_bytes({
+            "work_dir/out/cover_001.jpg": b"jpg",
+            "work_dir/scene_analysis.json": json.dumps({
+                "source": {"path": pod_source_path},
+                "evidence": [{"frame_path": f"{pod_work_dir}/out/cover_001.jpg"}],
+            }).encode(),
+            "decision_log.json": json.dumps({
+                "scene_id": "scene-cloud",
+                "scene_path": pod_source_path,
+                "analysis_path": f"{pod_work_dir}/scene_analysis.json",
+            }).encode(),
+        })
 
         session.queue(
             _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),  # POST /jobs/cloud
@@ -874,9 +895,16 @@ class TestRunpodBackendCloud:
         # Artifacts extracted under work_dirs/<scene_id>/.
         extracted = work_root / "work_dirs" / "scene-cloud"
         assert (extracted / "out" / "cover_001.jpg").read_bytes() == b"jpg"
+        source_reference = "cloud://gdrive_amy/incoming/scene4.mp4"
+        analysis = json.loads((extracted / "scene_analysis.json").read_text())
+        assert analysis["source"]["path"] == source_reference
+        assert analysis["evidence"][0]["frame_path"] == str(extracted / "out" / "cover_001.jpg")
         # Controller rewrote work_dir in the result so the UI finds covers
         # at the local extracted path.
         assert Path(result["work_dir"]) == extracted
+        dlog = json.loads(Path(result["decision_log_path"]).read_text())
+        assert dlog["scene_path"] == source_reference
+        assert dlog["analysis_path"] == str(extracted / "scene_analysis.json")
 
     def test_runpod_cloud_job_falls_back_to_jobs_hyphen_on_404(
         self, runpod_backend, populated_credential_store, monkeypatch, tmp_path

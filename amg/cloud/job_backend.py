@@ -364,10 +364,12 @@ class RunpodBackend(JobBackend):
         on_log: LogHook = _noop_log,
         on_progress: ProgressHook = _noop_progress,
     ) -> Dict[str, Any]:
+        source_reference = str(Path(video_path).resolve())
         return self._run_with_lifecycle(
             on_log=on_log,
             on_progress=on_progress,
             submit=lambda pod_id: self._submit_job(pod_id, video_path),
+            source_reference=source_reference,
         )
 
     def run_cloud_job(
@@ -425,10 +427,12 @@ class RunpodBackend(JobBackend):
                 return self._submit_job(pod_id, upload_fallback_video)
 
         try:
+            source_reference = f"cloud://{cloud_source.remote}/{cloud_source.path.lstrip('/')}"
             return self._run_with_lifecycle(
                 on_log=on_log,
                 on_progress=on_progress,
                 submit=_submit_with_fallback,
+                source_reference=source_reference,
             )
         finally:
             if upload_fallback_video is not None:
@@ -443,6 +447,7 @@ class RunpodBackend(JobBackend):
         on_log: LogHook,
         on_progress: ProgressHook,
         submit: Callable[[str], str],
+        source_reference: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Pod lifecycle template shared by both upload and cloud-source jobs.
 
@@ -467,7 +472,10 @@ class RunpodBackend(JobBackend):
             on_log(f"[runpod] pipeline done; pulling artifacts")
             on_progress(90)
             controller_paths = self._download_and_extract(
-                pod_id, job_id, result.get("scene_id")
+                pod_id,
+                job_id,
+                result.get("scene_id"),
+                source_reference=source_reference,
             )
             # Rewrite pod-side paths in the result to their controller-side
             # equivalents so the UI (which reads from the local filesystem)
@@ -1174,6 +1182,8 @@ class RunpodBackend(JobBackend):
         pod_id: str,
         job_id: str,
         scene_id: Optional[str],
+        *,
+        source_reference: Optional[str] = None,
     ) -> Dict[str, Optional[Path]]:
         """Pull the artifact bundle and place pieces at controller-canonical paths.
 
@@ -1269,7 +1279,11 @@ class RunpodBackend(JobBackend):
         if target.exists():
             shutil.rmtree(target)
         tmp.rename(target)
-        self._rewrite_extracted_artifact_paths(target, decision_log_dest)
+        self._rewrite_extracted_artifact_paths(
+            target,
+            decision_log_dest,
+            source_reference=source_reference,
+        )
         log.info(
             f"Extracted pod result for scene {scene_id}: work_dir={target}, "
             f"decision_log={decision_log_dest}, layout={'bundle' if bundle_layout else 'v0_flat'}"
@@ -1280,6 +1294,8 @@ class RunpodBackend(JobBackend):
         self,
         work_dir: Path,
         decision_log_path: Optional[Path],
+        *,
+        source_reference: Optional[str] = None,
     ) -> None:
         """Rewrite pod-local artifact paths inside extracted JSON files.
 
@@ -1310,8 +1326,17 @@ class RunpodBackend(JobBackend):
         if pod_work_dir == controller_work_dir:
             return
 
+        pod_source_dir = self._pod_source_dir_from_work_dir(pod_work_dir)
+
         for path, data in loaded:
             rewritten = self._replace_json_path_prefix(data, pod_work_dir, controller_work_dir)
+            if source_reference and pod_source_dir:
+                rewritten = self._replace_pod_source_path(
+                    rewritten,
+                    pod_source_dir,
+                    pod_work_dir,
+                    source_reference,
+                )
             if rewritten == data:
                 continue
             try:
@@ -1380,6 +1405,57 @@ class RunpodBackend(JobBackend):
         if isinstance(value, list):
             return [
                 RunpodBackend._replace_json_path_prefix(item, old_prefix, new_prefix)
+                for item in value
+            ]
+        return value
+
+    @staticmethod
+    def _pod_source_dir_from_work_dir(pod_work_dir: str) -> Optional[str]:
+        normalized = pod_work_dir.replace("\\", "/").rstrip("/")
+        marker = "/pod_uploads/"
+        if marker not in normalized:
+            return None
+        parent, sep, _leaf = normalized.rpartition("/")
+        if not sep:
+            return None
+        return parent
+
+    @staticmethod
+    def _replace_pod_source_path(
+        value: Any,
+        pod_source_dir: str,
+        pod_work_dir: str,
+        source_reference: str,
+    ) -> Any:
+        source_dir = pod_source_dir.replace("\\", "/").rstrip("/")
+        work_dir = pod_work_dir.replace("\\", "/").rstrip("/")
+        if isinstance(value, str):
+            normalized = value.replace("\\", "/")
+            if normalized == source_dir:
+                return source_reference
+            if normalized.startswith(source_dir + "/") and not (
+                normalized == work_dir or normalized.startswith(work_dir + "/")
+            ):
+                return source_reference
+            return value
+        if isinstance(value, dict):
+            return {
+                key: RunpodBackend._replace_pod_source_path(
+                    item,
+                    source_dir,
+                    work_dir,
+                    source_reference,
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                RunpodBackend._replace_pod_source_path(
+                    item,
+                    source_dir,
+                    work_dir,
+                    source_reference,
+                )
                 for item in value
             ]
         return value
