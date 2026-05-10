@@ -57,6 +57,9 @@ from amg.config import (
     STREAMING_FRAME_CACHE_MAX_MB,
     STREAMING_ANALYSIS_MAX_HEIGHT,
     STREAMING_ANALYSIS_MAX_WIDTH,
+    STREAMING_AI_FAILURE_EARLY_STOP_ENABLED,
+    STREAMING_AI_FAILURE_EARLY_STOP_MIN_COMPLETED,
+    STREAMING_AI_FAILURE_EARLY_STOP_RATE,
     STREAMING_LOW_RES_ANALYSIS_ENABLED,
     STREAMING_SCAN_INTERVAL_SEC,
     STREAMING_SCAN_MAX_AI_CALLS,
@@ -450,6 +453,9 @@ def run_stream_scan(
     ai_failures = 0
     parse_failed_count = 0
     score_zero_count = 0
+    ai_response_failures = 0
+    ai_error_counts: Dict[str, int] = {}
+    ai_error_samples: List[Dict[str, Any]] = []
     ai_wall_total = 0.0
     skipped = 0
     aborted = False
@@ -527,7 +533,9 @@ def run_stream_scan(
         # that tanked Y_B_003: 49 successful AI calls, every one parsed
         # to score 0 or failed to parse. Without the raw text in the
         # decision log we have no way to diagnose the prompt regression.
-        if ai_resp.success and (not scored.parse_succeeded or scored.score <= 0):
+        if not ai_resp.success:
+            _capture_raw_ai_sample(candidate, ai_resp, scored, "ai_error")
+        elif ai_resp.success and (not scored.parse_succeeded or scored.score <= 0):
             reason = "parse_failed" if not scored.parse_succeeded else "score_zero"
             _capture_raw_ai_sample(candidate, ai_resp, scored, reason)
         elif debug_ai and ai_resp.success:
@@ -553,6 +561,45 @@ def run_stream_scan(
         denom = max(1, cover_cap * 10)
         frac = min(1.0, completed / denom)
         on_progress(progress_low + int((progress_high - progress_low) * frac))
+
+    def _record_scored_result(result: Dict[str, Any]) -> None:
+        nonlocal ai_wall_total, parse_failed_count, score_zero_count, ai_response_failures
+
+        ai_wall_total += float(result.get("ai_wall_sec") or 0.0)
+        _scored = result.get("scored_frame")
+        _ai_resp = result.get("ai_response")
+        if _ai_resp is not None and not getattr(_ai_resp, "success", False):
+            ai_response_failures += 1
+            code = str(getattr(_ai_resp, "error_code", None) or "E_AI_RESPONSE_FAILED")
+            ai_error_counts[code] = ai_error_counts.get(code, 0) + 1
+            if len(ai_error_samples) < raw_ai_cap:
+                ai_error_samples.append({
+                    "timestamp_sec": result.get("timestamp_sec"),
+                    "error_code": code,
+                    "error_message": str(getattr(_ai_resp, "error_message", "") or "")[:200],
+                    "duration_sec": round(float(getattr(_ai_resp, "duration_sec", 0.0) or 0.0), 3),
+                    "attempts": int(getattr(_ai_resp, "attempts", 1) or 1),
+                })
+        elif _ai_resp is not None and getattr(_ai_resp, "success", False):
+            if _scored is None or not getattr(_scored, "parse_succeeded", False):
+                parse_failed_count += 1
+            elif (getattr(_scored, "score", 0) or 0) <= 0:
+                score_zero_count += 1
+        all_scored.append(result)
+        selector.add(result)
+
+    def _should_stop_for_ai_failures() -> bool:
+        if not STREAMING_AI_FAILURE_EARLY_STOP_ENABLED:
+            return False
+        min_completed = max(1, int(STREAMING_AI_FAILURE_EARLY_STOP_MIN_COMPLETED))
+        if completed < min_completed:
+            return False
+        if completed <= 0:
+            return False
+        if selector.stats().get("scored_pool", 0) > 0:
+            return False
+        failure_rate = float(ai_response_failures) / float(max(1, completed))
+        return failure_rate >= float(STREAMING_AI_FAILURE_EARLY_STOP_RATE)
 
     pump_pulse_at = 0.0
     next_log_at = time.time() + 10.0
@@ -616,16 +663,17 @@ def run_stream_scan(
                         error_message=str(exc),
                     )
                     result = candidate
-                ai_wall_total += float(result.get("ai_wall_sec") or 0.0)
-                _scored = result.get("scored_frame")
-                _ai_resp = result.get("ai_response")
-                if _ai_resp is not None and getattr(_ai_resp, "success", False):
-                    if _scored is None or not getattr(_scored, "parse_succeeded", False):
-                        parse_failed_count += 1
-                    elif (getattr(_scored, "score", 0) or 0) <= 0:
-                        score_zero_count += 1
-                all_scored.append(result)
-                selector.add(result)
+                _record_scored_result(result)
+
+            if _should_stop_for_ai_failures():
+                aborted = True
+                abort_reason = "E_STREAM_AI_UNRELIABLE"
+                stop_sieve.set()
+                on_log(
+                    f"[stream] stopping early: AI response failures "
+                    f"{ai_response_failures}/{completed} with no pickable candidates"
+                )
+                break
 
             now = time.time()
             if now >= next_log_at:
@@ -656,16 +704,7 @@ def run_stream_scan(
                 try:
                     result = fut.result(timeout=remaining)
                     completed += 1
-                    ai_wall_total += float(result.get("ai_wall_sec") or 0.0)
-                    _scored = result.get("scored_frame")
-                    _ai_resp = result.get("ai_response")
-                    if _ai_resp is not None and getattr(_ai_resp, "success", False):
-                        if _scored is None or not getattr(_scored, "parse_succeeded", False):
-                            parse_failed_count += 1
-                        elif (getattr(_scored, "score", 0) or 0) <= 0:
-                            score_zero_count += 1
-                    all_scored.append(result)
-                    selector.add(result)
+                    _record_scored_result(result)
                 except Exception as exc:  # noqa: BLE001
                     ai_failures += 1
                     log.warn("stream drain failed", error=str(exc))
@@ -709,8 +748,10 @@ def run_stream_scan(
         f"[stream] timing: decode_wall={sieve_stats['decode_wall_sec']:.1f}s "
         f"cv_wall={sieve_stats['cv_wall_sec']:.1f}s "
         f"ai_wall={ai_wall_total:.1f}s "
-        f"parse_failed={parse_failed_count} score_zero={score_zero_count}"
+        f"parse_failed={parse_failed_count} score_zero={score_zero_count} "
+        f"ai_response_failures={ai_response_failures}"
     )
+    ai_failure_rate = float(ai_response_failures) / float(max(1, completed))
 
     return {
         "picks": final["picks"],
@@ -727,6 +768,13 @@ def run_stream_scan(
             "ai_failures": ai_failures,
             "parse_failed": parse_failed_count,
             "score_zero": score_zero_count,
+            "ai_response_failures": ai_response_failures,
+            "ai_failure_rate": round(ai_failure_rate, 3),
+            "ai_error_counts": dict(sorted(ai_error_counts.items())),
+            "ai_error_samples": ai_error_samples,
+            "ai_failure_early_stop_enabled": bool(STREAMING_AI_FAILURE_EARLY_STOP_ENABLED),
+            "ai_failure_early_stop_min_completed": int(STREAMING_AI_FAILURE_EARLY_STOP_MIN_COMPLETED),
+            "ai_failure_early_stop_rate": float(STREAMING_AI_FAILURE_EARLY_STOP_RATE),
             "ai_wall_sec": round(ai_wall_total, 2),
             "skipped": skipped,
             "wall_sec": round(time.time() - dispatcher_started, 2),

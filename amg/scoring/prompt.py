@@ -275,6 +275,87 @@ The score must differentiate frames, not normalize them toward the mid 80s.
     return prompt
 
 
+def build_streaming_scoring_prompt(
+    primary_scene_type: str = "STANDARD",
+    detected_genres: Optional[List[str]] = None,
+    performer_count: Optional[int] = None,
+    studio_language: str = "en",
+    studio_hint: Optional[str] = None,
+) -> str:
+    """Compact scoring prompt for high-volume streaming scans.
+
+    It preserves the parser contract and deterministic B/C/D code scoring, but
+    removes long explanatory prose. The full prompt remains available for
+    classic scans and slower audit modes.
+    """
+    genres = detected_genres or []
+    genres_str = ", ".join(genres) if genres else "none detected"
+    scene_bits = [f"SCENE TYPE: {primary_scene_type or 'STANDARD'}"]
+    if performer_count:
+        scene_bits.append(f"EXPECTED PERFORMERS: {performer_count}")
+    if studio_hint:
+        scene_bits.append(f"STUDIO CONTEXT: {studio_hint}")
+    if studio_language and studio_language != "en":
+        scene_bits.append(f"MARKET LANGUAGE: {studio_language}")
+    taxonomy_section = _taxonomy_section()
+
+    return f"""Score this adult VOD frame as a storefront cover candidate.
+
+{chr(10).join(scene_bits)}
+DETECTED GENRES: {genres_str}
+{taxonomy_section}
+
+TIER A hard fails. If any applies, output only:
+TIER_A_FAIL: <DB1|DB2|DB3|DB4>
+SCORE: 0
+END
+
+DB1 no clear female lead visible
+DB2 no visible female nudity or clear sex-act read
+DB3 severe blur or unreadable thumbnail
+DB4 rear composition without clear butt/ass read
+
+If Tier A passes, list only visible evidence codes:
+B1 eye contact, B2 open eyes, B3 explicit visible penetration, B4 multi-penis/group signal,
+B5 female centered/dominant, B6 pleasure expression, B7 money shot/fluid release,
+B8 nude body dominant, B9 oral contact close-up, B10 dual lens-aware gaze,
+B11 intense action beat, B12 climax cue/setup, B13 visible fluid.
+C1 flattering light, C2 strong color/contrast, C3 clean background, C4 readable close-up,
+C5 strong thumbnail readability.
+D1 mild blur, D2 awkward crop, D3 face occlusion, D4 clutter/noise, D5 ambiguous action.
+
+Score uses: 34 base + B/C bonuses - D penalties. Use the full 0-100 range.
+Do not inflate. Strong but ordinary retail frames usually land 63-88.
+Reserve 89+ for exceptional composition, clarity, and moment.
+
+Penetration truth rules:
+- TYPE=PENETRATION only when PENETRATION_VISIBLE=yes.
+- Use PENETRATION_VISIBLE=no and ACTION_EVIDENCE=OCCLUDED when the key area is hidden.
+- POSE_NO_CONTACT is not penetration.
+- POSITION=OTHER only for transitions, non-sex-act frames, or genuinely unclear frames.
+
+Respond EXACTLY:
+TIER_A_PASS: yes
+TIER_B_PRESENT: <comma B-codes or NONE>
+TIER_C_PRESENT: <comma C-codes or NONE>
+TIER_D_PRESENT: <comma D-codes or NONE>
+SCORE: <0.0-100.0>
+TYPE: <NUDE/SEX_ACT/PENETRATION/BUILDUP/FINISH/COMPOSITION>
+GAZE: <SINGLE/DUAL/TRIPLE/AVERTED/CLOSED/REAR>
+AESTHETIC: <PROFESSIONAL/STANDARD/AMATEUR>
+PENETRATION_VISIBLE: <yes/no>
+PENETRATION_CONFIDENCE: <0.00-1.00>
+ACTION_EVIDENCE: <EXPLICIT_PENETRATION|ORAL_CONTACT|POSE_NO_CONTACT|OCCLUDED|WATER_OCCLUSION|NONE>
+POSITION: <one allowed POSITION label>
+POSITION_CONFIDENCE: <0.00-1.00>
+GENRES: <comma allowed GENRES or NONE>
+SUBGENRES: <comma allowed SUBGENRES or NONE>
+CONTENT_FLAGS: <comma allowed CONTENT_FLAGS or NONE>
+CONTENT_FLAG_CONFIDENCE: <0.00-1.00>
+END
+"""
+
+
 def build_simplified_prompt() -> str:
     """Simpler prompt for Fallback C (when full pipeline isn't yielding floor)."""
     taxonomy_section = _taxonomy_section()

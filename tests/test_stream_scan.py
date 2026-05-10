@@ -33,9 +33,21 @@ class _ScoredStub:
 
 
 class _FakeAIResponse:
-    def __init__(self, success: bool = True, raw_text: str = "ok"):
+    def __init__(
+        self,
+        success: bool = True,
+        raw_text: str = "ok",
+        error_code: str | None = None,
+        error_message: str | None = None,
+        duration_sec: float = 0.0,
+        attempts: int = 1,
+    ):
         self.success = success
         self.raw_text = raw_text
+        self.error_code = error_code
+        self.error_message = error_message
+        self.duration_sec = duration_sec
+        self.attempts = attempts
 
 
 class _FakeVideoReader:
@@ -518,6 +530,63 @@ class TestInstrumentation:
         assert result["stats"]["score_zero"] == 2
         for s in result["raw_ai_samples"]:
             assert s["reason"] == "score_zero"
+
+    def test_ai_response_failures_stop_early_and_are_counted(self, monkeypatch, tmp_path):
+        """HTTP/model failures are distinct from parse failures. If every
+        early response fails and no candidate is pickable, the stream should
+        stop instead of burning the full scene budget."""
+        import amg.scanning.stream as stream
+
+        frames = [(float(i), _frame(60)) for i in range(30)]
+        monkeypatch.setattr(stream, "VideoReader", _FakeVideoReader(frames))
+        monkeypatch.setattr(stream, "is_frame_too_dark", lambda _f: False)
+        monkeypatch.setattr(stream, "measure_sharpness", lambda f: float(f[0, 0, 0]) * 10.0)
+        monkeypatch.setattr(stream, "measure_motion", lambda *_a: 0.0)
+        monkeypatch.setattr(stream, "compute_perceptual_hash", lambda _f: None)
+        monkeypatch.setattr(stream, "are_near_duplicates", lambda *_a, **_k: False)
+        monkeypatch.setattr(stream, "STREAMING_AI_FAILURE_EARLY_STOP_ENABLED", True)
+        monkeypatch.setattr(stream, "STREAMING_AI_FAILURE_EARLY_STOP_MIN_COMPLETED", 3)
+        monkeypatch.setattr(stream, "STREAMING_AI_FAILURE_EARLY_STOP_RATE", 0.75)
+
+        class _Client:
+            def score_frame(self, *_a, **_k):
+                return _FakeAIResponse(
+                    success=False,
+                    raw_text="",
+                    error_code="E_AI_TIMEOUT",
+                    error_message="timeout",
+                    duration_sec=30.0,
+                    attempts=3,
+                )
+
+        monkeypatch.setattr(stream, "AIClient", lambda: _Client())
+        monkeypatch.setattr(stream, "parse_ai_response", lambda _r: _ScoredStub(True, 90.0))
+        monkeypatch.setattr(stream, "cap_score_for_excellence", lambda _r, s: float(s))
+
+        result = stream.run_stream_scan(
+            Path("dummy.mp4"),
+            duration_sec=60.0,
+            prompt="p",
+            target_count=1,
+            cover_cap=1,
+            on_log=_quiet_log,
+            on_progress=_quiet_progress,
+            max_workers=1,
+            interval_sec=1.0,
+            max_queued=40,
+            frame_cache_max_mb=64,
+            selector_overrides={"min_gap_sec": 0.5, "post_ai_sharp_percentile": 0.0},
+        )
+
+        assert result["aborted"] is True
+        assert result["abort_reason"] == "E_STREAM_AI_UNRELIABLE"
+        assert result["stats"]["completed"] == 3
+        assert result["stats"]["ai_response_failures"] == 3
+        assert result["stats"]["ai_failure_rate"] == 1.0
+        assert result["stats"]["ai_error_counts"] == {"E_AI_TIMEOUT": 3}
+        assert result["stats"]["ai_error_samples"][0]["attempts"] == 3
+        assert result["selector_stats"]["scored_pool"] == 0
+        assert {s["reason"] for s in result["raw_ai_samples"]} == {"ai_error"}
 
     def test_decode_and_cv_wall_are_tracked(self, monkeypatch, tmp_path):
         """decode_wall_sec and cv_wall_sec must be present and >= 0

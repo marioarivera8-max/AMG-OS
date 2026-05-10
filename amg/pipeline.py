@@ -48,6 +48,7 @@ from amg.config import (
     PREVIEW_CLIP_COUNT,
     PREVIEW_CLIP_DURATION_SEC,
     PREVIEW_GIF_ENABLED,
+    STREAMING_COMPACT_PROMPT_ENABLED,
     STREAMING_DEFER_CALIBRATION,
     STREAMING_EARLY_STOP_ENABLED,
     COVER_SUSPICIOUS_RECHECK_MAX,
@@ -77,7 +78,11 @@ from amg.video.metadata import get_metadata
 from amg.video.frames import calibrate_thresholds
 from amg.scoring.ai_client import AIClient
 from amg.scoring.insight_pipeline import generate_scene_insight_payload
-from amg.scoring.prompt import build_scoring_prompt, SYSTEM_PROMPT
+from amg.scoring.prompt import (
+    build_scoring_prompt,
+    build_streaming_scoring_prompt,
+    SYSTEM_PROMPT,
+)
 from amg.scoring.position_classifier import classify_candidate_positions
 from amg.scanning.tiered import run_tiered_scan
 from amg.scanning.finish_hunter import run_finish_hunter
@@ -453,6 +458,7 @@ def process_scene(
     candidates: List[dict] = []
     all_scored: List[dict] = []
     fallbacks_used: List[str] = []
+    stream_ai_unreliable = False
 
     if STREAMING_SCAN_ENABLED:
         streaming_ran = True
@@ -466,11 +472,21 @@ def process_scene(
             )
 
         cover_cap_hint = max(get_cover_cap(duration_sec), COVER_FLOOR)
+        stream_prompt = prompt
+        if STREAMING_COMPACT_PROMPT_ENABLED:
+            stream_prompt = build_streaming_scoring_prompt(
+                primary_scene_type=primary_type,
+                detected_genres=title_info.get("detected_genres", []),
+                performer_count=code_info.get("total") if code_info else None,
+                studio_language=studio_lang,
+                studio_hint=studio_hint,
+            )
+
         with phase_timer("stream_scan") as t:
             stream_result = run_stream_scan(
                 video_path,
                 duration_sec,
-                prompt,
+                stream_prompt,
                 target_count=COVER_FLOOR,
                 cover_cap=cover_cap_hint,
                 deadline_sec=deadline,
@@ -481,10 +497,17 @@ def process_scene(
             )
         phase_results["stream_scan"] = {
             "duration_sec": t.elapsed,
+            "candidates_found": len(stream_result.get("picks", [])),
+            "passing_count": len(stream_result.get("picks", [])),
+            "frames_scored": stream_result["stats"].get("completed", 0),
             "submitted": stream_result["stats"].get("submitted", 0),
             "completed": stream_result["stats"].get("completed", 0),
             "skipped": stream_result["stats"].get("skipped", 0),
             "ai_failures": stream_result["stats"].get("ai_failures", 0),
+            "ai_response_failures": stream_result["stats"].get("ai_response_failures", 0),
+            "ai_failure_rate": stream_result["stats"].get("ai_failure_rate", 0.0),
+            "ai_error_counts": stream_result["stats"].get("ai_error_counts", {}),
+            "ai_error_samples": stream_result["stats"].get("ai_error_samples", []),
             # New (2026-05-09): wall-time split between CPU video decode,
             # CV ops, and AI scoring inside the stream phase. The
             # decode-vs-AI ratio is what tells us whether NVDEC will
@@ -499,6 +522,8 @@ def process_scene(
             # output. The classic stream_scan stats hid this case.
             "parse_failed": stream_result["stats"].get("parse_failed", 0),
             "score_zero": stream_result["stats"].get("score_zero", 0),
+            "selector_parse_failed": stream_result["selector_stats"].get("parse_failed", 0),
+            "selector_score_zero": stream_result["selector_stats"].get("score_zero", 0),
             "frames_seen": stream_result["stats"].get("frames_seen", 0),
             "candidates_emitted": stream_result["stats"].get("candidates_emitted", 0),
             "queue_overflows": stream_result["stats"].get("queue_overflows", 0),
@@ -518,6 +543,10 @@ def process_scene(
             "gate_relaxed": stream_result.get("gate_relaxed", False),
             "validation_early_stop_enabled": bool(STREAMING_EARLY_STOP_ENABLED),
             "early_stop_applied": False,
+            "compact_prompt": bool(STREAMING_COMPACT_PROMPT_ENABLED),
+            "ai_failure_early_stop_enabled": stream_result["stats"].get("ai_failure_early_stop_enabled", False),
+            "ai_failure_early_stop_min_completed": stream_result["stats"].get("ai_failure_early_stop_min_completed"),
+            "ai_failure_early_stop_rate": stream_result["stats"].get("ai_failure_early_stop_rate"),
             # NOTE: this snapshot is taken at end-of-scan; we re-snap
             # after save_covers() below so the operator can see the
             # actual hit-rate the output phase achieved.
@@ -545,19 +574,42 @@ def process_scene(
             })
 
         if len(candidates) < COVER_FLOOR:
+            stream_ai_unreliable = (
+                stream_result.get("abort_reason") == "E_STREAM_AI_UNRELIABLE"
+                or (
+                    int(stream_result["stats"].get("completed", 0) or 0) >= int(
+                        stream_result["stats"].get("ai_failure_early_stop_min_completed", 12) or 12
+                    )
+                    and int(stream_result["selector_stats"].get("scored_pool", 0) or 0) == 0
+                    and float(stream_result["stats"].get("ai_failure_rate", 0.0) or 0.0) >= float(
+                        stream_result["stats"].get("ai_failure_early_stop_rate", 0.75) or 0.75
+                    )
+                )
+            )
             log.warn(
                 f"Streaming scan produced {len(candidates)} < COVER_FLOOR={COVER_FLOOR}; "
                 "running fallback cascade"
             )
             with phase_timer("floor_enforcement") as t:
-                calibration = _ensure_calibration("streaming_floor_enforcement")
+                if stream_ai_unreliable:
+                    log.warn(
+                        "Skipping AI fallback C because streaming AI responses were unreliable"
+                    )
+                    cascade_calibration = calibration
+                else:
+                    calibration = _ensure_calibration("streaming_floor_enforcement")
+                    cascade_calibration = calibration
                 cascade_result = run_floor_enforcement_cascade(
-                    video_path, duration_sec, candidates, all_scored, calibration,
+                    video_path, duration_sec, candidates, all_scored, cascade_calibration,
                     target_count=COVER_FLOOR, deadline_sec=deadline,
+                    ai_unreliable=stream_ai_unreliable,
                 )
             phase_results["floor_enforcement"] = {
                 "duration_sec": t.elapsed,
                 "fallbacks_used": cascade_result["fallbacks_used"],
+                "ai_unreliable": stream_ai_unreliable,
+                "ai_fallback_skipped": cascade_result.get("ai_fallback_skipped", False),
+                "skip_reason": cascade_result.get("skip_reason"),
                 "floor_met": cascade_result["floor_met"],
                 "aborted": cascade_result.get("aborted", False),
                 "deadline_overrun": cascade_result.get("deadline_overrun", False),
@@ -787,7 +839,7 @@ def process_scene(
 
     # Position classifier pass (bounded): attach `position_label` to top
     # position-like candidates so quota-fill can target 3-per-position.
-    if ENABLE_POSITION_CLASSIFIER and eligible_candidates and time.time() < deadline:
+    if ENABLE_POSITION_CLASSIFIER and eligible_candidates and time.time() < deadline and not stream_ai_unreliable:
         with phase_timer("position_classifier") as t:
             pos_stats = classify_candidate_positions(eligible_candidates, ai_client=ai_client)
         phase_results["position_classifier"] = {"duration_sec": t.elapsed, **pos_stats}
@@ -795,7 +847,11 @@ def process_scene(
         phase_results["position_classifier"] = {
             "duration_sec": 0.0,
             "skipped": True,
-            "reason": "disabled" if not ENABLE_POSITION_CLASSIFIER else "deadline",
+            "reason": (
+                "disabled"
+                if not ENABLE_POSITION_CLASSIFIER
+                else ("stream_ai_unreliable" if stream_ai_unreliable else "deadline")
+            ),
         }
 
     # v11.1.5+: quota-fill selection. This is a v0 version that uses existing
@@ -815,36 +871,38 @@ def process_scene(
         "rejected": 0,
         "errors": 0,
         "passes": 0,
+        "skipped_reason": "stream_ai_unreliable" if stream_ai_unreliable else None,
     }
     max_recheck_passes = 2
-    for _pass_idx in range(max_recheck_passes):
-        remaining_rechecks = max(0, int(COVER_SUSPICIOUS_RECHECK_MAX) - recheck_totals["attempted"])
-        if remaining_rechecks <= 0:
-            break
-        recheck_stats = recheck_suspicious_selected(
-            candidates,
-            ai_client=ai_client,
-            system_prompt=SYSTEM_PROMPT,
-            max_rechecks=remaining_rechecks,
-        )
-        recheck_totals["enabled"] = bool(recheck_stats.get("enabled"))
-        recheck_totals["attempted"] += int(recheck_stats.get("attempted", 0) or 0)
-        recheck_totals["rejected"] += int(recheck_stats.get("rejected", 0) or 0)
-        recheck_totals["errors"] += int(recheck_stats.get("errors", 0) or 0)
-        if int(recheck_stats.get("attempted", 0) or 0) > 0:
-            recheck_totals["passes"] += 1
-        if int(recheck_stats.get("rejected", 0) or 0) <= 0:
-            break
-        eligible_candidates = [
-            c for c in eligible_candidates
-            if isinstance(c.get("cover_validation"), dict)
-            and c["cover_validation"].get("eligible")
-        ]
-        candidates, quota_stats = select_quota_fill(
-            eligible_candidates,
-            max_total=cover_cap,
-            min_total=COVER_FLOOR,
-        )
+    if not stream_ai_unreliable:
+        for _pass_idx in range(max_recheck_passes):
+            remaining_rechecks = max(0, int(COVER_SUSPICIOUS_RECHECK_MAX) - recheck_totals["attempted"])
+            if remaining_rechecks <= 0:
+                break
+            recheck_stats = recheck_suspicious_selected(
+                candidates,
+                ai_client=ai_client,
+                system_prompt=SYSTEM_PROMPT,
+                max_rechecks=remaining_rechecks,
+            )
+            recheck_totals["enabled"] = bool(recheck_stats.get("enabled"))
+            recheck_totals["attempted"] += int(recheck_stats.get("attempted", 0) or 0)
+            recheck_totals["rejected"] += int(recheck_stats.get("rejected", 0) or 0)
+            recheck_totals["errors"] += int(recheck_stats.get("errors", 0) or 0)
+            if int(recheck_stats.get("attempted", 0) or 0) > 0:
+                recheck_totals["passes"] += 1
+            if int(recheck_stats.get("rejected", 0) or 0) <= 0:
+                break
+            eligible_candidates = [
+                c for c in eligible_candidates
+                if isinstance(c.get("cover_validation"), dict)
+                and c["cover_validation"].get("eligible")
+            ]
+            candidates, quota_stats = select_quota_fill(
+                eligible_candidates,
+                max_total=cover_cap,
+                min_total=COVER_FLOOR,
+            )
     phase_results["cover_validation"].update(summarize_cover_validation(validation_pool))
     phase_results["cover_validation"]["recheck"] = recheck_totals
     phase_results["quota_fill"] = {

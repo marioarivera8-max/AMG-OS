@@ -949,6 +949,30 @@ STREAMING_EARLY_STOP_ENABLED = _profile_bool(
     fast=False,
     turbo=False,
 )
+STREAMING_COMPACT_PROMPT_ENABLED = _profile_bool(
+    "AMG_STREAMING_COMPACT_PROMPT",
+    True,
+    fast=True,
+    turbo=True,
+)
+STREAMING_AI_FAILURE_EARLY_STOP_ENABLED = _profile_bool(
+    "AMG_STREAMING_AI_FAILURE_EARLY_STOP_ENABLED",
+    True,
+    fast=True,
+    turbo=True,
+)
+STREAMING_AI_FAILURE_EARLY_STOP_MIN_COMPLETED = _profile_int(
+    "AMG_STREAMING_AI_FAILURE_EARLY_STOP_MIN_COMPLETED",
+    12,
+    fast=12,
+    turbo=8,
+)
+STREAMING_AI_FAILURE_EARLY_STOP_RATE = _profile_float(
+    "AMG_STREAMING_AI_FAILURE_EARLY_STOP_RATE",
+    0.75,
+    fast=0.75,
+    turbo=0.70,
+)
 
 # Enhancement values (subtle)
 ENHANCE_SATURATION = 1.10  # +10%

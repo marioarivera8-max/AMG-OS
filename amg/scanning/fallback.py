@@ -46,6 +46,7 @@ def run_floor_enforcement_cascade(
     calibration: dict,
     target_count: int = COVER_FLOOR,
     deadline_sec: Optional[float] = None,
+    ai_unreliable: bool = False,
 ) -> dict:
     """
     Run fallback cascade to meet the cover floor.
@@ -95,6 +96,8 @@ def run_floor_enforcement_cascade(
             "floor_met": floor_met,
             "aborted": deadline_overrun and not floor_met,
             "deadline_overrun": deadline_overrun,
+            "ai_fallback_skipped": bool(ai_unreliable),
+            "skip_reason": reason if ai_unreliable else None,
         }
 
     if len(candidates) >= target_count:
@@ -104,6 +107,7 @@ def run_floor_enforcement_cascade(
             "fallbacks_used": [],
             "floor_met": True,
             "aborted": False,
+            "ai_fallback_skipped": False,
         }
 
     # === FALLBACK A: lower the bar on existing scored frames ===
@@ -120,10 +124,14 @@ def run_floor_enforcement_cascade(
             "fallbacks_used": fallbacks_used,
             "floor_met": True,
             "aborted": False,
+            "ai_fallback_skipped": False,
         }
 
     if deadline_sec is not None and time.time() > deadline_sec:
         return _run_d_rescue("deadline_before_fallback_c", deadline_overrun=True)
+
+    if ai_unreliable:
+        return _run_d_rescue("stream_ai_unreliable")
 
     # === FALLBACK B: wider cluster expansion on existing high scorers ===
     # (We could implement this but it's similar to cluster.py with wider windows.
@@ -147,6 +155,7 @@ def run_floor_enforcement_cascade(
             "fallbacks_used": fallbacks_used,
             "floor_met": True,
             "aborted": False,
+            "ai_fallback_skipped": False,
         }
 
     if deadline_sec is not None and time.time() > deadline_sec:

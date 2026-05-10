@@ -1,7 +1,11 @@
 """Tests for AI prompt building and response parsing."""
 import pytest
 
-from amg.scoring.prompt import build_scoring_prompt, build_simplified_prompt
+from amg.scoring.prompt import (
+    build_scoring_prompt,
+    build_simplified_prompt,
+    build_streaming_scoring_prompt,
+)
 from amg.scoring.parser import parse_ai_response, ScoredFrame
 
 
@@ -62,6 +66,22 @@ class TestBuildScoringPrompt:
         # Should be much shorter than full prompt
         full = build_scoring_prompt()
         assert len(prompt) < len(full) / 2
+
+    def test_streaming_prompt_is_compact_but_structured(self):
+        prompt = build_streaming_scoring_prompt(
+            primary_scene_type="STANDARD",
+            detected_genres=["POV"],
+            performer_count=2,
+        )
+        assert "TIER_A_PASS: yes" in prompt
+        assert "TIER_B_PRESENT" in prompt
+        assert "PENETRATION_VISIBLE" in prompt
+        assert "POSITION:" in prompt
+        assert "GENRES:" in prompt
+        assert "CONTENT_FLAGS:" in prompt
+        assert "DOGGY_STYLE" in prompt
+        assert "POV" in prompt
+        assert len(prompt) < len(build_scoring_prompt()) * 0.7
 
 
 class TestParseAiResponse:
