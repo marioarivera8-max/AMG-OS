@@ -91,6 +91,17 @@ _PIPELINE_SEMAPHORE_LOCK = threading.Lock()
 _PIPELINE_SEMAPHORE: Optional[threading.BoundedSemaphore] = None
 _PIPELINE_SEMAPHORE_LIMIT: Optional[int] = None
 
+_WARMUP_LOCK = threading.Lock()
+_WARMUP_STATE: Dict[str, Any] = {
+    "state": "idle",
+    "ok": False,
+    "error_code": None,
+    "error_message": None,
+    "duration_sec": None,
+    "started_at_ts": None,
+    "finished_at_ts": None,
+}
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -106,6 +117,82 @@ def _pod_pipeline_limit() -> int:
         return max(1, int(raw))
     except (TypeError, ValueError):
         return 1
+
+
+def _env_bool(name: str, default: str = "0") -> bool:
+    return str(os.environ.get(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: str) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _warmup_snapshot() -> Dict[str, Any]:
+    with _WARMUP_LOCK:
+        return dict(_WARMUP_STATE)
+
+
+def _ensure_vision_warmup_started() -> Dict[str, Any]:
+    """Start one background real-inference warmup if needed and return state."""
+    timeout_sec = int(max(10, _env_float("AMG_POD_READY_WARMUP_TIMEOUT_SEC", "180")))
+    retry_sec = max(0.0, _env_float("AMG_POD_READY_WARMUP_RETRY_SEC", "30"))
+    now = _epoch_sec()
+    with _WARMUP_LOCK:
+        state = str(_WARMUP_STATE.get("state") or "idle")
+        finished_at = _safe_float(_WARMUP_STATE.get("finished_at_ts"), None)
+        retry_error = state == "error" and (
+            finished_at is None or (now - finished_at) >= retry_sec
+        )
+        if state in {"running", "done"} and not retry_error:
+            return dict(_WARMUP_STATE)
+        if state == "error" and not retry_error:
+            return dict(_WARMUP_STATE)
+        _WARMUP_STATE.update(
+            {
+                "state": "running",
+                "ok": False,
+                "error_code": None,
+                "error_message": None,
+                "duration_sec": None,
+                "started_at_ts": now,
+                "finished_at_ts": None,
+            }
+        )
+
+    def _run() -> None:
+        try:
+            from amg.scoring.ai_client import AIClient
+
+            result = AIClient().warm_vision_model(timeout_sec=timeout_sec)
+            with _WARMUP_LOCK:
+                _WARMUP_STATE.update(
+                    {
+                        "state": "done" if result.success else "error",
+                        "ok": bool(result.success),
+                        "error_code": result.error_code,
+                        "error_message": result.error_message,
+                        "duration_sec": round(float(result.duration_sec or 0.0), 3),
+                        "finished_at_ts": _epoch_sec(),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - readiness should surface error
+            with _WARMUP_LOCK:
+                _WARMUP_STATE.update(
+                    {
+                        "state": "error",
+                        "ok": False,
+                        "error_code": "E_WARMUP_EXCEPTION",
+                        "error_message": str(exc)[:300],
+                        "duration_sec": None,
+                        "finished_at_ts": _epoch_sec(),
+                    }
+                )
+
+    threading.Thread(target=_run, name="amg-vision-warmup", daemon=True).start()
+    return _warmup_snapshot()
 
 
 def _safe_float(raw: Any, default: Optional[float] = None) -> Optional[float]:
@@ -669,10 +756,21 @@ def create_app(*, auth_token: Optional[str] = None, tracker: Optional[_JobTracke
         client = AIClient()
         ollama_ok = client.is_alive()
         model_ok = client.is_model_loaded() if ollama_ok else False
+        warmup_enabled = _env_bool("AMG_POD_READY_WARMUP_ENABLED", "1")
+        warmup_state: Dict[str, Any] = {"state": "disabled", "ok": True}
+        if ollama_ok and model_ok and warmup_enabled:
+            warmup_state = _ensure_vision_warmup_started()
+        warmup_ok = bool(warmup_state.get("ok")) if warmup_enabled else True
         payload = {
-            "ok": bool(ollama_ok and model_ok),
+            "ok": bool(ollama_ok and model_ok and warmup_ok),
             "ollama_ok": ollama_ok,
             "model_ok": model_ok,
+            "warmup_enabled": warmup_enabled,
+            "warmup_ok": warmup_ok,
+            "warmup_state": warmup_state.get("state"),
+            "warmup_duration_sec": warmup_state.get("duration_sec"),
+            "warmup_error_code": warmup_state.get("error_code"),
+            "warmup_error_message": warmup_state.get("error_message"),
             "vision_model": client.vision_model,
             "ollama_num_parallel": os.environ.get("OLLAMA_NUM_PARALLEL"),
             "ai_parallel_workers": os.environ.get("AMG_AI_PARALLEL_WORKERS"),

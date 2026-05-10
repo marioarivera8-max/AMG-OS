@@ -296,6 +296,87 @@ class AIClient:
             response_format=schema or {"type": "object"},
         )
 
+    def warm_vision_model(self, timeout_sec: int = 180) -> AIResponse:
+        """Run a tiny real vision request so Ollama loads the model before jobs.
+
+        ``/api/tags`` only proves the model is present on disk. On a cold GPU
+        pod the first actual vision request can still pay model-load cost and
+        exceed the normal per-frame scoring timeout. This warmup exercises the
+        same vision endpoint with a tiny blank image and a very small response.
+        """
+        start = time.time()
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+        encoded = self._encode_frame(frame)
+        if encoded is None:
+            return AIResponse(
+                success=False,
+                error_code="E_FRAME_ENCODE_FAIL",
+                error_message="Could not encode warmup frame",
+                duration_sec=time.time() - start,
+            )
+        payload = {
+            "model": self.vision_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Reply with READY.",
+                    "images": [encoded],
+                }
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0.0,
+                "seed": AI_SCORING_SEED,
+                "num_predict": 4,
+            },
+        }
+        try:
+            response = self._session.post(
+                self.api_url,
+                json=payload,
+                timeout=timeout_sec,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                raw_text = data.get("message", {}).get("content", "")
+                return AIResponse(
+                    success=True,
+                    raw_text=raw_text,
+                    duration_sec=time.time() - start,
+                    attempts=1,
+                )
+            return AIResponse(
+                success=False,
+                error_code="E_AI_PARSE_FAIL",
+                error_message=f"HTTP {response.status_code}: {response.text[:200]}",
+                duration_sec=time.time() - start,
+                attempts=1,
+            )
+        except requests.exceptions.Timeout:
+            return AIResponse(
+                success=False,
+                error_code="E_AI_TIMEOUT",
+                error_message=f"Warmup timed out after {timeout_sec}s",
+                duration_sec=time.time() - start,
+                attempts=1,
+            )
+        except requests.exceptions.ConnectionError as exc:
+            return AIResponse(
+                success=False,
+                error_code="E_AI_UNAVAILABLE",
+                error_message=f"Connection refused: {exc}",
+                duration_sec=time.time() - start,
+                attempts=1,
+            )
+        except Exception as exc:
+            return AIResponse(
+                success=False,
+                error_code="E_AI_PARSE_FAIL",
+                error_message=f"Warmup failed: {exc}",
+                duration_sec=time.time() - start,
+                attempts=1,
+            )
+
     def _generate_text_with_model(
         self,
         *,

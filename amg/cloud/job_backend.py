@@ -903,7 +903,13 @@ class RunpodBackend(JobBackend):
                                     return
                                 # 503 means worker is up but Ollama / model is not
                                 # yet ready (background pull still running).
-                                if last_readyz_payload.get("ollama_ok") and not last_readyz_payload.get("model_ok"):
+                                if (
+                                    last_readyz_payload.get("model_ok")
+                                    and last_readyz_payload.get("warmup_enabled")
+                                    and not last_readyz_payload.get("warmup_ok")
+                                ):
+                                    current_phase = "vision-warmup"
+                                elif last_readyz_payload.get("ollama_ok") and not last_readyz_payload.get("model_ok"):
                                     current_phase = "model-pull"
                                 elif not last_readyz_payload.get("ollama_ok"):
                                     current_phase = "waiting-on-ollama"
@@ -923,6 +929,12 @@ class RunpodBackend(JobBackend):
                     on_log(f"[runpod] pod-worker /healthz OK (attempt {attempts}); auth check pending")
                 elif current_phase == "auth-ok":
                     on_log(f"[runpod] pod-worker auth OK (attempt {attempts}); waiting on /readyz")
+                elif current_phase == "vision-warmup":
+                    on_log(
+                        f"[runpod] pod-worker is warming first vision inference "
+                        f"(state={last_readyz_payload.get('warmup_state')}, "
+                        f"attempt {attempts})"
+                    )
                 elif current_phase == "waiting-on-ollama":
                     on_log(f"[runpod] pod-worker FastAPI is up but Ollama is not yet reachable (attempt {attempts})")
                 else:
@@ -938,6 +950,8 @@ class RunpodBackend(JobBackend):
             diag = (
                 f" Last /readyz: ollama_ok={last_readyz_payload.get('ollama_ok')} "
                 f"model_ok={last_readyz_payload.get('model_ok')} "
+                f"warmup_ok={last_readyz_payload.get('warmup_ok')} "
+                f"warmup_state={last_readyz_payload.get('warmup_state')} "
                 f"model={last_readyz_payload.get('vision_model')}"
             )
         raise RuntimeError(

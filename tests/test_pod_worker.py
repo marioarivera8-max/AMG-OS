@@ -6,6 +6,7 @@ import secrets
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -129,6 +130,48 @@ class TestAuth:
             headers={"Authorization": f"Bearer {pod_env['token']}"},
         )
         assert r.status_code == 200
+
+    def test_readyz_waits_for_real_vision_warmup(self, pod_env, monkeypatch):
+        pw = pod_env["module"]
+        monkeypatch.setenv("AMG_POD_READY_WARMUP_ENABLED", "1")
+
+        import amg.scoring.ai_client as ai_client
+
+        class FakeAIClient:
+            vision_model = "qwen2.5vl:7b"
+
+            def is_alive(self):
+                return True
+
+            def is_model_loaded(self):
+                return True
+
+            def warm_vision_model(self, timeout_sec=180):
+                return SimpleNamespace(
+                    success=True,
+                    duration_sec=0.01,
+                    error_code=None,
+                    error_message=None,
+                )
+
+        monkeypatch.setattr(ai_client, "AIClient", FakeAIClient)
+        app = pw.create_app(auth_token=pod_env["token"])
+        client = TestClient(app)
+        headers = {"Authorization": f"Bearer {pod_env['token']}"}
+
+        ready = None
+        for _ in range(20):
+            r = client.get("/readyz", headers=headers)
+            if r.status_code == 200:
+                ready = r.json()
+                break
+            time.sleep(0.02)
+
+        assert ready is not None
+        assert ready["ok"] is True
+        assert ready["warmup_enabled"] is True
+        assert ready["warmup_ok"] is True
+        assert ready["warmup_state"] == "done"
 
 
 # --- jobs -------------------------------------------------------------------
