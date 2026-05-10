@@ -143,6 +143,83 @@ def test_distribution_gate_passes_publishable_metadata(monkeypatch, tmp_path):
     assert any("Sensitive content flagged" in w for w in result["per_platform"]["AEBN"]["warnings"])
 
 
+def test_distribution_gate_accepts_verified_scene_local_2257(monkeypatch, tmp_path):
+    import amg.review.distribution_gate as gate
+
+    monkeypatch.setattr(gate, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(gate, "DECISION_LOGS_DIR", tmp_path / "decision_logs")
+    monkeypatch.setattr(gate, "REVIEWED_DIR", tmp_path / "reviewed")
+    monkeypatch.setattr(gate, "DISTRIBUTION_STATUS_DIR", tmp_path / "distribution_status")
+    monkeypatch.setattr(gate, "PERFORMER_DOCS_DIR", tmp_path / "performer_docs")
+    monkeypatch.setattr(gate, "COVER_FLOOR", 1)
+    monkeypatch.setattr(
+        gate,
+        "PLATFORM_REQUIREMENTS",
+        {
+            "AEBN": {
+                "title_max_chars": 80,
+                "requires_2257": True,
+                "requires_individual_releases": False,
+                "banned_terms": [],
+                "preferred_resolution_min": (1280, 720),
+                "metadata": {
+                    "title_min_chars": 10,
+                    "description_min_chars": 20,
+                    "description_max_chars": 500,
+                    "min_tags": 2,
+                    "max_tags": 30,
+                    "min_categories": 1,
+                    "max_categories": 10,
+                },
+            }
+        },
+    )
+
+    scene_id = "scene_docs_pass"
+    work_dir = tmp_path / "work"
+    _write_json(
+        work_dir / "submission_manifest.json",
+        {
+            "scene_id": scene_id,
+            "compliance_docs": [
+                {
+                    "id": "doc_001",
+                    "filename": "2257.pdf",
+                    "document_type": "2257",
+                    "verified_default": True,
+                }
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / "decision_logs" / f"{scene_id}.json",
+        {
+            "scene_id": scene_id,
+            "analysis_path": str(work_dir / "scene_analysis.json"),
+            "outcomes": {"covers_delivered": 1},
+            "input": {"resolution": "1920x1080"},
+            "execution": {"error_codes": []},
+        },
+    )
+    _write_json(
+        tmp_path / "reviewed" / f"{scene_id}.json",
+        {
+            "scene_id": scene_id,
+            "title_override": "Ready Scene",
+            "long_description": "A complete description ready for platform handoff.",
+            "tags_csv": "tag1,tag2",
+            "categories_csv": "Category",
+            "kept_covers": ["01.jpg"],
+            "target_platforms": ["AEBN"],
+            "submission_docs": {"doc_001": {"verified": True, "document_type": "2257"}},
+        },
+    )
+
+    result = gate.check_distribution_ready(scene_id, verbose=False)
+    assert result["overall_ready"] is True
+    assert result["per_platform"]["AEBN"]["blockers"] == []
+
+
 def test_shared_metadata_validator_marks_skipped_platforms(monkeypatch):
     import amg.review.distribution_gate as gate
 

@@ -27,6 +27,43 @@ def test_build_publish_package_creates_manifest_and_ledger(monkeypatch, tmp_path
     (covers_dir / "01.jpg").write_bytes(b"cover-one")
     (covers_dir / "02.jpg").write_bytes(b"cover-two")
     (work_dir / "scene_analysis.json").write_text("{}", encoding="utf-8")
+    docs_dir = work_dir / "submission_assets" / "documents"
+    imgs_dir = work_dir / "submission_assets" / "provided_images" / "previews"
+    docs_dir.mkdir(parents=True)
+    imgs_dir.mkdir(parents=True)
+    doc_path = docs_dir / "doc_001_2257.pdf"
+    image_path = imgs_dir / "img_001_actor.jpg"
+    doc_path.write_bytes(b"2257")
+    image_path.write_bytes(b"provided-image")
+    _write_json(
+        work_dir / "submission_manifest.json",
+        {
+            "scene_id": scene_id,
+            "source_mode": "cloud",
+            "selected_video": {
+                "filename": "source.mp4",
+                "source_reference": "cloud://gdrive_amy/incoming/source.mp4",
+            },
+            "cloud_source": {"remote": "gdrive_amy", "path": "incoming/source.mp4"},
+            "compliance_docs": [
+                {
+                    "id": "doc_001",
+                    "filename": "2257.pdf",
+                    "document_type": "2257",
+                    "stored_path": str(doc_path),
+                    "verified_default": True,
+                }
+            ],
+            "provided_images": [
+                {
+                    "id": "img_001",
+                    "filename": "actor.jpg",
+                    "preview_path": str(image_path),
+                }
+            ],
+            "warnings": [],
+        },
+    )
 
     platform_requirements = {
         "AEBN": {
@@ -91,6 +128,8 @@ def test_build_publish_package_creates_manifest_and_ledger(monkeypatch, tmp_path
             "cover_pick": {"filename": "01.jpg"},
             "target_platforms": ["AEBN"],
             "performers_confirmed": ["Jane Doe"],
+            "submission_docs": {"doc_001": {"verified": True, "document_type": "2257"}},
+            "provided_image_decisions": {"img_001": {"decision": "include"}},
         },
     )
 
@@ -107,8 +146,16 @@ def test_build_publish_package_creates_manifest_and_ledger(monkeypatch, tmp_path
     assert manifest["human_review_required"] is True
     assert manifest["platform"] == "AEBN"
     assert (Path(package_path) / "metadata.json").exists()
+    assert (Path(package_path) / "copy_paste.md").exists()
+    assert (Path(package_path) / "source_video.json").exists()
+    assert (Path(package_path) / "source_records" / "submission_documents" / "01_doc_001_2257.pdf").exists()
+    assert (Path(package_path) / "assets" / "provided_images" / "01_img_001_actor.jpg").exists()
     assert (Path(package_path) / "checksums.sha256").exists()
     assert Path(package_zip_path).exists()
+
+    source_ref = json.loads((Path(package_path) / "source_video.json").read_text(encoding="utf-8"))
+    assert source_ref["video_included_in_package"] is False
+    assert source_ref["source_reference"] == "cloud://gdrive_amy/incoming/source.mp4"
 
     status = ledger.load_publication_status(scene_id)
     assert status["platforms"]["AEBN"]["status"] == "packaged"

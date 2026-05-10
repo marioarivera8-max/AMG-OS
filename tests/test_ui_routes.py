@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import json
 import zipfile
 from pathlib import Path
 
@@ -140,6 +141,202 @@ def test_find_work_dir_resolves_cloud_extracted_layout(tmp_path, monkeypatch):
 
     resolved = app_mod._find_work_dir("muvie")
     assert resolved == cloud_extracted
+
+
+def test_scene_page_renders_submission_workspace(tmp_path, monkeypatch):
+    import amg.ui.app as app_mod
+
+    data_dir = tmp_path / "data"
+    scene_id = "scene_workspace"
+    work_dir = data_dir / "work_dirs" / scene_id
+    work_dir.mkdir(parents=True)
+    source_video = data_dir / "source.mp4"
+    source_video.write_bytes(b"video")
+    (data_dir / "decision_logs").mkdir(parents=True)
+    (data_dir / "decision_logs" / f"{scene_id}.json").write_text(
+        json.dumps(
+            {
+                "scene_id": scene_id,
+                "scene_path": str(source_video),
+                "input": {"studio": "Demo", "resolution": "1920x1080", "duration_sec": 120},
+                "execution": {"total_duration_sec": 5, "error_codes": []},
+                "outcomes": {"covers_delivered": 0, "saved_covers": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "submission_manifest.json").write_text(
+        json.dumps(
+            {
+                "scene_id": scene_id,
+                "source_mode": "local",
+                "selected_video": {"filename": "source.mp4", "original_path": str(source_video)},
+                "secondary_videos": [],
+                "compliance_docs": [
+                    {
+                        "id": "doc_001",
+                        "filename": "2257.pdf",
+                        "document_type": "2257",
+                        "verified_default": True,
+                    }
+                ],
+                "provided_images": [{"id": "img_001", "filename": "actor.jpg"}],
+                "warnings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_mod, "DATA_DIR", data_dir)
+    monkeypatch.setattr(app_mod, "DECISION_LOGS_DIR", data_dir / "decision_logs")
+    monkeypatch.setattr(app_mod, "REVIEWED_DIR", data_dir / "reviewed")
+
+    app = app_mod.create_app()
+    client = TestClient(app)
+    res = client.get(f"/scene/{scene_id}")
+    assert res.status_code == 200
+    assert "Submission Workspace" in res.text
+    assert "2257.pdf" in res.text
+    assert "actor.jpg" in res.text
+
+
+def test_review_save_persists_submission_workspace_decisions(tmp_path, monkeypatch):
+    import amg.ui.app as app_mod
+
+    data_dir = tmp_path / "data"
+    scene_id = "scene_review_workspace"
+    work_dir = data_dir / "work_dirs" / scene_id
+    (work_dir / "covers").mkdir(parents=True)
+    (data_dir / "decision_logs").mkdir(parents=True)
+    (data_dir / "decision_logs" / f"{scene_id}.json").write_text(
+        json.dumps({"scene_id": scene_id, "scene_path": str(tmp_path / "source.mp4"), "input": {}, "outcomes": {}}),
+        encoding="utf-8",
+    )
+    (work_dir / "submission_manifest.json").write_text(
+        json.dumps(
+            {
+                "scene_id": scene_id,
+                "selected_video": {"filename": "source.mp4"},
+                "secondary_videos": [],
+                "compliance_docs": [{"id": "doc_001", "filename": "2257.pdf", "document_type": "2257"}],
+                "provided_images": [{"id": "img_001", "filename": "actor.jpg"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_mod, "DATA_DIR", data_dir)
+    monkeypatch.setattr(app_mod, "DECISION_LOGS_DIR", data_dir / "decision_logs")
+    monkeypatch.setattr(app_mod, "REVIEWED_DIR", data_dir / "reviewed")
+    monkeypatch.setattr(app_mod, "OPERATOR_FEEDBACK_DIR", data_dir / "operator_feedback")
+    monkeypatch.setattr(app_mod, "OPERATOR_FEEDBACK_PATH", data_dir / "operator_feedback" / "feedback.jsonl")
+    monkeypatch.setattr(app_mod, "export_approved_example_bank", lambda **_: {})
+
+    app = app_mod.create_app()
+    client = TestClient(app, follow_redirects=False)
+    res = client.post(
+        f"/scene/{scene_id}/review",
+        data={
+            "title": "Retail Ready Title",
+            "long_description": "A complete description for review.",
+            "tags_csv": "tag1,tag2",
+            "categories_csv": "Category",
+            "performers_confirmed": "Jane Doe, Jill Doe",
+            "target_platforms": "AEBN",
+            "submission_doc_id": "doc_001",
+            "submission_doc_verified": "doc_001",
+            "submission_doc_type_doc_001": "2257",
+            "submission_doc_performer_doc_001": "Jane Doe",
+            "provided_image_id": "img_001",
+            "provided_image_decision_img_001": "include",
+        },
+    )
+    assert res.status_code == 303
+    reviewed = json.loads((data_dir / "reviewed" / f"{scene_id}.json").read_text(encoding="utf-8"))
+    assert reviewed["performers_confirmed"] == ["Jane Doe", "Jill Doe"]
+    assert reviewed["submission_docs"]["doc_001"]["verified"] is True
+    assert reviewed["provided_image_decisions"]["img_001"]["decision"] == "include"
+
+
+def test_source_video_download_local_file(tmp_path, monkeypatch):
+    import amg.ui.app as app_mod
+
+    data_dir = tmp_path / "data"
+    scene_id = "scene_download"
+    work_dir = data_dir / "work_dirs" / scene_id
+    work_dir.mkdir(parents=True)
+    source = data_dir / "source.mp4"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"video-bytes")
+    (data_dir / "decision_logs").mkdir(parents=True)
+    (data_dir / "decision_logs" / f"{scene_id}.json").write_text(
+        json.dumps({"scene_id": scene_id, "scene_path": str(source)}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_mod, "DATA_DIR", data_dir)
+    monkeypatch.setattr(app_mod, "DECISION_LOGS_DIR", data_dir / "decision_logs")
+
+    app = app_mod.create_app()
+    client = TestClient(app)
+    res = client.get(f"/scene/{scene_id}/source-video")
+    assert res.status_code == 200
+    assert res.content == b"video-bytes"
+
+
+def test_source_video_download_cloud_streams_rclone(tmp_path, monkeypatch):
+    import amg.ui.app as app_mod
+    import amg.cloud.credentials as creds_mod
+    import amg.cloud.rclone as rclone_mod
+
+    data_dir = tmp_path / "data"
+    scene_id = "scene_cloud_download"
+    work_dir = data_dir / "work_dirs" / scene_id
+    work_dir.mkdir(parents=True)
+    (data_dir / "decision_logs").mkdir(parents=True)
+    (data_dir / "decision_logs" / f"{scene_id}.json").write_text(
+        json.dumps({"scene_id": scene_id, "scene_path": "cloud://gdrive_amy/incoming/source.mp4"}),
+        encoding="utf-8",
+    )
+    (work_dir / "submission_manifest.json").write_text(
+        json.dumps(
+            {
+                "scene_id": scene_id,
+                "source_mode": "cloud",
+                "selected_video": {"filename": "source.mp4"},
+                "cloud_source": {"remote": "gdrive_amy", "path": "incoming/source.mp4"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _CM:
+        def __enter__(self):
+            return tmp_path / "rclone.conf"
+
+        def __exit__(self, *_args):
+            return False
+
+    class _Store:
+        def materialize_config(self, names=None):
+            assert names == ["gdrive_amy"]
+            return _CM()
+
+    class _Rclone:
+        def __init__(self, config_path=None):
+            assert config_path == tmp_path / "rclone.conf"
+
+        def cat(self, src):
+            assert src == "gdrive_amy:incoming/source.mp4"
+            yield b"cloud-bytes"
+
+    monkeypatch.setattr(creds_mod, "CredentialStore", _Store)
+    monkeypatch.setattr(rclone_mod, "Rclone", _Rclone)
+    monkeypatch.setattr(app_mod, "DATA_DIR", data_dir)
+    monkeypatch.setattr(app_mod, "DECISION_LOGS_DIR", data_dir / "decision_logs")
+
+    app = app_mod.create_app()
+    client = TestClient(app)
+    res = client.get(f"/scene/{scene_id}/source-video")
+    assert res.status_code == 200
+    assert res.content == b"cloud-bytes"
 
 
 def test_legacy_review_route_redirects_to_scene_path():

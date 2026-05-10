@@ -67,6 +67,7 @@ from amg.analysis.scene_analysis import (
     write_scene_analysis as write_scene_analysis_sidecar,
 )
 from amg.ingest.inventory import find_companion_files, make_work_dir, make_covers_dir
+from amg.ingest.submission_assets import scan_submission_assets
 from amg.ingest.studio_profiles import detect_studio, get_or_create_profile
 from amg.ingest.folder_context import resolve_folder_context
 from amg.ingest.performer_code import (
@@ -1263,6 +1264,30 @@ def process_scene(
         except Exception as e:  # noqa: BLE001
             log.warn(f"[scene_analysis] final rewrite failed: {e}")
 
+    # --- SUBMISSION ASSET MANIFEST ---
+    submission_manifest_path = None
+    if not dry_run and work_dir:
+        try:
+            with phase_timer("submission_assets") as t_submission:
+                manifest = scan_submission_assets(
+                    scene_id=scene_id,
+                    selected_video=video_path,
+                    submission_root=folder_ctx.source_folder or video_path.parent,
+                    work_dir=work_dir,
+                    source_mode="local",
+                )
+                submission_manifest_path = str(work_dir / "submission_manifest.json")
+            phase_results["submission_assets"] = {
+                "duration_sec": t_submission.elapsed,
+                "docs_found": len(manifest.get("compliance_docs") or []),
+                "provided_images_found": len(manifest.get("provided_images") or []),
+                "secondary_videos_found": len(manifest.get("secondary_videos") or []),
+                "warnings": list(manifest.get("warnings") or []),
+            }
+        except Exception as e:  # noqa: BLE001 - asset harvest must not fail processing
+            log.warn(f"[submission_assets] failed: {e}")
+            phase_results["submission_assets"] = {"duration_sec": 0, "error": str(e)}
+
     # --- DECISION LOG ---
     total_duration = time.time() - pipeline_start
     decision_log_path = write_decision_log(
@@ -1356,6 +1381,7 @@ def process_scene(
         fallbacks_used=fallbacks_used,
         work_dir=work_dir,
         decision_log_path=decision_log_path,
+        submission_manifest_path=submission_manifest_path,
         analysis_path=analysis_path,
         analysis_summary=analysis_summary,
         preview_outputs=preview_outputs,

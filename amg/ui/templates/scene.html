@@ -428,6 +428,7 @@
         <span class="muted" style="font-size: 12px;">▼</span>
       </summary>
       <div style="margin-top: 10px;">
+        {% include "_submission_workspace_panel.html" %}
         {% include "_provided_thumbs_panel.html" %}
 
         {% if decision_log %}
@@ -505,6 +506,18 @@
               <button class="btn btn-ghost" type="button" id="btn-autofix-description">Auto-expand description</button>
             </div>
             <div id="live-platform-checks" class="stack" style="margin-top: 10px; font-size: 12px;"></div>
+          </div>
+
+          <div class="card scene-side-card">
+            <h3 class="card-section-title">Copy/Paste Handoff</h3>
+            <div class="row" style="gap: 8px; flex-wrap: wrap;">
+              <button class="btn btn-ghost" type="button" data-copy-field="title">Copy title</button>
+              <button class="btn btn-ghost" type="button" data-copy-field="long_description">Copy description</button>
+              <button class="btn btn-ghost" type="button" data-copy-field="tags_csv">Copy tags</button>
+              <button class="btn btn-ghost" type="button" data-copy-field="categories_csv">Copy categories</button>
+              <button class="btn btn-ghost" type="button" data-copy-field="performers_confirmed">Copy performers</button>
+            </div>
+            <div id="copy-feedback" class="muted" style="font-size: 12px; margin-top: 8px;"></div>
           </div>
 
           <div class="card scene-side-card">
@@ -609,6 +622,7 @@
                     {% if row.external_id %}<span class="muted">Â· {{ row.external_id }}</span>{% endif %}
                     {% if row.metadata and row.metadata.package_zip_path %}
                       <a href="/artifact?path={{ row.metadata.package_zip_path | urlencode }}" download>zip</a>
+                      <button class="btn btn-ghost" type="button" data-copy-text="{{ row.metadata.package_zip_path }}">Copy package path</button>
                     {% endif %}
                   </div>
                 {% endfor %}
@@ -1103,6 +1117,94 @@
     var btnDesc = document.getElementById('btn-autofix-description');
     if (btnDesc) {
       btnDesc.addEventListener('click', autoExpandDescription);
+    }
+
+    document.querySelectorAll('[data-copy-field], [data-copy-text]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var name = btn.getAttribute('data-copy-field');
+        var value = btn.getAttribute('data-copy-text') || '';
+        if (name === 'title') {
+          var titleTextEl = form.querySelector('textarea[name="title"]');
+          var titleChoiceEl = form.querySelector('input[name="title"]:checked');
+          value = String((titleTextEl && titleTextEl.value) || (titleChoiceEl && titleChoiceEl.value) || '').trim();
+        } else if (name && form.elements[name]) {
+          value = String(form.elements[name].value || '').trim();
+        }
+        var feedback = document.getElementById('copy-feedback');
+        if (!value) {
+          if (feedback) feedback.textContent = 'Nothing to copy yet.';
+          return;
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(value).then(function() {
+            if (feedback) feedback.textContent = 'Copied.';
+          }).catch(function() {
+            if (feedback) feedback.textContent = value;
+          });
+        } else if (feedback) {
+          feedback.textContent = value;
+        }
+      });
+    });
+
+    function setStatusPill(pill, state) {
+      if (!pill) return;
+      pill.classList.remove('ok', 'warn', 'err', 'neutral');
+      if (state === 'include' || state === 'verified') {
+        pill.classList.add('ok');
+      } else if (state === 'reject') {
+        pill.classList.add('err');
+      } else if (state === 'needs check') {
+        pill.classList.add('warn');
+      } else {
+        pill.classList.add('neutral');
+      }
+      pill.textContent = state;
+    }
+
+    function refreshSubmissionDoc(card) {
+      if (!card) return;
+      var checkbox = card.querySelector('input[name="submission_doc_verified"]');
+      var pill = card.querySelector('.submission-doc-file .pill');
+      setStatusPill(pill, checkbox && checkbox.checked ? 'verified' : 'needs check');
+    }
+
+    function refreshSubmissionImage(card) {
+      if (!card) return;
+      var checked = card.querySelector('input[type="radio"]:checked');
+      var pill = card.querySelector('.submission-image-status');
+      setStatusPill(pill, checked ? checked.value : 'unused');
+    }
+
+    document.querySelectorAll('[data-submission-doc-card]').forEach(function(card) {
+      var checkbox = card.querySelector('input[name="submission_doc_verified"]');
+      if (!checkbox) return;
+      checkbox.addEventListener('change', function() {
+        refreshSubmissionDoc(card);
+      });
+      refreshSubmissionDoc(card);
+    });
+
+    document.querySelectorAll('.submission-image-card').forEach(function(card) {
+      card.querySelectorAll('input[type="radio"]').forEach(function(radio) {
+        radio.addEventListener('change', function() {
+          refreshSubmissionImage(card);
+        });
+      });
+      refreshSubmissionImage(card);
+    });
+
+    var verifyDocsBtn = document.querySelector('[data-submission-verify-docs]');
+    if (verifyDocsBtn) {
+      verifyDocsBtn.addEventListener('click', function() {
+        document.querySelectorAll('[data-submission-doc-card]').forEach(function(card) {
+          var checkbox = card.querySelector('input[name="submission_doc_verified"]');
+          if (checkbox) checkbox.checked = true;
+          refreshSubmissionDoc(card);
+        });
+        markDirty(true);
+        updateLiveChecks();
+      });
     }
   })();
 </script>

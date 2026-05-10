@@ -17,6 +17,7 @@ requests==2.32.3               # HTTP for Ollama API
 
 # Image processing
 pillow==10.4.0                 # Image manipulation, contact sheet rendering, enhancement
+pillow-heif==0.20.0            # HEIC/HEIF creator-provided image normalization
 imagehash==4.3.1               # Perceptual hashing (dHash) for deduplication
 numpy==1.26.4                  # Required by OpenCV, imagehash, ndarray ops
 
@@ -28,3 +29,4 @@ rich==13.9.4                   # Pretty CLI output, progress bars
 # Testing (dev only — comment out for production-only installs)
 pytest==8.3.3
 pytest-cov==5.0.0
+httpx==0.28.1

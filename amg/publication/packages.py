@@ -19,6 +19,7 @@ from amg.config import (
 )
 from amg.publication.ledger import record_publication_event
 from amg.review.distribution_gate import check_distribution_ready
+from amg.ingest.submission_assets import load_submission_manifest
 
 PACKAGE_SCHEMA_VERSION = "1.0"
 
@@ -104,6 +105,7 @@ def build_publish_package(
         raise PackageError("; ".join(blocked_platforms))
 
     work_dir = _resolve_work_dir(scene_id, decision_log)
+    submission_manifest = load_submission_manifest(work_dir)
     meta = _review_metadata(review)
     cover_paths = _collect_cover_paths(work_dir, decision_log, review, meta)
     if not cover_paths:
@@ -136,6 +138,7 @@ def build_publish_package(
                 decision_log=decision_log,
                 review=review,
                 metadata=meta,
+                submission_manifest=submission_manifest or {},
                 cover_paths=cover_paths,
                 readiness=eligibility["readiness"],
             )
@@ -174,6 +177,7 @@ def _build_one_package(
     decision_log: Dict[str, Any],
     review: Dict[str, Any],
     metadata: Dict[str, Any],
+    submission_manifest: Dict[str, Any],
     cover_paths: List[Path],
     readiness: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -204,6 +208,18 @@ def _build_one_package(
 
     _write_json(records_dir / "decision_log.json", decision_log)
     _write_json(records_dir / "review.json", review)
+    if submission_manifest:
+        _write_json(records_dir / "submission_manifest.json", submission_manifest)
+        _copy_submission_documents(
+            package_dir=package_dir,
+            submission_manifest=submission_manifest,
+            review=review,
+        )
+        _copy_selected_provided_images(
+            package_dir=package_dir,
+            submission_manifest=submission_manifest,
+            review=review,
+        )
     dist_path = DISTRIBUTION_STATUS_DIR / f"{_safe_scene_id(scene_id)}.json"
     if dist_path.exists():
         shutil.copy2(dist_path, records_dir / "distribution_status.json")
@@ -212,12 +228,15 @@ def _build_one_package(
     _write_json(package_dir / "metadata.json", platform_metadata)
     _write_metadata_txt(package_dir / "metadata.txt", platform_metadata)
     _write_metadata_csv(package_dir / "metadata.csv", platform_metadata)
+    _write_copy_paste_md(package_dir / "copy_paste.md", platform_metadata)
+    _write_json(package_dir / "source_video.json", _source_video_reference(decision_log, submission_manifest))
 
     compliance = compliance_status_for_scene(
         scene_id,
         performers=metadata.get("performers") or [],
         target_platforms=[platform],
     )
+    compliance["scene_documents"] = _selected_document_summary(submission_manifest, review)
     _write_json(package_dir / "compliance_manifest.json", compliance)
 
     manifest = {
@@ -438,6 +457,119 @@ def _write_metadata_csv(path: Path, metadata: Dict[str, Any]) -> None:
                 "hero_cover": metadata.get("hero_cover", ""),
             }
         )
+
+
+def _write_copy_paste_md(path: Path, metadata: Dict[str, Any]) -> None:
+    lines = [
+        f"# {metadata.get('platform', '')} Copy/Paste Handoff",
+        "",
+        "## Title",
+        metadata.get("title", ""),
+        "",
+        "## Description",
+        metadata.get("long_description", ""),
+        "",
+        "## Categories",
+        ", ".join(metadata.get("categories") or []),
+        "",
+        "## Tags",
+        ", ".join(metadata.get("tags") or []),
+        "",
+        "## Performers",
+        ", ".join(metadata.get("performers") or []),
+        "",
+        "## Hero Cover",
+        metadata.get("hero_cover", ""),
+    ]
+    path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def _copy_submission_documents(
+    *,
+    package_dir: Path,
+    submission_manifest: Dict[str, Any],
+    review: Dict[str, Any],
+) -> None:
+    review_docs = review.get("submission_docs") if isinstance(review.get("submission_docs"), dict) else {}
+    out_dir = package_dir / "source_records" / "submission_documents"
+    copied = 0
+    for doc in submission_manifest.get("compliance_docs") or []:
+        if not isinstance(doc, dict):
+            continue
+        asset_id = str(doc.get("id") or "")
+        state = review_docs.get(asset_id) if isinstance(review_docs.get(asset_id), dict) else {}
+        if not bool(state.get("verified", doc.get("verified_default", True))):
+            continue
+        src = Path(str(doc.get("stored_path") or ""))
+        if not src.is_file():
+            continue
+        out_dir.mkdir(parents=True, exist_ok=True)
+        copied += 1
+        shutil.copy2(src, out_dir / f"{copied:02d}_{src.name}")
+
+
+def _copy_selected_provided_images(
+    *,
+    package_dir: Path,
+    submission_manifest: Dict[str, Any],
+    review: Dict[str, Any],
+) -> None:
+    image_state = (
+        review.get("provided_image_decisions")
+        if isinstance(review.get("provided_image_decisions"), dict)
+        else {}
+    )
+    out_dir = package_dir / "assets" / "provided_images"
+    copied = 0
+    for image in submission_manifest.get("provided_images") or []:
+        if not isinstance(image, dict):
+            continue
+        asset_id = str(image.get("id") or "")
+        state = image_state.get(asset_id) if isinstance(image_state.get(asset_id), dict) else {}
+        if state.get("decision") != "include":
+            continue
+        src = Path(str(image.get("preview_path") or image.get("stored_path") or ""))
+        if not src.is_file():
+            continue
+        out_dir.mkdir(parents=True, exist_ok=True)
+        copied += 1
+        shutil.copy2(src, out_dir / f"{copied:02d}_{src.name}")
+
+
+def _source_video_reference(decision_log: Dict[str, Any], submission_manifest: Dict[str, Any]) -> Dict[str, Any]:
+    selected = (submission_manifest or {}).get("selected_video") or {}
+    cloud_source = (submission_manifest or {}).get("cloud_source")
+    return {
+        "mode": (submission_manifest or {}).get("source_mode") or "unknown",
+        "filename": selected.get("filename") or Path(str(decision_log.get("scene_path") or "")).name,
+        "source_reference": selected.get("source_reference") or decision_log.get("scene_path"),
+        "cloud_source": cloud_source if isinstance(cloud_source, dict) else None,
+        "video_included_in_package": False,
+    }
+
+
+def _selected_document_summary(submission_manifest: Dict[str, Any], review: Dict[str, Any]) -> Dict[str, Any]:
+    review_docs = review.get("submission_docs") if isinstance(review.get("submission_docs"), dict) else {}
+    rows = []
+    for doc in (submission_manifest or {}).get("compliance_docs") or []:
+        if not isinstance(doc, dict):
+            continue
+        asset_id = str(doc.get("id") or "")
+        state = review_docs.get(asset_id) if isinstance(review_docs.get(asset_id), dict) else {}
+        verified = bool(state.get("verified", doc.get("verified_default", True)))
+        rows.append(
+            {
+                "id": asset_id,
+                "filename": doc.get("filename"),
+                "document_type": state.get("document_type") or doc.get("document_type"),
+                "assigned_performer": state.get("assigned_performer") or doc.get("guessed_performer"),
+                "verified": verified,
+            }
+        )
+    return {
+        "verified_count": sum(1 for row in rows if row.get("verified")),
+        "documents": rows,
+    }
 
 
 def _write_checksums(package_dir: Path) -> List[str]:

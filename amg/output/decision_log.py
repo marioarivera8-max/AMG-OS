@@ -143,6 +143,7 @@ def _summarize_input(metadata, studio_info, performer_info, title_info):
         "performer_code": performer_info.get("code") if performer_info else None,
         "performer_count": performer_info.get("total") if performer_info else 0,
         "performer_count_source": performer_info.get("source", "unknown"),
+        "performers": title_info.get("folder_performers", []) if title_info else [],
 
         "scene_type": title_info.get("primary_scene_type") if title_info else "STANDARD",
         "genres": title_info.get("detected_genres", []) if title_info else [],

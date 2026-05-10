@@ -240,6 +240,33 @@ class LocalBackend(JobBackend):
         on_log(f"[local-cloud] download complete -> {video_path}")
         on_progress(50)
         result = process_scene(video_path)
+        try:
+            from amg.ingest.submission_assets import scan_submission_assets
+
+            work_dir = result.get("work_dir")
+            if work_dir:
+                manifest = scan_submission_assets(
+                    scene_id=str(result.get("scene_id") or cloud_source.scene_id or Path(cloud_source.path).stem),
+                    selected_video=video_path,
+                    submission_root=download_dir,
+                    work_dir=Path(work_dir),
+                    source_mode="cloud",
+                    cloud_source={
+                        "remote": cloud_source.remote,
+                        "path": cloud_source.path,
+                        "scene_id": cloud_source.scene_id,
+                        "download_root": cloud_source.download_root,
+                        "relative_path": cloud_source.relative_path,
+                    },
+                    source_reference=f"cloud://{cloud_source.remote}/{cloud_source.path.lstrip('/')}",
+                )
+                result["submission_manifest_path"] = str(Path(work_dir) / "submission_manifest.json")
+                result["submission_assets"] = {
+                    "docs_found": len(manifest.get("compliance_docs") or []),
+                    "provided_images_found": len(manifest.get("provided_images") or []),
+                }
+        except Exception as exc:  # noqa: BLE001 - keep completed processing intact
+            on_log(f"[local-cloud] submission asset scan failed: {exc}")
         on_progress(100)
         on_log(
             f"[local-cloud] finished: success={result.get('success')} "
@@ -1383,7 +1410,7 @@ class RunpodBackend(JobBackend):
     @staticmethod
     def _infer_pod_work_dir_from_paths(values: list[str]) -> Optional[str]:
         candidates: list[str] = []
-        markers = ("/covers/", "/previews/", "/evidence/")
+        markers = ("/covers/", "/previews/", "/evidence/", "/submission_assets/")
         for value in values:
             if not value.startswith("/"):
                 continue
@@ -1397,6 +1424,7 @@ class RunpodBackend(JobBackend):
                 "/insight.json",
                 "/provided_thumbnails.json",
                 "/soft_thumbnail.json",
+                "/submission_manifest.json",
             ):
                 if normalized.endswith(filename):
                     candidates.append(normalized[: -len(filename)])

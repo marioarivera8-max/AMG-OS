@@ -439,7 +439,15 @@ class _JobTracker:
 # ---------- runner ----------
 
 
-def _run_pipeline_in_thread(tracker: _JobTracker, job_id: str, video_path: Path) -> None:
+def _run_pipeline_in_thread(
+    tracker: _JobTracker,
+    job_id: str,
+    video_path: Path,
+    *,
+    submission_root: Optional[Path] = None,
+    source_mode: str = "upload",
+    cloud_source: Optional[Dict[str, Any]] = None,
+) -> None:
     """Run amg.pipeline.process_scene in a background thread. Writes status
     transitions and the final result back into the tracker."""
     tracker.update(
@@ -490,6 +498,30 @@ def _run_pipeline_in_thread(tracker: _JobTracker, job_id: str, video_path: Path)
         if pipeline_work_dir:
             wd = Path(pipeline_work_dir)
             if wd.is_dir():
+                try:
+                    from amg.ingest.submission_assets import scan_submission_assets
+
+                    job_snapshot = tracker.serialize(job_id) or {}
+                    manifest = scan_submission_assets(
+                        scene_id=str(result.get("scene_id") or job_snapshot.get("scene_id") or ""),
+                        selected_video=video_path,
+                        submission_root=submission_root or video_path.parent,
+                        work_dir=wd,
+                        source_mode=source_mode,
+                        cloud_source=cloud_source,
+                        source_reference=(
+                            f"cloud://{cloud_source.get('remote')}/{str(cloud_source.get('path') or '').lstrip('/')}"
+                            if isinstance(cloud_source, dict) and cloud_source.get("remote") and cloud_source.get("path")
+                            else None
+                        ),
+                    )
+                    result["submission_manifest_path"] = str(wd / "submission_manifest.json")
+                    result["submission_assets"] = {
+                        "docs_found": len(manifest.get("compliance_docs") or []),
+                        "provided_images_found": len(manifest.get("provided_images") or []),
+                    }
+                except Exception as exc:  # noqa: BLE001 - do not fail completed processing
+                    tracker.append_log(job_id, f"[pod-worker] submission asset scan failed: {exc}")
                 update_kwargs["work_dir"] = str(wd)
         tracker.update(job_id, **update_kwargs)
         tracker.append_log(
@@ -668,7 +700,19 @@ def _run_cloud_job_in_thread(
 
     tracker.update(job_id, video_path=str(video_path))
     tracker.append_log(job_id, f"[pod-worker] download complete -> {video_path}")
-    _run_pipeline_in_thread(tracker, job_id, video_path)
+    _run_pipeline_in_thread(
+        tracker,
+        job_id,
+        video_path,
+        submission_root=download_dir,
+        source_mode="cloud",
+        cloud_source={
+            "remote": remote,
+            "path": remote_path,
+            "download_root": download_root,
+            "relative_path": relative_path,
+        },
+    )
 
 
 # ---------- zip streaming ----------

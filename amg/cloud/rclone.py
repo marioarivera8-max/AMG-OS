@@ -300,6 +300,47 @@ class Rclone:
         if rc != 0:
             raise RcloneCommandError(rc, "(streamed to on_log)", cmd)
 
+    def cat(
+        self,
+        src: str,
+        *,
+        chunk_size: int = 1024 * 1024,
+        timeout: float = 4 * 60 * 60,
+    ):
+        """Stream a remote file's bytes via ``rclone cat``.
+
+        The caller consumes the returned generator. No full local copy is
+        created, which keeps controller-side source-video downloads explicit
+        and low disk impact.
+        """
+        cmd = self._base_cmd() + ["cat", src]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        watchdog = threading.Timer(timeout, proc.kill)
+        watchdog.daemon = True
+        watchdog.start()
+
+        def _chunks():
+            try:
+                while True:
+                    chunk = proc.stdout.read(chunk_size) if proc.stdout else b""
+                    if not chunk:
+                        break
+                    yield chunk
+                _stdout, stderr = proc.communicate()
+                if proc.returncode != 0:
+                    err = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else str(stderr)
+                    raise RcloneCommandError(proc.returncode or 1, err, cmd)
+            finally:
+                watchdog.cancel()
+                if proc.poll() is None:
+                    proc.kill()
+
+        return _chunks()
+
     def validate_config(self, config_text: str) -> bool:
         """Write ``config_text`` to a temp file and run ``rclone listremotes``
         against it. Returns True if rclone parses the config without error.

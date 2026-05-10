@@ -17,6 +17,7 @@ htmlcov/
 build/
 dist/
 tmp/
+.tmp_pytest/
 tmp_*.py
 tmp_*.json
 debug-*.log

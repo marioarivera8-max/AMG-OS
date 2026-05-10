@@ -1,0 +1,199 @@
+{% if submission_workspace %}
+  {% set sv = submission_workspace.selected_video or {} %}
+  {% set summary = submission_workspace.summary or {} %}
+  <div class="card scene-side-card submission-workspace">
+    <div class="submission-topline">
+      <div>
+        <div class="card-section-title">Submission Workspace</div>
+        <div class="submission-title-row">
+          <span class="submission-source-name mono" title="{{ sv.relative_path or sv.filename or scene_source_name }}">
+            {{ sv.filename or scene_source_name or "source video" }}
+          </span>
+          <span class="pill {{ 'warn' if submission_workspace.warnings else 'ok' }}">
+            {{ "needs review" if submission_workspace.warnings else "ready for review" }}
+          </span>
+        </div>
+      </div>
+      <a class="btn btn-ghost submission-download" href="/scene/{{ scene_id }}/source-video">Download source video</a>
+    </div>
+
+    <div class="submission-metric-grid">
+      <div class="submission-metric">
+        <span class="submission-metric-label">Source</span>
+        <strong>{{ submission_workspace.source_mode or "local" }}</strong>
+      </div>
+      <div class="submission-metric">
+        <span class="submission-metric-label">Docs</span>
+        <strong>{{ summary.verified_docs or 0 }}/{{ submission_workspace.compliance_docs|length }}</strong>
+      </div>
+      <div class="submission-metric">
+        <span class="submission-metric-label">Images</span>
+        <strong>{{ summary.included_images or 0 }}/{{ submission_workspace.provided_images|length }}</strong>
+      </div>
+      <div class="submission-metric">
+        <span class="submission-metric-label">Secondary</span>
+        <strong>{{ submission_workspace.secondary_videos|length }}</strong>
+      </div>
+    </div>
+
+    {% if submission_workspace.warnings %}
+      <div class="submission-alert-list">
+        {% for w in submission_workspace.warnings[:6] %}
+          <div class="submission-alert">{{ w }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if submission_workspace.secondary_videos %}
+      <details class="submission-section">
+        <summary>
+          <span>Ignored secondary videos</span>
+          <span class="pill neutral">{{ submission_workspace.secondary_videos|length }}</span>
+        </summary>
+        <div class="submission-secondary-list">
+          {% for v in submission_workspace.secondary_videos[:8] %}
+            <div class="submission-secondary-row">
+              <span class="mono" title="{{ v.relative_path }}">{{ v.filename }}</span>
+              {% if v.duration_sec %}<span>{{ (v.duration_sec or 0)|round(0)|int }}s</span>{% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      </details>
+    {% endif %}
+
+    <div class="submission-section">
+      <div class="submission-section-head">
+        <div>
+          <div class="submission-section-title">Performers</div>
+          <div class="submission-section-sub">Confirmed talent for metadata and release matching</div>
+        </div>
+      </div>
+      <textarea
+        form="review-form"
+        class="submission-performer-input"
+        name="performers_confirmed"
+        rows="2"
+        placeholder="Name One, Name Two"
+      >{{ form_state.performers_confirmed if form_state else "" }}</textarea>
+    </div>
+
+    <div class="submission-section">
+      <div class="submission-section-head">
+        <div>
+          <div class="submission-section-title">2257 / Releases</div>
+          <div class="submission-section-sub">
+            {{ summary.verified_docs or 0 }} verified of {{ submission_workspace.compliance_docs|length }} found
+          </div>
+        </div>
+        {% if submission_workspace.compliance_docs %}
+          <button class="btn btn-ghost" type="button" data-submission-verify-docs>Verify all</button>
+        {% endif %}
+      </div>
+
+      {% if submission_workspace.compliance_docs %}
+        <div class="submission-doc-list">
+          {% for d in submission_workspace.compliance_docs %}
+            <div class="submission-doc-row" data-submission-doc-card>
+              <input form="review-form" type="hidden" name="submission_doc_id" value="{{ d.id }}" />
+              <div class="submission-doc-main">
+                <div class="submission-doc-file">
+                  <span class="mono" title="{{ d.relative_path }}">{{ d.filename }}</span>
+                  <span class="pill {{ 'ok' if d.verified else 'warn' }}">{{ "verified" if d.verified else "needs check" }}</span>
+                </div>
+                <div class="submission-doc-path mono" title="{{ d.relative_path }}">{{ d.relative_path or d.filename }}</div>
+              </div>
+
+              <div class="submission-doc-controls">
+                <label class="field">
+                  <span>Type</span>
+                  <select form="review-form" name="submission_doc_type_{{ d.id }}">
+                    {% for opt in ["2257", "model_release", "release", "id", "other"] %}
+                      <option value="{{ opt }}" {% if d.document_type_review == opt %}selected{% endif %}>{{ opt }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Performer</span>
+                  <input form="review-form" type="text" name="submission_doc_performer_{{ d.id }}" value="{{ d.assigned_performer }}" placeholder="optional match" />
+                </label>
+              </div>
+
+              <div class="submission-doc-actions">
+                <label class="submission-toggle">
+                  <input form="review-form" type="checkbox" name="submission_doc_verified" value="{{ d.id }}" {% if d.verified %}checked{% endif %} />
+                  <span class="submission-toggle-track"></span>
+                  <span>Verified</span>
+                </label>
+                {% if d.stored_path %}
+                  <a class="btn btn-ghost" href="/artifact?path={{ d.stored_path | urlencode }}">Open</a>
+                {% endif %}
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="submission-empty">No submission-folder docs were found.</div>
+      {% endif %}
+    </div>
+
+    <div class="submission-section">
+      <div class="submission-section-head">
+        <div>
+          <div class="submission-section-title">Actor-Provided Images</div>
+          <div class="submission-section-sub">
+            {{ summary.included_images or 0 }} included, {{ summary.rejected_images or 0 }} rejected
+          </div>
+        </div>
+      </div>
+
+      {% if submission_workspace.provided_images %}
+        <div class="submission-image-grid">
+          {% for img in submission_workspace.provided_images %}
+            <div class="submission-image-card">
+              <input form="review-form" type="hidden" name="provided_image_id" value="{{ img.id }}" />
+              <div class="submission-image-preview">
+                {% if img.preview_path %}
+                  <img
+                    src="/artifact?path={{ img.preview_path | urlencode }}"
+                    alt="{{ img.filename }}"
+                    loading="lazy"
+                    class="js-thumb-preview"
+                    data-preview-src="/artifact?path={{ img.preview_path | urlencode }}"
+                    data-preview-caption="{{ img.filename }}"
+                  />
+                {% else %}
+                  <div class="submission-image-missing">Preview unavailable</div>
+                {% endif %}
+                <span class="submission-image-status pill {{ 'ok' if img.decision == 'include' else ('err' if img.decision == 'reject' else 'neutral') }}">
+                  {{ img.decision }}
+                </span>
+              </div>
+              <div class="submission-image-body">
+                <div class="submission-image-name mono" title="{{ img.relative_path }}">{{ img.filename }}</div>
+                {% if img.conversion_warning %}
+                  <div class="submission-alert compact">{{ img.conversion_warning }}</div>
+                {% endif %}
+                <div class="submission-segmented" role="radiogroup" aria-label="Publish decision for {{ img.filename }}">
+                  <label>
+                    <input form="review-form" type="radio" name="provided_image_decision_{{ img.id }}" value="unused" {% if img.decision == "unused" %}checked{% endif %} />
+                    <span>Unused</span>
+                  </label>
+                  <label>
+                    <input form="review-form" type="radio" name="provided_image_decision_{{ img.id }}" value="include" {% if img.decision == "include" %}checked{% endif %} />
+                    <span>Include</span>
+                  </label>
+                  <label>
+                    <input form="review-form" type="radio" name="provided_image_decision_{{ img.id }}" value="reject" {% if img.decision == "reject" %}checked{% endif %} />
+                    <span>Reject</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="submission-empty">No actor-provided images were found.</div>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}

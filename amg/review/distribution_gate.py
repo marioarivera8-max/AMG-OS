@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from amg.config import (
+    DATA_DIR,
     DISTRIBUTION_STATUS_DIR,
     DECISION_LOGS_DIR,
     REVIEWED_DIR,
@@ -28,6 +29,7 @@ from amg.config import (
     PLATFORM_REQUIREMENTS,
     COVER_FLOOR,
 )
+from amg.ingest.submission_assets import load_submission_manifest
 from amg.utils.logging import get_logger
 
 log = get_logger("review.distribution_gate")
@@ -62,6 +64,8 @@ def validate_metadata_for_platforms(
     target_platforms: List[str],
     performers: Optional[List[str]] = None,
     decision_log: Optional[dict] = None,
+    review: Optional[dict] = None,
+    submission_manifest: Optional[dict] = None,
     metadata_only: bool = False,
 ) -> Dict[str, Any]:
     targets = [str(p).upper().strip() for p in (target_platforms or []) if str(p).strip()]
@@ -81,6 +85,8 @@ def validate_metadata_for_platforms(
             categories=categories,
             performers=performers or [],
             decision_log=decision_log or {},
+            review=review or {},
+            submission_manifest=submission_manifest or {},
             metadata_only=metadata_only,
         )
         per_platform[platform] = status
@@ -137,6 +143,7 @@ def check_distribution_ready(scene_id: str, verbose: bool = True) -> dict:
     # Load decision log + review
     decision_log = _load_json(DECISION_LOGS_DIR, scene_id)
     review = _load_json(REVIEWED_DIR, scene_id)
+    submission_manifest = _load_submission_manifest_for_scene(scene_id, decision_log)
 
     # ── Check 1: Decision log present ──
     if decision_log:
@@ -239,6 +246,8 @@ def check_distribution_ready(scene_id: str, verbose: bool = True) -> dict:
         target_platforms=target_platforms,
         performers=review_meta.get("performers") or [],
         decision_log=decision_log,
+        review=review,
+        submission_manifest=submission_manifest,
     )
     result["per_platform"] = validation["per_platform"]
 
@@ -262,6 +271,8 @@ def _validate_platform_metadata(
     categories: List[str],
     performers: List[str],
     decision_log: dict,
+    review: dict,
+    submission_manifest: dict,
     metadata_only: bool = False,
 ) -> dict:
     """Check readiness for a specific platform."""
@@ -316,9 +327,13 @@ def _validate_platform_metadata(
 
     # 2257 doc check
     if not metadata_only and reqs.get("requires_2257", True):
-        # decision log records compliance check result
         compliance = (decision_log or {}).get("execution", {}).get("error_codes", [])
-        if "E_COMPLIANCE_NO_2257" in compliance:
+        has_scene_2257 = _has_scene_doc(
+            review=review,
+            submission_manifest=submission_manifest,
+            accepted_types={"2257", "id"},
+        )
+        if "E_COMPLIANCE_NO_2257" in compliance and not has_scene_2257:
             blockers.append("Missing 2257 documentation")
 
     sensitive = (((decision_log or {}).get("review_flags") or {}).get("sensitive_content") or {})
@@ -329,7 +344,13 @@ def _validate_platform_metadata(
     # Individual model releases
     if not metadata_only and reqs.get("requires_individual_releases", False):
         for performer in performers:
-            if not _has_performer_release(performer):
+            if not _has_performer_release(performer) and not _has_scene_doc(
+                review=review,
+                submission_manifest=submission_manifest,
+                accepted_types={"model_release", "release"},
+                performer=performer,
+                performers=performers,
+            ):
                 blockers.append(f"Missing model release: {performer}")
 
     # Resolution check
@@ -433,6 +454,73 @@ def _has_performer_release(performer_name: str) -> bool:
     candidates = list(PERFORMER_DOCS_DIR.glob(f"{safe_name}*release*"))
     candidates += list(PERFORMER_DOCS_DIR.glob(f"*{safe_name}*release*"))
     return len(candidates) > 0
+
+
+def _load_submission_manifest_for_scene(scene_id: str, decision_log: Optional[dict]) -> dict:
+    candidates: List[Path] = []
+    if isinstance(decision_log, dict):
+        analysis_path = decision_log.get("analysis_path")
+        if analysis_path:
+            candidates.append(Path(analysis_path).parent)
+        scene_path = decision_log.get("scene_path")
+        if scene_path and "://" not in str(scene_path):
+            video = Path(scene_path)
+            candidates.append(video.parent / f"{video.stem}_amg_v11")
+    safe_id = "".join(c if c.isalnum() or c in "_-" else "_" for c in scene_id)[:120]
+    candidates.append(DATA_DIR / "work_dirs" / safe_id)
+    for work_dir in candidates:
+        manifest = load_submission_manifest(work_dir)
+        if manifest:
+            return manifest
+    return {}
+
+
+def _has_scene_doc(
+    *,
+    review: dict,
+    submission_manifest: dict,
+    accepted_types: set[str],
+    performer: Optional[str] = None,
+    performers: Optional[List[str]] = None,
+) -> bool:
+    docs = (submission_manifest or {}).get("compliance_docs") or []
+    if not isinstance(docs, list):
+        return False
+    review_docs = (review or {}).get("submission_docs") if isinstance((review or {}).get("submission_docs"), dict) else {}
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        asset_id = str(doc.get("id") or "")
+        state = review_docs.get(asset_id) if isinstance(review_docs.get(asset_id), dict) else {}
+        verified = bool(state.get("verified", doc.get("verified_default", True)))
+        if not verified:
+            continue
+        doc_type = str(state.get("document_type") or doc.get("document_type") or "other").lower()
+        if doc_type not in accepted_types:
+            continue
+        if performer and not _doc_matches_performer(
+            performer,
+            state.get("assigned_performer") or doc.get("guessed_performer") or "",
+            performers or [],
+        ):
+            continue
+        return True
+    return False
+
+
+def _doc_matches_performer(performer: str, assigned: str, performers: List[str]) -> bool:
+    performer_key = _name_key(performer)
+    assigned_key = _name_key(assigned)
+    if assigned_key and (assigned_key in performer_key or performer_key in assigned_key):
+        return True
+    # If there is one confirmed performer and an unassigned scene-local release,
+    # treat it as satisfying that performer unless the operator later assigns it
+    # differently.
+    return not assigned_key and len([p for p in performers if str(p).strip()]) <= 1
+
+
+def _name_key(value: str) -> str:
+    return "".join(c for c in str(value or "").lower() if c.isalnum())
 
 
 def _load_json(directory: Path, scene_id: str) -> Optional[dict]:

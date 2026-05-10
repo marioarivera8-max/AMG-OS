@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 from urllib.parse import quote_plus
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
@@ -34,6 +34,10 @@ from amg.config import (
     PLATFORM_REQUIREMENTS,
 )
 from amg.ingest.inventory import VIDEO_EXTENSIONS, discover_scenes
+from amg.ingest.submission_assets import (
+    load_submission_manifest,
+    scan_submission_assets,
+)
 from amg.learning.feedback_eval import evaluate_feedback, load_feedback_rows
 from amg.learning.example_bank import export_approved_example_bank
 from amg.scoring.insight_pipeline import generate_scene_insight_payload
@@ -348,6 +352,7 @@ def _build_review_form_state(
         "notes": _str_or_empty(reviewed.get("notes") or ""),
         "tags_csv": _str_or_empty(reviewed.get("tags_csv") or ", ".join(insight.get("ai_tags") or [])),
         "categories_csv": _str_or_empty(reviewed.get("categories_csv") or ", ".join(insight.get("ai_categories") or [])),
+        "performers_confirmed": _str_or_empty(", ".join(reviewed.get("performers_confirmed") or [])),
         "target_platforms": [
             str(p).upper().strip()
             for p in (reviewed.get("target_platforms") or list(PLATFORM_REQUIREMENTS.keys()))
@@ -854,6 +859,132 @@ def _load_soft_thumbnail(work_dir: Optional[Path]) -> Optional[dict]:
     return {"path": p, "score": score, "timestamp_sec": timestamp_sec}
 
 
+def _submission_workspace(work_dir: Optional[Path], reviewed: Optional[dict]) -> Optional[dict]:
+    manifest = load_submission_manifest(work_dir)
+    if not manifest:
+        return None
+    reviewed = reviewed if isinstance(reviewed, dict) else {}
+    doc_state = reviewed.get("submission_docs") if isinstance(reviewed.get("submission_docs"), dict) else {}
+    image_state = (
+        reviewed.get("provided_image_decisions")
+        if isinstance(reviewed.get("provided_image_decisions"), dict)
+        else {}
+    )
+
+    docs = []
+    for doc in manifest.get("compliance_docs") or []:
+        if not isinstance(doc, dict):
+            continue
+        asset_id = str(doc.get("id") or "")
+        state = doc_state.get(asset_id) if isinstance(doc_state.get(asset_id), dict) else {}
+        docs.append(
+            {
+                **doc,
+                "document_type_review": state.get("document_type") or doc.get("document_type") or "other",
+                "verified": bool(state.get("verified", doc.get("verified_default", True))),
+                "assigned_performer": state.get("assigned_performer") or doc.get("guessed_performer") or "",
+            }
+        )
+
+    images = []
+    for image in manifest.get("provided_images") or []:
+        if not isinstance(image, dict):
+            continue
+        asset_id = str(image.get("id") or "")
+        state = image_state.get(asset_id) if isinstance(image_state.get(asset_id), dict) else {}
+        images.append({**image, "decision": state.get("decision") or image.get("decision_default") or "unused"})
+
+    summary = {
+        "verified_docs": sum(1 for doc in docs if doc.get("verified")),
+        "included_images": sum(1 for image in images if image.get("decision") == "include"),
+        "rejected_images": sum(1 for image in images if image.get("decision") == "reject"),
+        "unused_images": sum(1 for image in images if image.get("decision") == "unused"),
+    }
+
+    return {
+        **manifest,
+        "compliance_docs": docs,
+        "provided_images": images,
+        "summary": summary,
+        "source_download_url": None,
+    }
+
+
+def _attach_submission_assets_for_job(job: dict, result: dict) -> None:
+    """Attach controller-side folder assets after a local/upload job finishes.
+
+    Runpod cloud jobs scan folder assets on the pod; this helper covers local
+    paths and browser folder uploads where the controller still has the full
+    submission folder available.
+    """
+    if not result or not result.get("work_dir"):
+        return
+    if job.get("cloud_source") is not None:
+        return
+    video_raw = job.get("video_path") or result.get("scene_path")
+    if not video_raw:
+        return
+    video_path = Path(video_raw)
+    if not video_path.exists():
+        return
+    upload_stats = job.get("upload_stats") if isinstance(job.get("upload_stats"), dict) else {}
+    root_raw = upload_stats.get("batch_dir") or str(video_path.parent)
+    root = Path(root_raw)
+    work_dir = Path(result["work_dir"])
+    if not work_dir.exists():
+        return
+    try:
+        manifest = scan_submission_assets(
+            scene_id=str(result.get("scene_id") or job.get("scene_id") or ""),
+            selected_video=video_path,
+            submission_root=root,
+            work_dir=work_dir,
+            source_mode=str(job.get("source_mode") or "local"),
+        )
+        result["submission_manifest_path"] = str(work_dir / "submission_manifest.json")
+        result["submission_assets"] = {
+            "docs_found": len(manifest.get("compliance_docs") or []),
+            "provided_images_found": len(manifest.get("provided_images") or []),
+        }
+    except Exception as exc:  # noqa: BLE001 - processing already completed
+        log.warn("Controller submission asset scan failed", scene_id=result.get("scene_id"), error=str(exc))
+
+
+def _parse_csv_list(raw: str) -> List[str]:
+    return [x.strip() for x in re.split(r"[,;\n]", str(raw or "")) if x.strip()]
+
+
+def _parse_submission_doc_review(form) -> Dict[str, dict]:
+    docs: Dict[str, dict] = {}
+    verified_ids = {str(x) for x in form.getlist("submission_doc_verified")}
+    for raw_id in form.getlist("submission_doc_id"):
+        asset_id = str(raw_id or "").strip()
+        if not asset_id:
+            continue
+        doc_type = str(form.get(f"submission_doc_type_{asset_id}") or "other").strip().lower()
+        if doc_type not in {"2257", "model_release", "release", "id", "other"}:
+            doc_type = "other"
+        docs[asset_id] = {
+            "verified": asset_id in verified_ids,
+            "document_type": doc_type,
+            "assigned_performer": str(form.get(f"submission_doc_performer_{asset_id}") or "").strip() or None,
+        }
+    return docs
+
+
+def _parse_provided_image_review(form) -> Dict[str, dict]:
+    images: Dict[str, dict] = {}
+    for raw_id in form.getlist("provided_image_id"):
+        asset_id = str(raw_id or "").strip()
+        if not asset_id:
+            continue
+        decision = str(form.get(f"provided_image_decision_{asset_id}") or "unused").strip().lower()
+        if decision not in {"include", "reject", "unused"}:
+            decision = "unused"
+        images[asset_id] = {"decision": decision}
+    return images
+
+
 def _regenerate_insight_for_scene(decision_log: dict, work_dir: Path, title_tone: str = TITLE_TONE_DEFAULT) -> dict:
     """Run scene insight + AI titles for an already-processed scene and write
     the result back to ``insight.json``. Returns the merged dict."""
@@ -1192,10 +1323,9 @@ def _expand_cloud_selection_to_videos(
         "relative_path": "sub/video.mp4" | None
       }
 
-    NOTE: even for folder picks we currently enqueue each video as an
-    independent cloud-source job that pulls only that file (download_root
-    stays None). Pulling the whole folder per scene causes repeated large
-    transfers when one folder contains many videos.
+    Folder picks preserve folder context by setting ``download_root`` and
+    ``relative_path`` so the pod can harvest submission docs/images beside
+    the selected video.
     """
     from amg.cloud.credentials import CredentialStore
     from amg.cloud.rclone import Rclone, RcloneError, RcloneNotFoundError
@@ -1242,8 +1372,8 @@ def _expand_cloud_selection_to_videos(
                 expanded.append(
                     {
                         "path": full_path,
-                        "download_root": None,
-                        "relative_path": None,
+                        "download_root": p,
+                        "relative_path": rel,
                     }
                 )
                 seen.add(full_path)
@@ -1310,6 +1440,7 @@ def _run_job(job_id: str, *, already_claimed: bool = False) -> None:
             )
         else:
             result = backend.run_job(video_path, on_log=_on_log, on_progress=_on_progress)
+        _attach_submission_assets_for_job(job, result)
         with _jobs_lock:
             job = _jobs[job_id]
             job["result"] = result
@@ -3156,6 +3287,7 @@ def create_app() -> FastAPI:
         analysis = None
         provided_thumb_report = None
         soft_thumbnail = None
+        submission_workspace = None
         kept_bundle = {"kept_count": 0, "kept_folder_path": None, "kept_zip_path": None}
 
         if work_dir:
@@ -3167,6 +3299,7 @@ def create_app() -> FastAPI:
             analysis = _load_scene_analysis(work_dir)
             provided_thumb_report = _load_provided_thumb_report(work_dir)
             soft_thumbnail = _load_soft_thumbnail(work_dir)
+            submission_workspace = _submission_workspace(work_dir, reviewed)
             reviewed_kept = []
             if isinstance(reviewed, dict):
                 reviewed_kept = reviewed.get("kept_covers") or reviewed.get("selected_covers") or []
@@ -3212,6 +3345,7 @@ def create_app() -> FastAPI:
                 "analysis": analysis,
                 "provided_thumb_report": provided_thumb_report,
                 "soft_thumbnail": soft_thumbnail,
+                "submission_workspace": submission_workspace,
                 "reviewed": reviewed,
                 "form_state": form_state,
                 "readiness": readiness,
@@ -3470,6 +3604,53 @@ def create_app() -> FastAPI:
         _start_dispatcher_if_needed()
         return RedirectResponse(url=f"/?job_id={job_id}", status_code=303)
 
+    @app.get("/scene/{scene_id}/source-video")
+    async def download_scene_source_video(scene_id: str):
+        decision_log = _load_decision_log(scene_id)
+        work_dir = _resolve_scene_work_dir(scene_id, decision_log)
+        manifest = load_submission_manifest(work_dir)
+        selected_video = (manifest or {}).get("selected_video") if isinstance(manifest, dict) else {}
+        cloud_source = (manifest or {}).get("cloud_source") if isinstance(manifest, dict) else None
+        if not cloud_source:
+            cloud_source = _latest_cloud_source_for_scene(scene_id)
+
+        if isinstance(cloud_source, dict) and cloud_source.get("remote") and cloud_source.get("path"):
+            from amg.cloud.credentials import CredentialStore
+            from amg.cloud.rclone import Rclone
+
+            remote = str(cloud_source["remote"])
+            path = str(cloud_source.get("path") or "")
+            filename = Path(path).name or f"{scene_id}.mp4"
+            store = CredentialStore()
+            cfg_cm = store.materialize_config(names=[remote])
+            cfg_path = cfg_cm.__enter__()
+
+            def _stream():
+                try:
+                    yield from Rclone(config_path=cfg_path).cat(f"{remote}:{path.lstrip('/')}")
+                finally:
+                    cfg_cm.__exit__(None, None, None)
+
+            return StreamingResponse(
+                _stream(),
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+
+        raw_path = (
+            (selected_video or {}).get("original_path")
+            or (selected_video or {}).get("path")
+            or ((decision_log or {}).get("scene_path") if isinstance(decision_log, dict) else "")
+        )
+        if not raw_path:
+            raise HTTPException(status_code=404, detail="source video reference unavailable")
+        source_path = Path(str(raw_path)).expanduser().resolve()
+        if not source_path.exists() or not source_path.is_file():
+            raise HTTPException(status_code=404, detail="source video file not available locally")
+        if not _path_within_roots(source_path, _artifact_allowed_roots()):
+            raise HTTPException(status_code=403, detail="source video is outside allowed roots")
+        return FileResponse(source_path, filename=source_path.name, media_type="application/octet-stream")
+
     @app.post("/scene/{scene_id}/insight", response_class=HTMLResponse)
     async def regenerate_insight(request: Request, scene_id: str):
         """HTMX-driven: regenerate AI insight + titles for an existing scene."""
@@ -3515,6 +3696,9 @@ def create_app() -> FastAPI:
         long_description = (form.get("long_description") or "").strip()
         tags_csv = (form.get("tags_csv") or "").strip()
         categories_csv = (form.get("categories_csv") or "").strip()
+        performers_confirmed = _parse_csv_list(form.get("performers_confirmed") or "")
+        submission_docs = _parse_submission_doc_review(form)
+        provided_image_decisions = _parse_provided_image_review(form)
         metadata_reason_codes_raw = (form.get("metadata_reason_codes") or "").strip()
         metadata_reason_codes = _parse_reason_codes(
             metadata_reason_codes_raw,
@@ -3538,6 +3722,7 @@ def create_app() -> FastAPI:
         insight = _load_insight(work_dir)
         cover_items = _cover_items(scene_id, decision_log, work_dir)
         soft_thumbnail = _load_soft_thumbnail(work_dir)
+        submission_manifest = load_submission_manifest(work_dir)
         rule_pack_id = str((insight or {}).get("rule_pack_id") or "").strip() or None
         rule_pack_applied = bool((insight or {}).get("rule_pack_applied")) if isinstance(insight, dict) else None
         rule_pack_mode = str((insight or {}).get("rule_pack_mode") or "").strip() or None
@@ -3614,8 +3799,13 @@ def create_app() -> FastAPI:
             tags=_parse_csv_tokens(tags_csv, lowercase=True),
             categories=_parse_csv_tokens(categories_csv, title_case=True),
             target_platforms=target_platforms,
-            performers=[],
+            performers=performers_confirmed,
             decision_log=decision_log or {},
+            review={
+                "submission_docs": submission_docs,
+                "provided_image_decisions": provided_image_decisions,
+            },
+            submission_manifest=submission_manifest or {},
         )
         learning_signals = _build_metadata_learning_signals(
             insight=insight,
@@ -3641,6 +3831,9 @@ def create_app() -> FastAPI:
             "long_description": long_description or None,
             "tags_csv": tags_csv or None,
             "categories_csv": categories_csv or None,
+            "performers_confirmed": performers_confirmed,
+            "submission_docs": submission_docs,
+            "provided_image_decisions": provided_image_decisions,
             "target_platforms": target_platforms,
             "metadata_validation": metadata_validation,
             "notes": notes or None,
