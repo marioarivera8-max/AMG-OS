@@ -11,6 +11,7 @@ from amg.ingest.folder_context import (
     best_text_for_parsing,
 )
 from amg.ingest.title_parser import parse_title_with_context, parse_title
+from amg.ingest.title_parser import infer_performers_from_title_text
 from amg.ingest.performer_code import (
     parse_performer_code,
     parse_performer_code_with_context,
@@ -191,6 +192,13 @@ class TestParseTitleWithContext:
         result = parse_title(video)
         assert "couple swap" in result["description"]
         assert result["is_generic_filename"] is False
+
+    def test_infers_performers_from_scene_filename_pattern(self):
+        text = (
+            "045_Gizelle__Kazumi__Nicole_Hardcore_Squirting_Orgy_"
+            "045_Gizelle, Kazumi, Nicole_Hardcore Squirting Orgy"
+        )
+        assert infer_performers_from_title_text(text) == ["Gizelle", "Kazumi", "Nicole"]
 
 
 # ---- performer code integration ----

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-AMG OS CLI — v11.1.
+AMG OS CLI — v1.
 
 Commands:
     amg process <path>          Process a single scene
     amg batch <path>            Process all scenes in a folder
     amg review <scene>          Open human review form for processed scene
     amg ready <scene>           Distribution-ready check
+    amg package <scene>         Build publish-ready handoff package
+    amg publication <...>       Track platform submission/publication status
+    amg compliance <...>        Manage local compliance document registry
     amg find [filters]          Search scene library
     amg dvd-compile <s1>...     Compile DVD from 4+ scenes
     amg dashboard               Performance trends + recent activity
@@ -64,7 +67,7 @@ from amg.utils.error_form import format_error_report, format_partial_success_rep
 def main():
     parser = argparse.ArgumentParser(
         prog="amg",
-        description="AMG OS — Adult VOD scene processor (v11.1)",
+        description="AMG OS — Adult VOD scene processor (v1)",
     )
     parser.add_argument("--version", action="version", version=f"AMG OS {__version__}")
 
@@ -88,6 +91,73 @@ def main():
     # ready
     p_ready = subparsers.add_parser("ready", help="Distribution-ready check")
     p_ready.add_argument("scene_id", type=str)
+
+    # package
+    p_package = subparsers.add_parser("package", help="Build platform handoff package")
+    p_package.add_argument("scene_id", type=str)
+    p_package.add_argument(
+        "--platform",
+        action="append",
+        default=None,
+        help="Target platform (repeatable). Defaults to reviewed targets; use 'all' for all reviewed targets.",
+    )
+    p_package.add_argument("--force", action="store_true", help="Overwrite an existing package ID if needed")
+    p_package.add_argument("--json", action="store_true", help="Print machine-readable result")
+
+    # publication
+    p_pub = subparsers.add_parser("publication", help="Track platform publication status")
+    pub_sub = p_pub.add_subparsers(dest="publication_cmd", required=True)
+
+    p_pub_status = pub_sub.add_parser("status", help="Show latest publication status for a scene")
+    p_pub_status.add_argument("scene_id", type=str)
+    p_pub_status.add_argument("--json", action="store_true")
+
+    p_pub_events = pub_sub.add_parser("events", help="Show recent publication ledger events")
+    p_pub_events.add_argument("--scene-id", type=str, default=None)
+    p_pub_events.add_argument("--limit", type=int, default=20)
+    p_pub_events.add_argument("--json", action="store_true")
+
+    p_pub_mark = pub_sub.add_parser("mark", help="Record a publication status update")
+    p_pub_mark.add_argument("scene_id", type=str)
+    p_pub_mark.add_argument("--platform", required=True)
+    p_pub_mark.add_argument(
+        "--status",
+        required=True,
+        choices=["packaged", "submitted", "accepted", "published", "rejected", "needs_changes", "removed"],
+    )
+    p_pub_mark.add_argument("--external-id", default=None)
+    p_pub_mark.add_argument("--receipt", type=Path, default=None)
+    p_pub_mark.add_argument("--package-path", type=Path, default=None)
+    p_pub_mark.add_argument("--notes", default=None)
+    p_pub_mark.add_argument("--rejection-reason", default=None)
+    p_pub_mark.add_argument("--json", action="store_true")
+
+    # compliance
+    p_comp = subparsers.add_parser("compliance", help="Manage compliance document registry")
+    comp_sub = p_comp.add_subparsers(dest="compliance_cmd", required=True)
+
+    p_comp_scan = comp_sub.add_parser("scan-docs", help="Index obvious files in performer_documents")
+    p_comp_scan.add_argument("--json", action="store_true")
+
+    p_comp_status = comp_sub.add_parser("status", help="Show registry coverage for a scene")
+    p_comp_status.add_argument("scene_id", type=str)
+    p_comp_status.add_argument("--platform", action="append", default=None)
+    p_comp_status.add_argument("--performer", action="append", default=None)
+    p_comp_status.add_argument("--json", action="store_true")
+
+    p_comp_perf = comp_sub.add_parser("performer", help="Show one performer registry row")
+    p_comp_perf.add_argument("name", type=str)
+    p_comp_perf.add_argument("--json", action="store_true")
+
+    p_comp_add = comp_sub.add_parser("add-doc", help="Add or update a performer document")
+    p_comp_add.add_argument("performer", type=str)
+    p_comp_add.add_argument("--type", default="model_release", dest="document_type")
+    p_comp_add.add_argument("--path", type=Path, required=True)
+    p_comp_add.add_argument("--platform", action="append", default=None)
+    p_comp_add.add_argument("--issue-date", default=None)
+    p_comp_add.add_argument("--expiry-date", default=None)
+    p_comp_add.add_argument("--notes", default=None)
+    p_comp_add.add_argument("--json", action="store_true")
 
     # find
     p_find = subparsers.add_parser("find", help="Search scene library")
@@ -468,6 +538,9 @@ def _dispatch(args):
     if cmd == "batch":     return cmd_batch(args)
     if cmd == "review":    return cmd_review(args)
     if cmd == "ready":     return cmd_ready(args)
+    if cmd == "package":   return cmd_package(args)
+    if cmd == "publication": return cmd_publication(args)
+    if cmd == "compliance": return cmd_compliance(args)
     if cmd == "find":      return cmd_find(args)
     if cmd == "dvd-compile": return cmd_dvd_compile(args)
     if cmd == "dashboard": return cmd_dashboard(args)
@@ -666,6 +739,196 @@ def cmd_ready(args):
     return 0 if result["overall_ready"] else 1
 
 
+def cmd_package(args):
+    """Build a platform handoff package after review/finalization."""
+    from amg.publication.packages import PackageError, build_publish_package
+
+    init_logging()
+    try:
+        result = build_publish_package(
+            args.scene_id,
+            platforms=args.platform,
+            force=args.force,
+            operator=DEFAULT_OPERATOR,
+        )
+    except PackageError as e:
+        print(f"Package blocked: {e}")
+        return 1
+
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+
+    print(f"Publish package built for {result['scene_id']}:")
+    for row in result.get("packages", []):
+        print(f"  {row['platform']}: {row.get('package_path')}")
+        if row.get("package_zip_path"):
+            print(f"    zip: {row.get('package_zip_path')}")
+        print(f"    manifest: {row.get('manifest_path')}")
+    print("Operator review and manual platform submission are still required.")
+    return 0
+
+
+def cmd_publication(args):
+    """Track manual publication milestones."""
+    from amg.publication.ledger import (
+        list_publication_events,
+        load_publication_status,
+        record_publication_event,
+    )
+
+    if args.publication_cmd == "status":
+        status = load_publication_status(args.scene_id)
+        if args.json:
+            print(json.dumps(status, indent=2, default=str))
+            return 0
+        print(f"Publication status for {args.scene_id}:")
+        platforms = status.get("platforms") or {}
+        if not platforms:
+            print("  No publication events recorded.")
+            return 0
+        for platform, row in sorted(platforms.items()):
+            print(f"  {platform}: {row.get('status', 'unknown')} at {row.get('updated_at', '-')}")
+            if row.get("external_id"):
+                print(f"    external id: {row['external_id']}")
+            if row.get("package_path"):
+                print(f"    package: {row['package_path']}")
+        return 0
+
+    if args.publication_cmd == "events":
+        events = list_publication_events(scene_id=args.scene_id, limit=args.limit)
+        if args.json:
+            print(json.dumps(events, indent=2, default=str))
+            return 0
+        if not events:
+            print("No publication events recorded.")
+            return 0
+        for row in events:
+            print(
+                f"{row.get('timestamp', '-')} :: {row.get('scene_id')} :: "
+                f"{row.get('platform')} :: {row.get('status')}"
+            )
+            if row.get("notes"):
+                print(f"  notes: {row['notes']}")
+        return 0
+
+    if args.publication_cmd == "mark":
+        event = record_publication_event(
+            args.scene_id,
+            args.platform,
+            args.status,
+            operator=DEFAULT_OPERATOR,
+            external_id=args.external_id,
+            receipt_path=args.receipt,
+            package_path=args.package_path,
+            notes=args.notes,
+            rejection_reason=args.rejection_reason,
+        )
+        if args.json:
+            print(json.dumps(event, indent=2, default=str))
+            return 0
+        print(
+            f"Recorded {event['status']} for {event['scene_id']} "
+            f"on {event['platform']} at {event['timestamp']}."
+        )
+        return 0
+
+    return 1
+
+
+def cmd_compliance(args):
+    """Manage the local compliance registry."""
+    from amg.compliance.registry import (
+        compliance_status_for_scene,
+        performer_status,
+        scan_document_directory,
+        upsert_document,
+    )
+
+    if args.compliance_cmd == "scan-docs":
+        result = scan_document_directory()
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print(
+                f"Indexed {result['indexed']} of {result['scanned']} scanned document(s). "
+                f"Registry: {result['registry_path']}"
+            )
+        return 0
+
+    if args.compliance_cmd == "add-doc":
+        row = upsert_document(
+            args.performer,
+            args.document_type,
+            args.path,
+            platforms=args.platform,
+            issue_date=args.issue_date,
+            expiry_date=args.expiry_date,
+            notes=args.notes,
+        )
+        if args.json:
+            print(json.dumps(row, indent=2, default=str))
+        else:
+            print(f"Saved {row['document_type']} for {args.performer}: {row['path']}")
+        return 0
+
+    if args.compliance_cmd == "performer":
+        status = performer_status(args.name)
+        if args.json:
+            print(json.dumps(status, indent=2, default=str))
+        else:
+            print(f"Compliance docs for {status['name']}:")
+            if not status.get("documents"):
+                print("  No documents registered.")
+            for doc in status.get("documents") or []:
+                expires = f", expires {doc.get('expiry_date')}" if doc.get("expiry_date") else ""
+                print(f"  {doc.get('document_type')}: {doc.get('path')}{expires}")
+        return 0
+
+    if args.compliance_cmd == "status":
+        performers = args.performer or _review_performers_for_cli(args.scene_id)
+        result = compliance_status_for_scene(
+            args.scene_id,
+            performers=performers,
+            target_platforms=args.platform,
+        )
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+            return 0
+        print(f"Compliance registry status for {args.scene_id}:")
+        if result.get("performers"):
+            print(f"  Performers: {', '.join(result['performers'])}")
+        else:
+            print("  Performers: none confirmed")
+        for platform, row in result.get("per_platform", {}).items():
+            state = "READY" if row.get("ready") else "BLOCKED"
+            print(f"  {platform}: {state}")
+            for blocker in row.get("blockers") or []:
+                print(f"    blocker: {blocker}")
+            for warning in row.get("warnings") or []:
+                print(f"    warning: {warning}")
+        return 0 if result.get("overall_ready") else 1
+
+    return 1
+
+
+def _review_performers_for_cli(scene_id: str) -> list[str]:
+    from amg.config import REVIEWED_DIR
+
+    safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in scene_id)[:120]
+    path = REVIEWED_DIR / f"{safe}.json"
+    if not path.exists():
+        return []
+    try:
+        review = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    performers = review.get("performers_confirmed") or []
+    if not isinstance(performers, list):
+        return []
+    return [str(p).strip() for p in performers if str(p).strip()]
+
+
 def cmd_find(args):
     """Search scene library."""
     from amg.library.search import find_scenes, format_search_results
@@ -844,7 +1107,7 @@ def cmd_verify(args):
 
     init_logging()
     print("=" * 64)
-    print("AMG OS v11.1 Installation Health Check")
+    print("AMG OS v1 Installation Health Check")
     print("=" * 64)
 
     checks = []

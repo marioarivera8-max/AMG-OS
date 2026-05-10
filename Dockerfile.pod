@@ -134,23 +134,6 @@ RUN curl -fsSL "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VER
     && rm -f /tmp/ollama.tar.zst \
     && /usr/local/bin/ollama --version
 
-WORKDIR /app
-
-# AMG dependencies — same install layout as the controller image.
-COPY pyproject.toml ./
-RUN mkdir -p amg && touch amg/__init__.py \
-    && pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -e .
-
-# Real source replaces the stub.
-COPY amg/ ./amg/
-
-# Pod entrypoint script: starts ollama in background, waits for ready,
-# pre-pulls the vision model (cached if the network volume is attached),
-# then execs `amg pod-worker`.
-COPY scripts/pod_entrypoint.sh /usr/local/bin/pod-entrypoint
-RUN chmod +x /usr/local/bin/pod-entrypoint
-
 # Defaults.
 # AMG_DATA_DIR=/data is ephemeral container scratch (artifacts get shipped
 #   back to the controller via /jobs/{id}/zip, no need to persist on volume).
@@ -180,6 +163,8 @@ ENV AMG_DATA_DIR=/data \
 # /workspace/ollama into the volume itself.
 RUN mkdir -p /data /workspace
 
+# Keep the heavyweight baked model before any AMG source copies. Normal
+# code-only deploys should invalidate only small app layers near the end.
 # Bake the vision model into the image so cold-starts don't pay for a 5 GB
 # `ollama pull` from the registry. Critical for H100 SXM where there is no
 # network volume in the same datacenter (EU-RO-1 only has 4090s); without
@@ -229,6 +214,25 @@ RUN set -eux; \
     wait "${OLLAMA_PID}" 2>/dev/null || true; \
     rm -f /tmp/ollama-build.log /tmp/ollama-list.log; \
     du -sh "${OLLAMA_MODELS}" || true
+
+WORKDIR /app
+
+# AMG dependencies, using the same install layout as the controller image.
+# Keep these app layers after the model bake so code-only deploys do not
+# invalidate the multi-GB Ollama model cache layer above.
+COPY pyproject.toml ./
+RUN mkdir -p amg && touch amg/__init__.py \
+    && pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -e .
+
+# Real source replaces the stub.
+COPY amg/ ./amg/
+
+# Pod entrypoint script: starts ollama in background, waits for ready,
+# pre-pulls the vision model (cached if the network volume is attached),
+# then execs `amg pod-worker`.
+COPY scripts/pod_entrypoint.sh /usr/local/bin/pod-entrypoint
+RUN chmod +x /usr/local/bin/pod-entrypoint
 
 # pod-worker port (controller talks to it via the Runpod proxy URL).
 EXPOSE 8000

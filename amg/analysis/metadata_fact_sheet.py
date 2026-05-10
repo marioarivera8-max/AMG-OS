@@ -324,11 +324,6 @@ def _category_candidates(weighted_tags: List[Dict[str, Any]]) -> List[Dict[str, 
         if not cat:
             continue
         _add_candidate(rows, _normalize_category(cat), float(signal.get("score") or 0.0), label)
-    if len(rows) < 8:
-        for cat in MARKET_CATEGORY_PRIORITIES:
-            _add_candidate(rows, _normalize_category(cat), 0.2, "market_prior")
-            if len(rows) >= 8:
-                break
     ranked = list(rows.values())
     prio = {c.lower(): i for i, c in enumerate(MARKET_CATEGORY_PRIORITIES)}
     ranked.sort(key=lambda x: (-float(x.get("confidence") or 0.0), prio.get(str(x.get("category")).lower(), 999), str(x.get("category"))))
@@ -347,11 +342,6 @@ def _tag_candidates(weighted_tags: List[Dict[str, Any]], *, insight: Dict[str, A
             _add_candidate(rows, _normalize_tag(raw), 0.35, f"insight_{key}", key_name="tag")
     for feature in insight.get("notable_features") or []:
         _add_candidate(rows, _normalize_tag(feature), 0.35, "insight_feature", key_name="tag")
-    if len(rows) < 15:
-        for tag in MARKET_TAG_PRIORITIES:
-            _add_candidate(rows, _normalize_tag(tag), 0.18, "market_prior", key_name="tag")
-            if len(rows) >= 15:
-                break
     ranked = list(rows.values())
     prio = {t.lower(): i for i, t in enumerate(MARKET_TAG_PRIORITIES)}
     ranked.sort(key=lambda x: (-float(x.get("confidence") or 0.0), prio.get(str(x.get("tag")).lower(), 999), str(x.get("tag"))))
@@ -472,7 +462,7 @@ def _action_beats(sections: List[Dict[str, Any]], weighted_tags: List[Dict[str, 
             {
                 "label": label,
                 "retail_label": _label_to_tag(label),
-                "confidence": max(float(sec.get("confidence") or 0.0), tag_score.get(label, 0.0)),
+                "confidence": round(min(1.0, max(float(sec.get("confidence") or 0.0), tag_score.get(label, 0.0))), 4),
                 "thumbnail_timestamp": sec.get("thumbnail_timestamp"),
                 "evidence_ids": list(sec.get("evidence_ids") or []),
             }

@@ -154,7 +154,12 @@ def generate_titles_with_insight(
         _seed_taxonomy_from_fact_sheet(metadata_fact_sheet),
     )
 
-    if not ai_client.is_alive():
+    ai_health_ok = True
+    try:
+        ai_health_ok = bool(ai_client.is_alive())
+    except Exception:
+        ai_health_ok = False
+    if not ai_health_ok and not isinstance(ai_client, AIClient):
         log.warn("AI offline — using template title fallback")
         titles = _annotate(_fallback_titles(studio, performers, scene_type, genres, n_suggestions))
         cats = _normalize_categories([], seed_taxonomy.get("categories", []))
@@ -178,7 +183,12 @@ def generate_titles_with_insight(
             "text_model_effective": None,
             "text_model_fallback_used": False,
             "text_model_fallback_model": None,
+            "text_generation_status": "ai_offline",
+            "text_generation_error_code": "E_AI_UNAVAILABLE",
+            "text_generation_error_message": "AI health check failed before title generation",
         }
+    if not ai_health_ok:
+        log.warn("AI health check failed before title generation; attempting text call anyway")
 
     retrieval_stage = _resolve_retrieval_stage(rule_pack)
     retrieval_scope = _retrieval_scope_for_stage(retrieval_stage)
@@ -234,6 +244,9 @@ def generate_titles_with_insight(
             "text_model_effective": None,
             "text_model_fallback_used": False,
             "text_model_fallback_model": None,
+            "text_generation_status": "ai_generation_failed",
+            "text_generation_error_code": response.error_code,
+            "text_generation_error_message": response.error_message,
         }
 
     response_meta = response.extras or {}
@@ -292,6 +305,9 @@ def generate_titles_with_insight(
         "text_model_effective": response_meta.get("model_used") or getattr(ai_client, "text_model", None),
         "text_model_fallback_used": bool(response_meta.get("fallback_model_used")),
         "text_model_fallback_model": response_meta.get("fallback_model_used"),
+        "text_generation_status": "ai_used",
+        "text_generation_error_code": None,
+        "text_generation_error_message": None,
         "rule_pack_id": (rule_pack or {}).get("rule_pack_id") if isinstance(rule_pack, dict) else None,
         "retrieval_stage": retrieval_stage,
         "retrieval_scope": retrieval_scope,
@@ -441,17 +457,30 @@ def _seed_taxonomy_from_fact_sheet(fact_sheet: Optional[Dict[str, Any]]) -> Dict
     categories = [
         str(row.get("category") or "").strip()
         for row in (fact_sheet.get("category_candidates") or [])
-        if isinstance(row, dict) and str(row.get("category") or "").strip()
+        if _fact_sheet_candidate_is_supported(row) and str(row.get("category") or "").strip()
     ]
     tags = [
         str(row.get("tag") or "").strip()
         for row in (fact_sheet.get("tag_candidates") or [])
-        if isinstance(row, dict) and str(row.get("tag") or "").strip()
+        if _fact_sheet_candidate_is_supported(row) and str(row.get("tag") or "").strip()
     ]
     return {
         "categories": list(dict.fromkeys(categories))[:15],
         "tags": list(dict.fromkeys(tags))[:30],
     }
+
+
+def _fact_sheet_candidate_is_supported(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    sources = {str(x).lower() for x in (row.get("sources") or [])}
+    if sources and sources <= {"market_prior"}:
+        return False
+    try:
+        confidence = float(row.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return confidence >= 0.25 or "base" in sources
 
 
 def _merge_seed_taxonomy(*items: Dict[str, List[str]]) -> Dict[str, List[str]]:
@@ -754,12 +783,6 @@ def _normalize_categories(values: List[str], seed_values: List[str]) -> List[str
             t = " ".join(part.capitalize() for part in t.split())
         cleaned.append(t)
     prioritized = _prioritize_tokens(cleaned, MARKET_CATEGORY_PRIORITIES)
-    if len(prioritized) < CATEGORY_COUNT_MIN:
-        for c in MARKET_CATEGORY_PRIORITIES:
-            if c not in prioritized:
-                prioritized.append(c)
-            if len(prioritized) >= CATEGORY_COUNT_MIN:
-                break
     return prioritized[:CATEGORY_COUNT_MAX]
 
 
@@ -787,12 +810,6 @@ def _normalize_tags(values: List[str], seed_values: List[str]) -> List[str]:
             continue
         cleaned.append(t)
     prioritized = _prioritize_tokens(cleaned, MARKET_TAG_PRIORITIES)
-    if len(prioritized) < TAG_COUNT_MIN:
-        for t in MARKET_TAG_PRIORITIES:
-            if t not in prioritized:
-                prioritized.append(t)
-            if len(prioritized) >= TAG_COUNT_MIN:
-                break
     return prioritized[:TAG_COUNT_MAX]
 
 

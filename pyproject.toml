@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amg-os"
-version = "11.0.0"
+version = "1.0.0"
 description = "AMG OS — Adult VOD scene processor for B2B distribution"
 readme = "README.md"
 requires-python = ">=3.11"

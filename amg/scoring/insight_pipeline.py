@@ -128,6 +128,8 @@ def generate_scene_insight_payload(
     metadata_initial = _validate_generated_metadata(
         title_payload=title_payload,
         target_platforms=target_platforms,
+        performers=performers,
+        source_resolution=_source_resolution(metadata_fact_sheet),
     )
     repair_attempts = 0
     metadata_final = metadata_initial
@@ -137,6 +139,10 @@ def generate_scene_insight_payload(
             genres=title_info.get("detected_genres", []),
             title_text=_primary_title_text(title_payload),
             target_platforms=target_platforms,
+            performers=performers,
+            studio=studio_name,
+            scene_type=primary_type,
+            metadata_fact_sheet=metadata_fact_sheet,
         )
         if repaired:
             repair_attempts += 1
@@ -144,6 +150,8 @@ def generate_scene_insight_payload(
             metadata_final = _validate_generated_metadata(
                 title_payload=title_payload,
                 target_platforms=target_platforms,
+                performers=performers,
+                source_resolution=_source_resolution(metadata_fact_sheet),
             )
 
         if metadata_final.get("blockers") and ai_client and ai_client.is_alive():
@@ -161,6 +169,8 @@ def generate_scene_insight_payload(
                 metadata_final = _validate_generated_metadata(
                     title_payload=title_payload,
                     target_platforms=target_platforms,
+                    performers=performers,
+                    source_resolution=_source_resolution(metadata_fact_sheet),
                 )
 
     payload: Dict[str, Any] = {
@@ -193,6 +203,9 @@ def generate_scene_insight_payload(
         "text_model_used": title_payload.get("text_model_effective") or (getattr(ai_client, "text_model", None) if ai_client else None),
         "text_model_fallback_used": bool(title_payload.get("text_model_fallback_used", False)),
         "text_model_fallback_model": title_payload.get("text_model_fallback_model"),
+        "text_generation_status": title_payload.get("text_generation_status"),
+        "text_generation_error_code": title_payload.get("text_generation_error_code"),
+        "text_generation_error_message": title_payload.get("text_generation_error_message"),
         "retrieval_stage": title_payload.get("retrieval_stage"),
         "retrieval_scope": title_payload.get("retrieval_scope"),
         "retrieved_examples_count": int(title_payload.get("retrieved_examples_count", 0) or 0),
@@ -247,6 +260,9 @@ def _resolve_performers(folder_ctx, title_info: Dict[str, Any]) -> List[str]:
     performers = list(folder_ctx.performers or [])
     if performers:
         return performers
+    inferred = list(title_info.get("inferred_performers") or [])
+    if inferred:
+        return inferred
     regulars = (
         (title_info.get("folder_performers") or [])
         or (((title_info.get("studio_profile") or {}).get("performers") or {}).get("regular", []))
@@ -288,7 +304,7 @@ def _normalize_text_tokens(values: Any, *, title_case: bool = False) -> List[str
         if not t:
             continue
         if title_case:
-            t = " ".join(part.capitalize() for part in t.split())
+            t = _platform_title_case(t)
         key = t.lower()
         if key in seen:
             continue
@@ -297,13 +313,41 @@ def _normalize_text_tokens(values: Any, *, title_case: bool = False) -> List[str
     return out
 
 
-def _validate_generated_metadata(title_payload: Dict[str, Any], target_platforms: List[str]) -> Dict[str, Any]:
+def _platform_title_case(token: str) -> str:
+    out = []
+    for part in str(token or "").split():
+        lower = part.lower()
+        if lower in {"hd", "uhd", "pov", "vr", "4k"}:
+            out.append(lower.upper())
+        else:
+            out.append(part.capitalize())
+    return " ".join(out)
+
+
+def _source_resolution(metadata_fact_sheet: Optional[Dict[str, Any]]) -> Optional[str]:
+    source = (metadata_fact_sheet or {}).get("source") if isinstance(metadata_fact_sheet, dict) else {}
+    resolution = source.get("resolution") if isinstance(source, dict) else None
+    resolution = str(resolution or "").strip()
+    return resolution or None
+
+
+def _validate_generated_metadata(
+    title_payload: Dict[str, Any],
+    target_platforms: List[str],
+    *,
+    performers: Optional[List[str]] = None,
+    source_resolution: Optional[str] = None,
+) -> Dict[str, Any]:
+    decision_log = {"input": {"resolution": source_resolution}} if source_resolution else None
     return validate_metadata_for_platforms(
         title_text=_primary_title_text(title_payload),
         long_description=str(title_payload.get("long_description") or "").strip(),
         tags=_normalize_text_tokens(title_payload.get("tags", [])),
         categories=_normalize_text_tokens(title_payload.get("categories", []), title_case=True),
         target_platforms=target_platforms,
+        performers=performers or [],
+        decision_log=decision_log,
+        metadata_only=True,
     )
 
 
@@ -313,6 +357,10 @@ def _deterministic_metadata_repair(
     genres: List[str],
     title_text: str,
     target_platforms: List[str],
+    performers: List[str],
+    studio: Optional[str],
+    scene_type: str,
+    metadata_fact_sheet: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     if not target_platforms:
         return {}
@@ -321,8 +369,26 @@ def _deterministic_metadata_repair(
     min_desc = max(int(x.get("description_min_chars", 0)) for x in md) if md else 0
     min_tags = max(int(x.get("min_tags", 0)) for x in md) if md else 0
     min_categories = max(int(x.get("min_categories", 0)) for x in md) if md else 0
+    min_title = max(int(x.get("title_min_chars", 0)) for x in md) if md else 0
+    max_title = min(
+        int(r.get("title_max_chars", 9999))
+        for r in rules
+        if isinstance(r.get("title_max_chars", 9999), int)
+    ) if rules else 9999
 
     updated: Dict[str, Any] = {}
+    repaired_title = _repair_title(
+        title_text=title_text,
+        performers=performers,
+        studio=studio,
+        scene_type=scene_type,
+        genres=genres,
+        min_chars=min_title,
+        max_chars=max_title,
+    )
+    if repaired_title and repaired_title != title_text:
+        updated["titles"] = _replace_primary_title(title_payload.get("titles", []), repaired_title)
+
     desc = str(title_payload.get("long_description") or "").strip()
     if len(desc) < min_desc:
         genre_hint = ", ".join(str(g).lower().replace("_", " ") for g in (genres or [])[:3]) or "explicit action"
@@ -332,26 +398,7 @@ def _deterministic_metadata_repair(
         updated["long_description"] = base[:520].strip()
 
     tags = _normalize_text_tokens(title_payload.get("tags", []))
-    seed_tags = [str(g).lower().replace("_", " ") for g in (genres or []) if str(g).strip()]
-    fallback_tags = [
-        "pov",
-        "eye contact",
-        "blowjob",
-        "deepthroat",
-        "doggy style",
-        "missionary",
-        "cum in mouth",
-        "creampie",
-        "squirting",
-        "spit",
-        "rough sex",
-        "hard sex",
-        "big ass",
-        "big tits",
-        "natural tits",
-        "shaved pussy",
-    ]
-    for t in seed_tags + fallback_tags:
+    for t in _repair_tag_candidates(genres, metadata_fact_sheet, title_text):
         if len(tags) >= min_tags:
             break
         norm = " ".join(t.split()).lower()
@@ -361,18 +408,199 @@ def _deterministic_metadata_repair(
         updated["tags"] = tags
 
     categories = _normalize_text_tokens(title_payload.get("categories", []), title_case=True)
-    seed_cats = [" ".join(str(g).split("_")).title() for g in (genres or []) if str(g).strip()]
-    fallback_cats = ["HD Porn", "POV", "Blowjob", "Deepthroat", "Anal", "Cumshot", "Toys", "Big Ass"]
-    for c in seed_cats + fallback_cats:
+    for c in _repair_category_candidates(genres, metadata_fact_sheet, title_text):
         if len(categories) >= min_categories:
             break
-        norm = " ".join(c.split())
+        norm = _platform_title_case(" ".join(c.split()))
         if norm and norm.lower() not in {x.lower() for x in categories}:
             categories.append(norm)
     if len(categories) >= min_categories:
         updated["categories"] = categories
 
     return updated
+
+
+def _replace_primary_title(titles: Any, title_text: str) -> List[Dict[str, Any]]:
+    rows = list(titles or []) if isinstance(titles, list) else []
+    primary = {"text": title_text, "style": "scene_descriptive"}
+    if rows and isinstance(rows[0], dict):
+        rows[0] = {**rows[0], **primary}
+    else:
+        rows.insert(0, primary)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("text") or "")
+        row["char_count"] = len(text)
+        row["platform_fit"] = {
+            platform: len(text) <= int(reqs.get("title_max_chars", 100))
+            for platform, reqs in PLATFORM_REQUIREMENTS.items()
+            if isinstance(reqs, dict)
+        }
+        row["warnings"] = [w for w in row.get("warnings", []) if not str(w).lower().startswith("very short")]
+    return rows
+
+
+def _repair_title(
+    *,
+    title_text: str,
+    performers: List[str],
+    studio: Optional[str],
+    scene_type: str,
+    genres: List[str],
+    min_chars: int,
+    max_chars: int,
+) -> str:
+    current = str(title_text or "").strip()
+    if current and len(current) >= min_chars and len(current) <= max_chars and "unknown" not in current.lower():
+        return current
+    cast = _format_cast_for_title(performers)
+    action = _action_phrase(scene_type, genres)
+    candidates: List[str] = []
+    if cast:
+        candidates.extend([
+            f"{cast} in a {action}",
+            f"{action} with {cast}",
+            f"{cast} Lead a {action}",
+        ])
+    clean_studio = str(studio or "").strip()
+    if clean_studio and clean_studio.lower() != "unknown":
+        candidates.append(f"{clean_studio} Presents {action}")
+    candidates.append(action)
+    for candidate in candidates:
+        text = " ".join(candidate.split()).strip()
+        if len(text) > max_chars:
+            text = text[:max_chars].rstrip(" -,")
+        if len(text) >= min_chars and "unknown" not in text.lower():
+            return text
+    return current
+
+
+def _format_cast_for_title(performers: List[str]) -> str:
+    names = [" ".join(str(p or "").split()) for p in (performers or []) if str(p or "").strip()]
+    names = list(dict.fromkeys(names))[:3]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} & {names[1]}"
+    return f"{', '.join(names[:-1])} & {names[-1]}"
+
+
+def _action_phrase(scene_type: str, genres: List[str]) -> str:
+    values = {str(x or "").upper() for x in (genres or [])}
+    primary = str(scene_type or "").upper()
+    if "SQUIRT" in values and ("ORGY" in values or primary in {"GANGBANG", "REVERSE_GANGBANG"}):
+        return "Hardcore Squirting Orgy"
+    if "ORGY" in values:
+        return "Hardcore Orgy"
+    if primary in {"GANGBANG", "REVERSE_GANGBANG"} or "GANGBANG" in values:
+        return "Hardcore Gangbang"
+    if "SQUIRT" in values:
+        return "Squirting Scene"
+    label = primary.replace("_", " ").title() if primary and primary != "STANDARD" else "Hardcore Scene"
+    return label
+
+
+def _repair_category_candidates(
+    genres: List[str],
+    metadata_fact_sheet: Optional[Dict[str, Any]],
+    title_text: str,
+) -> List[str]:
+    candidates = _fact_sheet_values(metadata_fact_sheet, "category_candidates", "category")
+    text = " ".join([title_text or "", " ".join(genres or [])]).lower()
+    contextual = [
+        ("Gangbang", "gangbang" in text),
+        ("Group Sex", any(x in text for x in ("group", "orgy", "gangbang"))),
+        ("Squirt", any(x in text for x in ("squirt", "squirting"))),
+        ("Orgy", "orgy" in text),
+        ("HD Porn", True),
+        ("Hardcore", True),
+        ("Explicit Sex", True),
+        ("Multiple Performers", any(x in text for x in ("group", "orgy", "gangbang"))),
+        ("4K", _fact_sheet_resolution(metadata_fact_sheet).startswith("3840x")),
+    ]
+    for value, enabled in contextual:
+        if enabled:
+            candidates.append(value)
+    return _dedupe(candidates)
+
+
+def _repair_tag_candidates(
+    genres: List[str],
+    metadata_fact_sheet: Optional[Dict[str, Any]],
+    title_text: str,
+) -> List[str]:
+    candidates = _fact_sheet_values(metadata_fact_sheet, "tag_candidates", "tag")
+    text = " ".join([title_text or "", " ".join(genres or [])]).lower()
+    contextual = [
+        ("gangbang", "gangbang" in text),
+        ("group sex", any(x in text for x in ("group", "orgy", "gangbang"))),
+        ("group action", any(x in text for x in ("group", "orgy", "gangbang"))),
+        ("orgy", "orgy" in text),
+        ("hardcore orgy", "orgy" in text),
+        ("squirting", any(x in text for x in ("squirt", "squirting"))),
+        ("multiple performers", any(x in text for x in ("group", "orgy", "gangbang"))),
+        ("hardcore", True),
+        ("explicit sex", True),
+        ("hd", True),
+        ("4k", _fact_sheet_resolution(metadata_fact_sheet).startswith("3840x")),
+        ("4k video", _fact_sheet_resolution(metadata_fact_sheet).startswith("3840x")),
+        ("long scene", _fact_sheet_duration(metadata_fact_sheet) >= 1800),
+    ]
+    for value, enabled in contextual:
+        if enabled:
+            candidates.append(value)
+    return _dedupe(candidates)
+
+
+def _fact_sheet_values(metadata_fact_sheet: Optional[Dict[str, Any]], section: str, key: str) -> List[str]:
+    rows = (metadata_fact_sheet or {}).get(section) if isinstance(metadata_fact_sheet, dict) else []
+    out: List[str] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        sources = {str(x).lower() for x in (row.get("sources") or [])}
+        confidence = float(row.get("confidence") or 0.0)
+        if sources and sources <= {"market_prior"}:
+            continue
+        if confidence < 0.25 and "base" not in sources:
+            continue
+        value = str(row.get(key) or "").strip()
+        if value:
+            out.append(value)
+    return out
+
+
+def _fact_sheet_resolution(metadata_fact_sheet: Optional[Dict[str, Any]]) -> str:
+    source = (metadata_fact_sheet or {}).get("source") if isinstance(metadata_fact_sheet, dict) else {}
+    return str(source.get("resolution") or "").strip() if isinstance(source, dict) else ""
+
+
+def _fact_sheet_duration(metadata_fact_sheet: Optional[Dict[str, Any]]) -> float:
+    source = (metadata_fact_sheet or {}).get("source") if isinstance(metadata_fact_sheet, dict) else {}
+    if not isinstance(source, dict):
+        return 0.0
+    try:
+        return float(source.get("duration_sec") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _dedupe(values: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for value in values:
+        text = " ".join(str(value or "").split())
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
 
 
 def _ai_metadata_repair(

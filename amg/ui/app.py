@@ -39,6 +39,8 @@ from amg.learning.example_bank import export_approved_example_bank
 from amg.scoring.insight_pipeline import generate_scene_insight_payload
 from amg.analysis.scene_analysis import build_analysis_summary, load_scene_analysis as load_scene_analysis_sidecar
 from amg.review.distribution_gate import validate_metadata_for_platforms
+from amg.publication.ledger import PUBLICATION_STATUSES, load_publication_status, record_publication_event
+from amg.publication.packages import PackageError, build_publish_package, package_eligibility
 from amg.utils.logging import get_logger
 from amg.cloud.job_backend import get_backend
 from amg.ui.auth import get_current_user, install_auth, is_auth_enabled
@@ -1592,6 +1594,21 @@ def _readiness_snapshot(scene_id: str) -> Optional[dict]:
         return None
 
 
+def _package_snapshot(scene_id: str) -> Optional[dict]:
+    """Compute publish-package eligibility for scene detail UI."""
+    try:
+        return package_eligibility(scene_id)
+    except Exception as e:
+        log.warn("Package snapshot failed", scene_id=scene_id, error=str(e))
+        return {
+            "scene_id": scene_id,
+            "overall_ready": False,
+            "blockers": [str(e)],
+            "warnings": [],
+            "per_platform": {},
+        }
+
+
 def _parse_csv_tokens(raw: str, *, title_case: bool = False, lowercase: bool = False) -> List[str]:
     out: List[str] = []
     seen = set()
@@ -3123,6 +3140,9 @@ def create_app() -> FastAPI:
         scene_id: str,
         saved: int = 0,
         rerun_error: str = "",
+        packaged: int = 0,
+        package_error: str = "",
+        publication_error: str = "",
     ):
         decision_log = _load_decision_log(scene_id)
         reviewed = _load_reviewed(scene_id)
@@ -3168,6 +3188,8 @@ def create_app() -> FastAPI:
                         )
         form_state = _build_review_form_state(reviewed=reviewed, insight=insight, cover_items=covers)
         readiness = _readiness_snapshot(scene_id)
+        package_status = _package_snapshot(scene_id)
+        publication_status = load_publication_status(scene_id)
         save_validation = (reviewed or {}).get("metadata_validation") if isinstance(reviewed, dict) else None
         finalized_thumbnails = bool((reviewed or {}).get("finalized_thumbnails"))
         scene_source_name = None
@@ -3193,6 +3215,9 @@ def create_app() -> FastAPI:
                 "reviewed": reviewed,
                 "form_state": form_state,
                 "readiness": readiness,
+                "package_status": package_status,
+                "publication_status": publication_status,
+                "publication_statuses": sorted(PUBLICATION_STATUSES),
                 "save_validation": save_validation,
                 "platform_names": list(PLATFORM_REQUIREMENTS.keys()),
                 "platform_rules": _platform_rules_snapshot(),
@@ -3205,10 +3230,58 @@ def create_app() -> FastAPI:
                 "kept_zip_path": kept_bundle.get("kept_zip_path"),
                 "saved": saved,
                 "rerun_error": rerun_error.strip(),
+                "packaged": packaged,
+                "package_error": package_error.strip(),
+                "publication_error": publication_error.strip(),
                 "active_nav": "library",
                 "health": _health_snapshot(),
             },
         )
+
+    @app.post("/scene/{scene_id}/package")
+    async def build_scene_publish_package(scene_id: str, request: Request):
+        form = await request.form()
+        raw_platform = (form.get("platform") or "all").strip()
+        platforms = None if raw_platform.lower() == "all" else [raw_platform.upper()]
+        user = get_current_user(request) or {}
+        operator = user.get("username") if isinstance(user, dict) else None
+        try:
+            build_publish_package(scene_id, platforms=platforms, operator=operator)
+        except PackageError as e:
+            return RedirectResponse(
+                url=f"/scene/{quote_plus(scene_id)}?package_error={quote_plus(str(e))}",
+                status_code=303,
+            )
+        except Exception as e:
+            log.warn("Publish package build failed", scene_id=scene_id, error=str(e))
+            return RedirectResponse(
+                url=f"/scene/{quote_plus(scene_id)}?package_error={quote_plus(str(e))}",
+                status_code=303,
+            )
+        return RedirectResponse(url=f"/scene/{quote_plus(scene_id)}?packaged=1", status_code=303)
+
+    @app.post("/scene/{scene_id}/publication")
+    async def update_scene_publication(scene_id: str, request: Request):
+        form = await request.form()
+        user = get_current_user(request) or {}
+        operator = user.get("username") if isinstance(user, dict) else None
+        try:
+            record_publication_event(
+                scene_id,
+                str(form.get("platform") or "").upper(),
+                str(form.get("status") or "").lower(),
+                operator=operator,
+                external_id=(form.get("external_id") or "").strip() or None,
+                receipt_path=(form.get("receipt_path") or "").strip() or None,
+                notes=(form.get("notes") or "").strip() or None,
+                rejection_reason=(form.get("rejection_reason") or "").strip() or None,
+            )
+        except Exception as e:
+            return RedirectResponse(
+                url=f"/scene/{quote_plus(scene_id)}?publication_error={quote_plus(str(e))}",
+                status_code=303,
+            )
+        return RedirectResponse(url=f"/scene/{quote_plus(scene_id)}?saved=1", status_code=303)
 
     @app.post("/scene/{scene_id}/rerun")
     async def rerun_scene(scene_id: str):

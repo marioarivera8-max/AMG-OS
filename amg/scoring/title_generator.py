@@ -215,25 +215,70 @@ def _fallback_titles(
 ) -> List[dict]:
     """
     Template-based fallback when AI generation fails.
-    Better than nothing — produces valid titles using the data we have.
+    Produces valid, publishable titles using the data we have.
     """
-    primary = performers[0] if performers else "Unknown"
-    primary_first = primary.split()[0] if primary else "Unknown"
-    type_label = scene_type.replace("_", " ").title()
-    genres_str = " ".join(g.title() for g in genres[:2]) if genres else ""
+    cast = _format_cast_for_title(performers)
+    action = _action_phrase_for_title(scene_type, genres)
+    clean_studio = " ".join(str(studio or "").split())
+    has_studio = bool(clean_studio and clean_studio.lower() != "unknown")
 
-    templates = [
-        (f"{primary_first}'s {type_label}", "performer_led"),
-        (f"{type_label} with {primary}", "scene_descriptive"),
-        (f"The {studio} Experience: {type_label}", "studio_branded"),
-        (f"{primary_first} - {genres_str}".strip(" -"), "performer_led"),
-        (f"{studio} Presents: {type_label}", "studio_branded"),
-    ]
+    templates = []
+    if cast:
+        templates.extend([
+            (f"{cast} in a {action}", "performer_led"),
+            (f"{action} with {cast}", "scene_descriptive"),
+            (f"{cast} Lead a {action}", "performer_led"),
+            (f"{cast}: {action}", "performer_led"),
+        ])
+    if has_studio:
+        templates.extend([
+            (f"{clean_studio} Presents {action}", "studio_branded"),
+            (f"{action} from {clean_studio}", "studio_branded"),
+        ])
+    templates.extend([
+        (action, "scene_descriptive"),
+        (f"Full-Length {action}", "scene_descriptive"),
+    ])
 
-    return [
-        {"text": text, "style": style}
-        for text, style in templates[:n_suggestions]
-    ]
+    out = []
+    seen = set()
+    for text, style in templates:
+        clean = " ".join(text.split()).strip(" -:")
+        if not clean or "unknown" in clean.lower() or clean.lower() in seen:
+            continue
+        seen.add(clean.lower())
+        out.append({"text": clean, "style": style})
+        if len(out) >= n_suggestions:
+            break
+    return out
+
+
+def _format_cast_for_title(performers: List[str]) -> str:
+    names = [" ".join(str(p or "").split()) for p in (performers or []) if str(p or "").strip()]
+    names = list(dict.fromkeys(names))[:3]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} & {names[1]}"
+    return f"{', '.join(names[:-1])} & {names[-1]}"
+
+
+def _action_phrase_for_title(scene_type: str, genres: List[str]) -> str:
+    primary = str(scene_type or "").upper()
+    values = {str(g or "").upper() for g in (genres or [])}
+    if "SQUIRT" in values and ("ORGY" in values or primary in {"GANGBANG", "REVERSE_GANGBANG"}):
+        return "Hardcore Squirting Orgy"
+    if "ORGY" in values:
+        return "Hardcore Orgy"
+    if primary in {"GANGBANG", "REVERSE_GANGBANG"} or "GANGBANG" in values:
+        return "Hardcore Gangbang"
+    if "SQUIRT" in values:
+        return "Squirting Scene"
+    if primary and primary != "STANDARD":
+        return primary.replace("_", " ").title()
+    return "Hardcore Scene"
 
 
 def _load_research_patterns() -> Optional[dict]:

@@ -62,6 +62,7 @@ def validate_metadata_for_platforms(
     target_platforms: List[str],
     performers: Optional[List[str]] = None,
     decision_log: Optional[dict] = None,
+    metadata_only: bool = False,
 ) -> Dict[str, Any]:
     targets = [str(p).upper().strip() for p in (target_platforms or []) if str(p).strip()]
     per_platform: Dict[str, dict] = {}
@@ -80,6 +81,7 @@ def validate_metadata_for_platforms(
             categories=categories,
             performers=performers or [],
             decision_log=decision_log or {},
+            metadata_only=metadata_only,
         )
         per_platform[platform] = status
         for b in status.get("blockers", []):
@@ -260,6 +262,7 @@ def _validate_platform_metadata(
     categories: List[str],
     performers: List[str],
     decision_log: dict,
+    metadata_only: bool = False,
 ) -> dict:
     """Check readiness for a specific platform."""
     reqs = get_platform_metadata_rules(platform)
@@ -312,7 +315,7 @@ def _validate_platform_metadata(
             warnings.append(f"Title missing lead performer token '{lead}'")
 
     # 2257 doc check
-    if reqs.get("requires_2257", True):
+    if not metadata_only and reqs.get("requires_2257", True):
         # decision log records compliance check result
         compliance = (decision_log or {}).get("execution", {}).get("error_codes", [])
         if "E_COMPLIANCE_NO_2257" in compliance:
@@ -324,7 +327,7 @@ def _validate_platform_metadata(
         warnings.append(f"Sensitive content flagged for operator/platform review: {flags}")
 
     # Individual model releases
-    if reqs.get("requires_individual_releases", False):
+    if not metadata_only and reqs.get("requires_individual_releases", False):
         for performer in performers:
             if not _has_performer_release(performer):
                 blockers.append(f"Missing model release: {performer}")
@@ -415,6 +418,14 @@ def _normalize_tokens(value: Any, *, title_case: bool = False) -> List[str]:
 
 def _has_performer_release(performer_name: str) -> bool:
     """Check if a performer has a model release on file."""
+    try:
+        from amg.compliance.registry import performer_status
+
+        if performer_status(performer_name).get("has_model_release"):
+            return True
+    except Exception:
+        pass
+
     if not PERFORMER_DOCS_DIR.exists():
         return False
     safe_name = "".join(c if c.isalnum() or c == "_" else "_" for c in performer_name.lower())

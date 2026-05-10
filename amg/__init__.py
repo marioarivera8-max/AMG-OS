@@ -1,5 +1,5 @@
 """
-AMG OS — Adult VOD Scene Processor v11
+AMG OS — Adult VOD Scene Processor v1
 
 A modular, research-validated scene processing system for adult VOD distribution.
 Built for Apple Silicon (M4 Pro+), uses Qwen2.5-VL via Ollama for scoring.

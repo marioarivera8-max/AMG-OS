@@ -1,7 +1,13 @@
 """AMG OS version."""
-__version__ = "11.1.5"
-__version_info__ = (11, 1, 5)
-__release_date__ = "2026-05-04"
+__version__ = "1.0.0"
+__version_info__ = (1, 0, 0)
+__release_date__ = "2026-05-10"
+
+# v1.0.0 release checkpoint:
+# - Cloud production baseline on Hetzner controller + Runpod H100 workers.
+# - Text metadata remains enabled while the heavier scene-insight caption pass
+#   can stay disabled for fast production runs.
+# - Publication handoff packages and manual publication ledger added.
 
 # v11.1.5 changelog (0–100 scoring scale + wider rubric spread):
 # - Vision cover scores use 0–100 (was 0–10): config thresholds ×10,

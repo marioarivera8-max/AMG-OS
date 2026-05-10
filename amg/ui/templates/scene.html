@@ -62,6 +62,21 @@
       </div>
     </div>
   {% endif %}
+  {% if packaged %}
+    <div class="card" style="margin-top: 8px; border-color: color-mix(in oklab, var(--ok) 40%, var(--line));">
+      <div class="muted" style="font-size: 12px;">Publish package built. Manual platform submission is still required.</div>
+    </div>
+  {% endif %}
+  {% if package_error %}
+    <div class="card" style="margin-top: 8px; border-color: color-mix(in oklab, var(--err) 40%, var(--line));">
+      <div class="muted" style="font-size: 12px;">Package could not be built: {{ package_error }}</div>
+    </div>
+  {% endif %}
+  {% if publication_error %}
+    <div class="card" style="margin-top: 8px; border-color: color-mix(in oklab, var(--err) 40%, var(--line));">
+      <div class="muted" style="font-size: 12px;">Publication status could not be saved: {{ publication_error }}</div>
+    </div>
+  {% endif %}
   {% if kept_zip_path %}
     <div class="sub" style="margin-top: 8px;">
       Kept package ready: <span class="mono">{{ kept_zip_path.name }}</span> · folder <span class="mono">{{ kept_folder_path.name if kept_folder_path else "00_kept_for_publish" }}</span>
@@ -551,6 +566,86 @@
             {% else %}
               <div class="muted">Readiness snapshot unavailable for this scene.</div>
             {% endif %}
+          </div>
+
+          <div class="card scene-side-card">
+            <h3 class="card-section-title">Publish Package</h3>
+            {% if package_status %}
+              <div class="row" style="gap: 8px; margin-bottom: 8px;">
+                <span class="pill {{ 'ok' if package_status.overall_ready else 'warn' }}">
+                  {{ 'package ready' if package_status.overall_ready else 'package blocked' }}
+                </span>
+              </div>
+              {% if package_status.blockers %}
+                <div style="margin-bottom: 8px;">
+                  {% for b in package_status.blockers %}
+                    <div class="pill err" style="display:block; margin-bottom:6px;">{{ b }}</div>
+                  {% endfor %}
+                </div>
+              {% endif %}
+              <form method="post" action="/scene/{{ scene_id }}/package" class="stack" style="gap: 8px;">
+                <label class="field">
+                  <span>package target</span>
+                  <select name="platform">
+                    <option value="all">reviewed targets</option>
+                    {% for p in package_status.target_platforms or platform_names %}
+                      <option value="{{ p }}">{{ p }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <button class="btn-primary" type="submit" {% if not package_status.overall_ready %}disabled{% endif %}>Build publish package</button>
+              </form>
+            {% else %}
+              <div class="muted">Package readiness unavailable.</div>
+            {% endif %}
+
+            {% set pub_platforms = (publication_status.platforms if publication_status else {}) %}
+            <div class="stack" style="margin-top: 12px; font-size: 12px;">
+              {% if pub_platforms %}
+                {% for platform, row in pub_platforms.items() %}
+                  <div>
+                    <span class="pill neutral">{{ platform }}</span>
+                    {{ row.status or "unknown" }}
+                    {% if row.external_id %}<span class="muted">Â· {{ row.external_id }}</span>{% endif %}
+                    {% if row.metadata and row.metadata.package_zip_path %}
+                      <a href="/artifact?path={{ row.metadata.package_zip_path | urlencode }}" download>zip</a>
+                    {% endif %}
+                  </div>
+                {% endfor %}
+              {% else %}
+                <div class="muted">No publication events recorded yet.</div>
+              {% endif %}
+            </div>
+
+            <form method="post" action="/scene/{{ scene_id }}/publication" class="stack" style="gap: 8px; margin-top: 12px;">
+              <div class="grid grid-2" style="gap: 8px;">
+                <label class="field">
+                  <span>platform</span>
+                  <select name="platform">
+                    {% for p in platform_names %}
+                      <option value="{{ p }}">{{ p }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label class="field">
+                  <span>status</span>
+                  <select name="status">
+                    {% for status in publication_statuses %}
+                      <option value="{{ status }}">{{ status }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+              </div>
+              <label class="field">
+                <span>external id</span>
+                <input type="text" name="external_id" placeholder="optional platform id" />
+              </label>
+              <label class="field">
+                <span>notes</span>
+                <input type="text" name="notes" placeholder="manual upload receipt, changes requested, or publish note" />
+              </label>
+              <button class="btn btn-ghost" type="submit">Record publication status</button>
+            </form>
           </div>
         {% endif %}
 
