@@ -28,7 +28,7 @@ From `/etc/amg/controller.env`, service state, and live deploy validation on
 2026-05-10:
 
 - `AMG_JOB_BACKEND=runpod`
-- `AMG_RUNPOD_IMAGE=ghcr.io/marioarivera8-max/amg-pod:main-595ea4a`
+- `AMG_RUNPOD_IMAGE=ghcr.io/marioarivera8-max/amg-pod:main-ffe140d`
 - `AMG_PROCESSING_PROFILE=fast`
 - `AMG_STREAMING_SCAN=1`
 - `AMG_RUNPOD_VIDEO_BACKEND=ffmpeg_cuda`
@@ -39,6 +39,7 @@ From `/etc/amg/controller.env`, service state, and live deploy validation on
 - `AMG_RUNPOD_OLLAMA_NUM_PARALLEL=6`
 - `AMG_RUNPOD_AI_PARALLEL_WORKERS=6`
 - `AMG_ENABLE_SCENE_INSIGHT=0`
+- `AMG_ENABLE_TEXT_METADATA=1`
 - `AMG_ENABLE_PROVIDED_THUMBNAIL_SCORING=0`
 - `AMG_SOFT_THUMB_ENABLED=0`
 - `AMG_RUNPOD_IDLE_TERMINATE_SEC=900`
@@ -46,13 +47,23 @@ From `/etc/amg/controller.env`, service state, and live deploy validation on
 Controller service:
 
 - `amg-controller` active/running
-- controller image pinned at `ghcr.io/marioarivera8-max/amg-controller:main-595ea4a`
+- controller image pinned at `ghcr.io/marioarivera8-max/amg-controller:main-ffe140d`
 
 ## Latest Deployed Change
 
-Commit `595ea4a` warms the pod vision model before accepting jobs:
+Commit `ffe140d` decouples text metadata generation from the heavier scene
+insight caption pass:
 
-- Controller and Runpod pod images are pinned at `main-595ea4a`.
+- Controller and Runpod pod images are pinned at `main-ffe140d`.
+- `AMG_ENABLE_TEXT_METADATA=1` keeps titles, descriptions, tags, and
+  categories generated even while `AMG_ENABLE_SCENE_INSIGHT=0` stays off for
+  fast production processing.
+- `AMG_ENABLE_SCENE_INSIGHT=0` still skips the extra scene-level vision
+  caption pass; metadata generation now uses saved covers and scene analysis.
+
+Previous deployed change `595ea4a` warms the pod vision model before accepting
+jobs:
+
 - Pod `/readyz` now waits for a tiny real vision inference warmup, not just
   Ollama `/api/tags`, before the controller submits scene jobs.
 - Controller readiness logs now surface the `vision-warmup` phase.
