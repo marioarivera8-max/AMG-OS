@@ -11,12 +11,12 @@ Browser (https://amg.exoticplug.app)
   -> cloud source storage via rclone
 ```
 
-## Live Runtime Baseline (2026-05-09)
+## Live Runtime Baseline (2026-05-10)
 
 - controller host: `5.161.231.249`
 - controller service: `amg-controller` active/running
-- controller image: `ghcr.io/marioarivera8-max/amg-controller:main-8b5749d`
-- pod image: `ghcr.io/marioarivera8-max/amg-pod:main-8b5749d`
+- controller image: `ghcr.io/marioarivera8-max/amg-controller:main-9619578`
+- pod image: `ghcr.io/marioarivera8-max/amg-pod:main-4f564ce`
 
 Controller env defaults in production:
 

@@ -1,6 +1,6 @@
 # AMG OS Current Agent Context
 
-Last updated: 2026-05-09
+Last updated: 2026-05-10
 
 Release checkpoint: AMG_OS v1.
 
@@ -25,10 +25,10 @@ AMG OS supports two active paths:
 ## Live Runtime Baseline (authoritative)
 
 From `/etc/amg/controller.env`, service state, and live deploy validation on
-2026-05-09:
+2026-05-10:
 
 - `AMG_JOB_BACKEND=runpod`
-- `AMG_RUNPOD_IMAGE=ghcr.io/marioarivera8-max/amg-pod:main-abfbb12`
+- `AMG_RUNPOD_IMAGE=ghcr.io/marioarivera8-max/amg-pod:main-4f564ce`
 - `AMG_PROCESSING_PROFILE=fast`
 - `AMG_STREAMING_SCAN=1`
 - `AMG_RUNPOD_VIDEO_BACKEND=ffmpeg_cuda`
@@ -46,22 +46,28 @@ From `/etc/amg/controller.env`, service state, and live deploy validation on
 Controller service:
 
 - `amg-controller` active/running
-- controller image pinned at `ghcr.io/marioarivera8-max/amg-controller:main-abfbb12`
+- controller image pinned at `ghcr.io/marioarivera8-max/amg-controller:main-9619578`
 
 ## Latest Deployed Change
 
-Commit `abfbb12` adds taxonomy-aware cover selection:
+Commit `9619578` adds controller disk maintenance:
 
-- Main VLM scoring prompt emits `POSITION`, `POSITION_CONFIDENCE`, `GENRES`,
-  and `SUBGENRES` for every scored candidate.
-- Position labels now include the operator taxonomy from
-  `adult_content_ai_taxonomy.md` (foundational, oral variants, and group
-  positions).
-- Genre/subgenre tags are parsed and persisted into saved cover metadata.
-- Quota fill now detects temporal position segments and can keep up to 3 covers
-  per detected position run, including repeated returns to the same position.
-- The old bounded second-pass position classifier is disabled by default; the
-  taxonomy comes from the main scoring call to avoid extra Ollama round trips.
+- Controller image is pinned at `main-9619578`.
+- Runpod pod image remains pinned at `main-4f564ce`; this disk cleanup change
+  does not require pulling a new pod image.
+- `amg clean` can dry-run or apply conservative AMG data cleanup.
+- `/root/amg_deploy/scripts/controller_disk_maintenance.py` is installed on
+  the Hetzner host for host-side Docker image tag pruning. It protects the
+  running controller image and configured `AMG_RUNPOD_IMAGE`.
+- One-time cleanup on 2026-05-10 reduced `/` from roughly 65% used to 50% used.
+- The daily systemd cleanup timer is not installed yet; it needs explicit
+  operator approval because it creates ongoing automated deletion.
+
+Previous pipeline quality checkpoint `4f564ce` remains the active pod runtime:
+
+- Optimized streaming scan and metadata factsheets.
+- Taxonomy/position coverage and cover-quality gates remain active in the
+  pipeline code shipped to the current pod image.
 
 ## AMG_OS v1 Performance Baseline
 
