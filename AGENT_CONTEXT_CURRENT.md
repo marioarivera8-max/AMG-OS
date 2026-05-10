@@ -28,7 +28,7 @@ From `/etc/amg/controller.env`, service state, and live deploy validation on
 2026-05-10:
 
 - `AMG_JOB_BACKEND=runpod`
-- `AMG_RUNPOD_IMAGE=ghcr.io/marioarivera8-max/amg-pod:main-ffe140d`
+- `AMG_RUNPOD_IMAGE=ghcr.io/marioarivera8-max/amg-pod:main-9bf24eb`
 - `AMG_PROCESSING_PROFILE=fast`
 - `AMG_STREAMING_SCAN=1`
 - `AMG_RUNPOD_VIDEO_BACKEND=ffmpeg_cuda`
@@ -47,14 +47,26 @@ From `/etc/amg/controller.env`, service state, and live deploy validation on
 Controller service:
 
 - `amg-controller` active/running
-- controller image pinned at `ghcr.io/marioarivera8-max/amg-controller:main-ffe140d`
+- controller image pinned at `ghcr.io/marioarivera8-max/amg-controller:main-9bf24eb`
 
 ## Latest Deployed Change
 
-Commit `ffe140d` decouples text metadata generation from the heavier scene
+Commit `9bf24eb` is the AMG_OS v1 release checkpoint:
+
+- Controller and Runpod pod images are pinned at `main-9bf24eb`.
+- Runtime/package version reports `AMG OS v1.0.0`.
+- Publication handoff packages, manual publication ledger, and compliance
+  registry were added. This is a handoff/review flow only; no downstream
+  platform auto-upload behavior was added.
+- Text metadata fallback behavior was tightened: scene filename performer
+  inference can drive publishable fallback metadata, and unsupported market
+  prior padding is filtered from generated tags/categories.
+- Pod Dockerfile app layers now sit after the baked Ollama model layer so
+  code-only deploys do not invalidate the multi-GB model cache layer.
+
+Previous deployed change `ffe140d` decoupled text metadata generation from the heavier scene
 insight caption pass:
 
-- Controller and Runpod pod images are pinned at `main-ffe140d`.
 - `AMG_ENABLE_TEXT_METADATA=1` keeps titles, descriptions, tags, and
   categories generated even while `AMG_ENABLE_SCENE_INSIGHT=0` stays off for
   fast production processing.
