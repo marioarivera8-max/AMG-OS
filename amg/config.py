@@ -1256,7 +1256,7 @@ ENABLE_POSITION_CLASSIFIER = _profile_bool(
     "AMG_ENABLE_POSITION_CLASSIFIER",
     False,
     balanced=False,
-    fast=True,
+    fast=False,
     turbo=False,
 )
 ENABLE_SCENE_INSIGHT = _profile_bool(

@@ -294,6 +294,7 @@ def test_runpod_backend_forwards_processing_profile_env(runpod_backend, tmp_path
     monkeypatch.setenv("AMG_SINGLE_PASS_MAX_AI_FRAMES", "24")
     monkeypatch.setenv("AMG_ENABLE_CLUSTER_EXPANSION", "0")
     monkeypatch.setenv("AMG_VISION_MODEL_OVERRIDE", "qwen2.5vl:3b")
+    monkeypatch.setenv("AMG_TEXT_STRUCTURED_OUTPUT", "0")
 
     session.queue(
         _FakePodResponse(200, {"job_id": "j1", "status": "queued"}),
@@ -312,6 +313,7 @@ def test_runpod_backend_forwards_processing_profile_env(runpod_backend, tmp_path
     assert env["AMG_SINGLE_PASS_MAX_AI_FRAMES"] == "24"
     assert env["AMG_ENABLE_CLUSTER_EXPANSION"] == "0"
     assert env["AMG_VISION_MODEL_OVERRIDE"] == "qwen2.5vl:3b"
+    assert env["AMG_TEXT_STRUCTURED_OUTPUT"] == "0"
 
 
 def test_runpod_backend_pipeline_error_propagates_and_terminates(runpod_backend, tmp_path, monkeypatch):
@@ -606,6 +608,14 @@ def test_runpod_backend_bundle_layout_drops_decision_log_at_canonical_path(
     # Result paths point to the controller's local extracted artifacts.
     assert Path(result["work_dir"]) == extracted
     assert Path(result["decision_log_path"]) == dlog_dest
+
+
+def test_runpod_path_inference_accepts_metadata_fact_sheet():
+    from amg.cloud.job_backend import RunpodBackend
+
+    assert RunpodBackend._infer_pod_work_dir_from_paths(
+        ["/data/pod_uploads/j1/scene/video_amg_v11/metadata_fact_sheet.json"]
+    ) == "/data/pod_uploads/j1/scene/video_amg_v11"
 
 
 def test_runpod_backend_waits_for_pod_worker_healthz(runpod_backend, tmp_path, monkeypatch):

@@ -52,6 +52,14 @@ class CvRuntime:
     reason: str
 
 
+@dataclass(frozen=True)
+class FrameAnalysis:
+    gray: np.ndarray
+    brightness: float
+    is_dark: bool
+    sharpness: float
+
+
 _RUNTIME: Optional[CvRuntime] = None
 
 
@@ -107,6 +115,34 @@ def analysis_gray(frame_bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
 
+def measure_sharpness_gray(gray: np.ndarray) -> float:
+    """Measure Laplacian sharpness from an already analysis-sized gray frame."""
+    if gray is None:
+        return 0.0
+    if runtime().mode == "gpu":
+        try:
+            gpu_gray = cv2.cuda_GpuMat()
+            gpu_gray.upload(gray)
+            lap = cv2.cuda.createLaplacianFilter(cv2.CV_8U, cv2.CV_32F, ksize=3).apply(gpu_gray)
+            lap_cpu = lap.download()
+            return float(lap_cpu.var())
+        except Exception as exc:  # noqa: BLE001
+            log.warn("GPU sharpness failed; using CPU fallback", error=str(exc))
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def analyze_frame(frame_bgr: np.ndarray, *, dark_threshold: float = 0.1) -> FrameAnalysis:
+    """Return the shared CV primitives for one frame with one resize/gray pass."""
+    gray = analysis_gray(frame_bgr)
+    brightness = float(gray.mean()) / 255.0 if gray is not None else 0.0
+    return FrameAnalysis(
+        gray=gray,
+        brightness=brightness,
+        is_dark=brightness < dark_threshold,
+        sharpness=measure_sharpness_gray(gray),
+    )
+
+
 def measure_sharpness(frame_bgr: np.ndarray) -> float:
     """
     Measure frame sharpness via Laplacian variance.
@@ -122,17 +158,7 @@ def measure_sharpness(frame_bgr: np.ndarray) -> float:
     if frame_bgr is None:
         return 0.0
 
-    gray = analysis_gray(frame_bgr)
-    if runtime().mode == "gpu":
-        try:
-            gpu_gray = cv2.cuda_GpuMat()
-            gpu_gray.upload(gray)
-            lap = cv2.cuda.createLaplacianFilter(cv2.CV_8U, cv2.CV_32F, ksize=3).apply(gpu_gray)
-            lap_cpu = lap.download()
-            return float(lap_cpu.var())
-        except Exception as exc:  # noqa: BLE001
-            log.warn("GPU sharpness failed; using CPU fallback", error=str(exc))
-    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    return measure_sharpness_gray(analysis_gray(frame_bgr))
 
 
 def measure_motion(prev_gray: np.ndarray, curr_gray: np.ndarray) -> float:

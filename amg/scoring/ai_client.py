@@ -221,6 +221,7 @@ class AIClient:
         prompt: str,
         system_prompt: Optional[str] = None,
         timeout_sec: Optional[int] = None,
+        response_format: Optional[object] = None,
     ) -> AIResponse:
         """
         Generate text without an image (for title generation, etc.).
@@ -238,6 +239,7 @@ class AIClient:
             model_name=self.text_model,
             messages=messages,
             timeout=timeout_sec or self.text_timeout_sec,
+            response_format=response_format,
         )
         if result.success:
             result.duration_sec = time.time() - start
@@ -254,6 +256,7 @@ class AIClient:
                 model_name=fallback,
                 messages=messages,
                 timeout=timeout_sec or self.text_timeout_sec,
+                response_format=response_format,
             )
             if second.success:
                 second.duration_sec = time.time() - start
@@ -272,12 +275,34 @@ class AIClient:
         result.duration_sec = time.time() - start
         return result
 
+    def generate_structured_text(
+        self,
+        prompt: str,
+        schema: dict,
+        system_prompt: Optional[str] = None,
+        timeout_sec: Optional[int] = None,
+    ) -> AIResponse:
+        """
+        Generate text constrained by an Ollama structured-output schema.
+
+        Ollama accepts a JSON schema in the top-level ``format`` field. This
+        helper keeps structured metadata generation explicit while preserving
+        the existing ``generate_text`` behavior for older call sites.
+        """
+        return self.generate_text(
+            prompt,
+            system_prompt=system_prompt,
+            timeout_sec=timeout_sec,
+            response_format=schema or {"type": "object"},
+        )
+
     def _generate_text_with_model(
         self,
         *,
         model_name: str,
         messages: list,
         timeout: int,
+        response_format: Optional[object] = None,
     ) -> AIResponse:
         payload = {
             "model": model_name,
@@ -288,6 +313,8 @@ class AIClient:
                 "num_predict": 400,
             },
         }
+        if response_format is not None:
+            payload["format"] = response_format
         try:
             response = self._session.post(
                 self.api_url,

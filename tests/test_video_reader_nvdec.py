@@ -232,6 +232,132 @@ def test_ffmpeg_cuda_get_frames_at_uses_pipe(monkeypatch, tmp_path):
     assert backend._delegate.fallback_calls == 0
 
 
+def test_ffmpeg_cuda_get_frames_at_batches_clustered_triplets(monkeypatch, tmp_path):
+    import amg.video.reader as reader
+
+    ffmpeg_bin = tmp_path / "ffmpeg-cuda"
+    ffmpeg_bin.write_text("stub")
+
+    class _DummyPyAVBackend:
+        def __init__(self, _video_path):
+            self._size = (2, 2)
+            self.fps = 4.0
+            self.duration_sec = 10.0
+            self.fallback_calls = 0
+
+        def open(self):
+            return None
+
+        def close(self):
+            return None
+
+        @property
+        def frame_size(self):
+            return self._size
+
+        def get_frame_at(self, _timestamp_sec):
+            self.fallback_calls += 1
+            return np.zeros((2, 2, 3), dtype=np.uint8)
+
+        def get_frames_at(self, timestamps_sec):
+            self.fallback_calls += len(timestamps_sec)
+            return [np.zeros((2, 2, 3), dtype=np.uint8) for _ in timestamps_sec]
+
+    captured_cmds = []
+    frame_bytes = bytes([7]) * 12
+
+    class _FakeProc:
+        def __init__(self, cmd, **_kwargs):
+            captured_cmds.append(cmd)
+            self.stdout = io.BytesIO(frame_bytes * 7)
+            self.stderr = io.BytesIO(b"")
+            self._rc = 0
+
+        def wait(self, timeout=None):
+            return self._rc
+
+        def poll(self):
+            return self._rc
+
+        def kill(self):
+            self._rc = -9
+
+    monkeypatch.setattr(reader, "_PyAVBackend", _DummyPyAVBackend)
+    monkeypatch.setattr(reader, "_HWACCEL_MODE", "cuda")
+    monkeypatch.setattr(reader, "_FFMPEG_CUDA_PATH", ffmpeg_bin)
+    monkeypatch.setattr(reader.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(reader.subprocess, "Popen", _FakeProc)
+
+    backend = reader._FFmpegCudaBackend(Path("dummy.mp4"))
+    rows = backend.get_frames_at([1.0, 1.5, 2.0])
+
+    assert len(rows) == 3
+    assert all(frame is not None and frame.shape == (2, 2, 3) for frame in rows)
+    assert len(captured_cmds) == 1
+    assert "-vf" in captured_cmds[0]
+    assert "-frames:v" not in captured_cmds[0]
+    assert backend._delegate.fallback_calls == 0
+
+
+def test_ffmpeg_cuda_batch_partial_failure_falls_back(monkeypatch, tmp_path):
+    import amg.video.reader as reader
+
+    ffmpeg_bin = tmp_path / "ffmpeg-cuda"
+    ffmpeg_bin.write_text("stub")
+
+    class _DummyPyAVBackend:
+        def __init__(self, _video_path):
+            self._size = (2, 2)
+            self.fps = 4.0
+            self.duration_sec = 10.0
+            self.fallback_calls = 0
+
+        def open(self):
+            return None
+
+        def close(self):
+            return None
+
+        @property
+        def frame_size(self):
+            return self._size
+
+        def get_frame_at(self, _timestamp_sec):
+            self.fallback_calls += 1
+            return np.full((2, 2, 3), 9, dtype=np.uint8)
+
+        def get_frames_at(self, timestamps_sec):
+            self.fallback_calls += len(timestamps_sec)
+            return [np.full((2, 2, 3), 9, dtype=np.uint8) for _ in timestamps_sec]
+
+    class _FakeProc:
+        def __init__(self, _cmd, **_kwargs):
+            self.stdout = io.BytesIO(bytes([7]) * 12)
+            self.stderr = io.BytesIO(b"hardware decode failed")
+            self._rc = 1
+
+        def wait(self, timeout=None):
+            return self._rc
+
+        def poll(self):
+            return self._rc
+
+        def kill(self):
+            self._rc = -9
+
+    monkeypatch.setattr(reader, "_PyAVBackend", _DummyPyAVBackend)
+    monkeypatch.setattr(reader, "_HWACCEL_MODE", "cuda")
+    monkeypatch.setattr(reader, "_FFMPEG_CUDA_PATH", ffmpeg_bin)
+    monkeypatch.setattr(reader.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(reader.subprocess, "Popen", _FakeProc)
+
+    backend = reader._FFmpegCudaBackend(Path("dummy.mp4"))
+    rows = backend.get_frames_at([1.0, 1.5, 2.0])
+
+    assert [int(frame[0, 0, 0]) for frame in rows if frame is not None] == [9, 9, 9]
+    assert backend._delegate.fallback_calls == 3
+
+
 def test_ffmpeg_cuda_get_frames_at_falls_back_per_failed_frame(monkeypatch, tmp_path):
     import amg.video.reader as reader
 

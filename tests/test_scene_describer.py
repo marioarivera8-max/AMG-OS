@@ -3,7 +3,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from amg.scoring.ai_client import AIResponse
+from amg.scoring.ai_client import AIClient, AIResponse
 from amg.scoring.scene_describer import (
     SceneInsight,
     summarize_positions,
@@ -74,6 +74,24 @@ END
         assert result["long_description"] == ""
         assert result["categories"] == []
         assert result["tags"] == []
+
+    def test_structured_json_response(self):
+        result = _parse_enriched_response(
+            """
+            {
+              "titles": [
+                {"text": "Alice Bedroom POV Focus", "style": "performer_led"}
+              ],
+              "long_description": "Alice leads a clear POV bedroom scene with steady camera focus.",
+              "categories": ["POV", "Blowjob", "HD Porn"],
+              "tags": ["pov", "bedroom", "blowjob"]
+            }
+            """
+        )
+        assert result["titles"][0]["text"] == "Alice Bedroom POV Focus"
+        assert result["titles"][0]["style"] == "performer_led"
+        assert result["categories"] == ["POV", "Blowjob", "HD Porn"]
+        assert "bedroom" in result["tags"]
 
 
 # ---- position summary ----
@@ -280,3 +298,57 @@ class TestGenerateTitlesWithInsight:
         assert "EXAMPLE_1:" in client.last_prompt
         assert out["retrieved_examples_count"] == 1
         assert out["retrieval_stage"] == "titles"
+
+    def test_structured_metadata_path_uses_schema_and_fact_sheet(self):
+        class _StructuredClient(AIClient):
+            vision_model = "vision-test"
+            text_model = "text-test"
+
+            def __init__(self):
+                self.schema = None
+                self.prompt = ""
+
+            def is_alive(self):
+                return True
+
+            def generate_structured_text(self, prompt, schema, **_):
+                self.prompt = prompt
+                self.schema = schema
+                return AIResponse(
+                    success=True,
+                    raw_text=(
+                        '{"titles":[{"text":"Alice Bedroom POV Focus","style":"performer_led"}],'
+                        '"long_description":"Alice leads a clear POV bedroom scene with steady camera focus.",'
+                        '"categories":["POV","Blowjob","HD Porn"],'
+                        '"tags":["pov","bedroom","blowjob","doggy style"]}'
+                    ),
+                    extras={"model_used": "text-test"},
+                )
+
+            def generate_text(self, _prompt):
+                raise AssertionError("structured response should be accepted")
+
+        client = _StructuredClient()
+        out = generate_titles_with_insight(
+            studio="StudioX",
+            performers=["Alice Blue"],
+            scene_type="STANDARD",
+            genres=["POV"],
+            description="desc",
+            insight=SceneInsight(setting="bedroom", mood="intense"),
+            position_summary={"DOGGY": 1},
+            ai_client=client,
+            n_suggestions=1,
+            metadata_fact_sheet={
+                "prompt_brief": "category candidates: POV, Blowjob; tag candidates: pov, doggy style",
+                "category_candidates": [{"category": "Blowjob"}],
+                "tag_candidates": [{"tag": "doggy style"}],
+            },
+        )
+        assert client.schema["required"] == ["titles", "long_description", "categories", "tags"]
+        assert "STRUCTURED OUTPUT OVERRIDE" in client.prompt
+        assert "category candidates: POV, Blowjob" in client.prompt
+        assert out["ai_used"] is True
+        assert out["titles"][0]["text"] == "Alice Bedroom POV Focus"
+        assert "Blowjob" in out["categories"]
+        assert "doggy style" in out["tags"]

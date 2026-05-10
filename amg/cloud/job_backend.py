@@ -687,6 +687,7 @@ class RunpodBackend(JobBackend):
                 "AMG_PROVIDED_THUMB_MAX_SCAN",
                 "AMG_PROVIDED_THUMB_MAX_ACCEPT",
                 "AMG_VISION_MODEL_OVERRIDE",
+                "AMG_TEXT_STRUCTURED_OUTPUT",
                 "AMG_VIDEO_HWACCEL",
                 "AMG_GPU_CV_ENABLED",
                 "AMG_GPU_CV_BACKEND",
@@ -1377,6 +1378,7 @@ class RunpodBackend(JobBackend):
                     candidates.append(normalized.split(marker, 1)[0])
             for filename in (
                 "/scene_analysis.json",
+                "/metadata_fact_sheet.json",
                 "/insight.json",
                 "/provided_thumbnails.json",
                 "/soft_thumbnail.json",

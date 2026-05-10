@@ -22,6 +22,8 @@ Both functions degrade safely if the AI is offline: they return ``None``
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -30,7 +32,7 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 
-from amg.scoring.ai_client import AIClient
+from amg.scoring.ai_client import AIClient, AIResponse
 from amg.config import TITLE_TONE_DEFAULT
 from amg.learning.example_bank import retrieve_top_k_examples
 from amg.scoring.prompt import build_scene_insight_prompt, build_enriched_title_prompt
@@ -129,6 +131,7 @@ def generate_titles_with_insight(
     ai_client: Optional[AIClient] = None,
     rule_pack: Optional[Dict[str, Any]] = None,
     analysis_context: str = "",
+    metadata_fact_sheet: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Generate richer titles using vision insight + position rollup.
 
@@ -146,13 +149,16 @@ def generate_titles_with_insight(
 
     studio = studio or "Unknown"
     insight_dict = insight.to_dict() if insight else {}
+    seed_taxonomy = _merge_seed_taxonomy(
+        build_seed_taxonomy(genres, position_summary),
+        _seed_taxonomy_from_fact_sheet(metadata_fact_sheet),
+    )
 
     if not ai_client.is_alive():
         log.warn("AI offline — using template title fallback")
         titles = _annotate(_fallback_titles(studio, performers, scene_type, genres, n_suggestions))
-        seed = build_seed_taxonomy(genres, position_summary)
-        cats = _normalize_categories([], seed.get("categories", []))
-        tags = _normalize_tags([], seed.get("tags", []))
+        cats = _normalize_categories([], seed_taxonomy.get("categories", []))
+        tags = _normalize_tags([], seed_taxonomy.get("tags", []))
         long_desc = _normalize_long_description(
             "",
             performers=performers,
@@ -174,7 +180,6 @@ def generate_titles_with_insight(
             "text_model_fallback_model": None,
         }
 
-    seed_taxonomy = build_seed_taxonomy(genres, position_summary)
     retrieval_stage = _resolve_retrieval_stage(rule_pack)
     retrieval_scope = _retrieval_scope_for_stage(retrieval_stage)
     retrieval_top_k = _resolve_retrieval_top_k(rule_pack)
@@ -202,8 +207,9 @@ def generate_titles_with_insight(
         top_examples=top_examples,
         retrieval_scope=retrieval_scope if retrieval_scope != "off" else "titles",
         analysis_context=analysis_context,
+        metadata_fact_sheet_context=_fact_sheet_brief(metadata_fact_sheet),
     )
-    response = ai_client.generate_text(prompt)
+    response = _generate_enriched_metadata_response(ai_client, prompt)
     if not response.success:
         log.warn("Enriched title call failed — using fallback", extra={"err": response.error_code})
         titles = _annotate(_fallback_titles(studio, performers, scene_type, genres, n_suggestions))
@@ -430,6 +436,56 @@ def summarize_positions(saved_covers: List[Dict[str, Any]]) -> Dict[str, int]:
     return dict(counter)
 
 
+def _seed_taxonomy_from_fact_sheet(fact_sheet: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
+    fact_sheet = fact_sheet if isinstance(fact_sheet, dict) else {}
+    categories = [
+        str(row.get("category") or "").strip()
+        for row in (fact_sheet.get("category_candidates") or [])
+        if isinstance(row, dict) and str(row.get("category") or "").strip()
+    ]
+    tags = [
+        str(row.get("tag") or "").strip()
+        for row in (fact_sheet.get("tag_candidates") or [])
+        if isinstance(row, dict) and str(row.get("tag") or "").strip()
+    ]
+    return {
+        "categories": list(dict.fromkeys(categories))[:15],
+        "tags": list(dict.fromkeys(tags))[:30],
+    }
+
+
+def _merge_seed_taxonomy(*items: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    categories: List[str] = []
+    tags: List[str] = []
+    for item in items:
+        for cat in (item or {}).get("categories") or []:
+            c = str(cat or "").strip()
+            if c and c.lower() not in {x.lower() for x in categories}:
+                categories.append(c)
+        for tag in (item or {}).get("tags") or []:
+            t = str(tag or "").strip()
+            if t and t.lower() not in {x.lower() for x in tags}:
+                tags.append(t)
+    return {"categories": categories[:15], "tags": tags[:30]}
+
+
+def _fact_sheet_brief(fact_sheet: Optional[Dict[str, Any]], *, max_chars: int = 1200) -> str:
+    fact_sheet = fact_sheet if isinstance(fact_sheet, dict) else {}
+    brief = str(fact_sheet.get("prompt_brief") or "").strip()
+    if brief:
+        return brief[:max_chars]
+    bits: List[str] = []
+    for key, label in (("category_candidates", "category"), ("tag_candidates", "tag")):
+        vals = [
+            str(row.get(label) or "").strip()
+            for row in (fact_sheet.get(key) or [])[:16]
+            if isinstance(row, dict) and str(row.get(label) or "").strip()
+        ]
+        if vals:
+            bits.append(f"{key}: " + ", ".join(vals))
+    return "; ".join(bits)[:max_chars]
+
+
 # ---------- internal helpers ----------
 
 def _pick_representative_image(
@@ -497,8 +553,56 @@ _RE_TAG_SUGGESTIONS = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+_ENRICHED_METADATA_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "titles": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "style": {
+                        "type": "string",
+                        "enum": [
+                            "performer_led",
+                            "narrative_hook",
+                            "scene_descriptive",
+                            "studio_branded",
+                            "numbered_series",
+                        ],
+                    },
+                },
+                "required": ["text", "style"],
+                "additionalProperties": False,
+            },
+        },
+        "long_description": {"type": "string"},
+        "categories": {
+            "type": "array",
+            "minItems": CATEGORY_COUNT_MIN,
+            "maxItems": CATEGORY_COUNT_MAX,
+            "items": {"type": "string"},
+        },
+        "tags": {
+            "type": "array",
+            "minItems": TAG_COUNT_MIN,
+            "maxItems": TAG_COUNT_MAX,
+            "items": {"type": "string"},
+        },
+    },
+    "required": ["titles", "long_description", "categories", "tags"],
+    "additionalProperties": False,
+}
+
 
 def _parse_enriched_response(raw: str) -> Dict[str, Any]:
+    parsed_json = _parse_enriched_json_response(raw)
+    if parsed_json is not None:
+        return parsed_json
+
     title_matches = {int(m.group(1)): m.group(2).strip().strip("\"'") for m in _RE_TITLE.finditer(raw)}
     style_matches = {int(m.group(1)): m.group(2).strip().lower() for m in _RE_STYLE.finditer(raw)}
     titles = []
@@ -532,6 +636,102 @@ def _parse_csv_field(match: Optional[re.Match]) -> List[str]:
         t = token.strip()
         if t:
             out.append(t)
+    return list(dict.fromkeys(out))
+
+
+def _generate_enriched_metadata_response(ai_client: AIClient, prompt: str) -> AIResponse:
+    if _structured_metadata_enabled(ai_client):
+        structured_prompt = (
+            f"{prompt}\n\n"
+            "STRUCTURED OUTPUT OVERRIDE: Return only JSON that matches the provided schema. "
+            "Map TITLE_1..TITLE_5 into titles[].text and STYLE_1..STYLE_5 into titles[].style. "
+            "Use long_description, categories, and tags as the final metadata fields."
+        )
+        structured = ai_client.generate_structured_text(structured_prompt, _ENRICHED_METADATA_SCHEMA)
+        if structured.success and _parse_enriched_json_response(structured.raw_text) is not None:
+            return structured
+        log.warn(
+            "Structured metadata generation did not produce parseable JSON; retrying text format",
+            extra={"err": getattr(structured, "error_code", None)},
+        )
+    return ai_client.generate_text(prompt)
+
+
+def _structured_metadata_enabled(ai_client: AIClient) -> bool:
+    if not isinstance(ai_client, AIClient):
+        return False
+    raw = os.environ.get("AMG_TEXT_STRUCTURED_OUTPUT", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _parse_enriched_json_response(raw: str) -> Optional[Dict[str, Any]]:
+    obj = _loads_json_object(raw)
+    if not isinstance(obj, dict):
+        return None
+
+    titles: List[Dict[str, str]] = []
+    for item in obj.get("titles") or obj.get("title_suggestions") or []:
+        if isinstance(item, str):
+            text = item.strip()
+            style = "unknown"
+        elif isinstance(item, dict):
+            text = str(item.get("text") or item.get("title") or "").strip()
+            style = str(item.get("style") or item.get("pattern") or "unknown").strip().lower()
+        else:
+            continue
+        if text:
+            titles.append({"text": text.strip("\"'"), "style": style or "unknown"})
+
+    long_desc = str(
+        obj.get("long_description")
+        or obj.get("description")
+        or obj.get("longDescription")
+        or ""
+    ).strip()
+    categories = _string_list(obj.get("categories") or obj.get("category_suggestions"))
+    tags = _string_list(obj.get("tags") or obj.get("tag_suggestions"))
+
+    if not (titles or long_desc or categories or tags):
+        return None
+    return {
+        "titles": titles,
+        "long_description": re.sub(r"\s+", " ", long_desc).strip().strip("\"'"),
+        "categories": categories,
+        "tags": tags,
+    }
+
+
+def _loads_json_object(raw: str) -> Optional[dict]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\s*```$", "", text).strip()
+    if not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        text = text[start:end + 1]
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _string_list(value: Any) -> List[str]:
+    if isinstance(value, str):
+        parts = re.split(r"[,;\n|]", value)
+    elif isinstance(value, list):
+        parts = value
+    else:
+        return []
+    out: List[str] = []
+    for item in parts:
+        token = str(item or "").strip().strip("\"'")
+        if token:
+            out.append(token)
     return list(dict.fromkeys(out))
 
 

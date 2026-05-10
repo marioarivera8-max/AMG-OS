@@ -64,6 +64,7 @@ from amg.config import (
     STREAMING_SCAN_INTERVAL_SEC,
     STREAMING_SCAN_MAX_AI_CALLS,
     STREAMING_SCAN_MAX_QUEUED,
+    STREAMING_EARLY_STOP_ENABLED,
     STREAMING_SEGMENT_COUNT,
     STREAMING_SEGMENT_MIN_DURATION_SEC,
     normalize_position_label,
@@ -71,10 +72,15 @@ from amg.config import (
 from amg.scanning.selector import LiveSelector
 from amg.scoring.ai_client import AIClient, AIResponse
 from amg.scoring.parser import ScoredFrame, cap_score_for_excellence, parse_ai_response
-from amg.video.dedup import are_near_duplicates, compute_perceptual_hash
+from amg.video.dedup import (
+    are_near_duplicates,
+    compute_perceptual_hash,
+    compute_perceptual_hash_from_gray,
+)
 from amg.video.frame_cache import FrameCache
 from amg.video.frames import (
     analysis_gray,
+    analyze_frame,
     is_frame_too_dark,
     measure_motion,
     measure_sharpness,
@@ -119,6 +125,63 @@ def _candidate_priority(
     if "buildup_zone" in zone_tags:
         score += 120.0
     return score
+
+
+def _using_default_frame_ops() -> bool:
+    return all(
+        getattr(fn, "__module__", "") == "amg.video.frames"
+        for fn in (analysis_gray, is_frame_too_dark, measure_motion, measure_sharpness)
+    )
+
+
+def _stream_base_analysis(frame: np.ndarray) -> tuple[bool, float, Optional[np.ndarray]]:
+    """Return dark/sharpness/gray while preserving monkeypatchable tests."""
+    if _using_default_frame_ops():
+        analyzed = analyze_frame(frame)
+        return bool(analyzed.is_dark), float(analyzed.sharpness), analyzed.gray
+
+    if is_frame_too_dark(frame):
+        return True, 0.0, None
+    sharp = measure_sharpness(frame)
+    return False, float(sharp), analysis_gray(frame)
+
+
+def _stream_hash(frame: np.ndarray, gray: Optional[np.ndarray]):
+    # Tests monkeypatch compute_perceptual_hash at this module boundary. Honor
+    # that before taking the fused gray-frame fast path.
+    if getattr(compute_perceptual_hash, "__module__", "") != "amg.video.dedup":
+        return compute_perceptual_hash(frame)
+    if gray is not None:
+        h = compute_perceptual_hash_from_gray(gray)
+        if h is not None:
+            return h
+    return compute_perceptual_hash(frame)
+
+
+def _candidate_position_label(candidate: Dict[str, Any]) -> Optional[str]:
+    label = normalize_position_label(candidate.get("position_label") or "OTHER")
+    if label in {"OTHER", "UNKNOWN", "NONE"}:
+        return None
+    try:
+        confidence = float(candidate.get("position_label_confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence < 0.65:
+        return None
+    return label
+
+
+def _candidate_semantic_labels(candidate: Dict[str, Any]) -> set[str]:
+    labels: set[str] = set()
+    pos = _candidate_position_label(candidate)
+    if pos:
+        labels.add(pos)
+    for key in ("genre_tags", "subgenre_tags"):
+        for raw in candidate.get(key) or []:
+            label = normalize_position_label(str(raw or "").strip() or "OTHER")
+            if label not in {"OTHER", "UNKNOWN", "NONE"}:
+                labels.add(label)
+    return labels
 
 
 def run_stream_scan(
@@ -301,11 +364,10 @@ def run_stream_scan(
                             break
 
                         local_stats["frames_seen"] += 1
-                        if is_frame_too_dark(frame):
+                        is_dark, sharp, gray = _stream_base_analysis(frame)
+                        if is_dark:
                             local_stats["frames_dark"] += 1
                             continue
-
-                        sharp = measure_sharpness(frame)
 
                         # Relative sharpness floor: 10th percentile of the
                         # last 200 samples, never below half the absolute
@@ -324,7 +386,8 @@ def run_stream_scan(
                             local_stats["frames_below_floor"] += 1
                             continue
 
-                        gray = analysis_gray(frame)
+                        if gray is None:
+                            gray = analysis_gray(frame)
                         motion = measure_motion(prev_gray, gray) if prev_gray is not None else 0.0
                         prev_gray = gray
 
@@ -332,7 +395,7 @@ def run_stream_scan(
                             local_stats["frames_high_motion"] += 1
                             continue
 
-                        phash = compute_perceptual_hash(frame)
+                        phash = _stream_hash(frame, gray)
                         if phash is not None:
                             if any(
                                 are_near_duplicates(phash, prev, DEDUP_HAMMING_THRESHOLD)
@@ -460,6 +523,8 @@ def run_stream_scan(
     skipped = 0
     aborted = False
     abort_reason: Optional[str] = None
+    early_stopped = False
+    early_stop_reason: Optional[str] = None
     all_scored: List[Dict[str, Any]] = []
     dispatcher_started = time.time()
 
@@ -601,6 +666,65 @@ def run_stream_scan(
         failure_rate = float(ai_response_failures) / float(max(1, completed))
         return failure_rate >= float(STREAMING_AI_FAILURE_EARLY_STOP_RATE)
 
+    def _should_stop_for_coverage() -> bool:
+        nonlocal early_stop_reason
+        if not STREAMING_EARLY_STOP_ENABLED:
+            return False
+        stats = selector.stats()
+        scored_pool = int(stats.get("scored_pool", 0) or 0)
+        if scored_pool < target_count:
+            return False
+
+        desired_picks = min(
+            cover_cap,
+            max(target_count, target_count + max(3, target_count // 3)),
+        )
+        if scored_pool < desired_picks and completed < max(target_count * 3, desired_picks):
+            return False
+
+        snapshot = selector.finalize()
+        picks = list(snapshot.get("picks") or [])
+        if len(picks) < target_count:
+            return False
+        if len(picks) < desired_picks and completed < max(target_count * 3, cover_cap):
+            return False
+
+        observed_labels: set[str] = set()
+        for row in all_scored:
+            observed_labels.update(_candidate_semantic_labels(row))
+        pick_labels: set[str] = set()
+        for row in picks:
+            pick_labels.update(_candidate_semantic_labels(row))
+        if observed_labels and not observed_labels.issubset(pick_labels):
+            return False
+
+        timestamps = sorted(
+            float(p.get("timestamp_sec") or 0.0)
+            for p in picks
+            if p.get("timestamp_sec") is not None
+        )
+        if duration_sec > 0 and len(timestamps) >= 2 and not sieve_done.is_set():
+            span = timestamps[-1] - timestamps[0]
+            required_span = 0.65 if effective_segments > 1 else 0.80
+            if span < float(duration_sec) * required_span:
+                return False
+
+        if effective_segments > 1 and not sieve_done.is_set():
+            segments = {
+                int(p.get("segment_idx"))
+                for p in picks
+                if p.get("segment_idx") is not None
+            }
+            required_segments = min(effective_segments, max(2, effective_segments - 1))
+            if len(segments) < required_segments:
+                return False
+
+        early_stop_reason = (
+            f"coverage_ready picks={len(picks)} pool={scored_pool} "
+            f"completed={completed} labels={','.join(sorted(pick_labels)) or 'none'}"
+        )
+        return True
+
     pump_pulse_at = 0.0
     next_log_at = time.time() + 10.0
 
@@ -673,6 +797,12 @@ def run_stream_scan(
                     f"[stream] stopping early: AI response failures "
                     f"{ai_response_failures}/{completed} with no pickable candidates"
                 )
+                break
+
+            if _should_stop_for_coverage():
+                early_stopped = True
+                stop_sieve.set()
+                on_log(f"[stream] stopping early: {early_stop_reason}")
                 break
 
             now = time.time()
@@ -775,6 +905,10 @@ def run_stream_scan(
             "ai_failure_early_stop_enabled": bool(STREAMING_AI_FAILURE_EARLY_STOP_ENABLED),
             "ai_failure_early_stop_min_completed": int(STREAMING_AI_FAILURE_EARLY_STOP_MIN_COMPLETED),
             "ai_failure_early_stop_rate": float(STREAMING_AI_FAILURE_EARLY_STOP_RATE),
+            "early_stop_enabled": bool(STREAMING_EARLY_STOP_ENABLED),
+            "early_stopped": bool(early_stopped),
+            "early_stop_reason": early_stop_reason,
+            "early_stop_target_count": int(target_count),
             "ai_wall_sec": round(ai_wall_total, 2),
             "skipped": skipped,
             "wall_sec": round(time.time() - dispatcher_started, 2),

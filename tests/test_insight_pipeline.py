@@ -19,6 +19,7 @@ class _FakeClient:
 
 def test_generate_scene_insight_payload_includes_validation_telemetry(monkeypatch, tmp_path):
     import amg.scoring.insight_pipeline as mod
+    captured = {}
 
     monkeypatch.setattr(
         mod,
@@ -41,10 +42,9 @@ def test_generate_scene_insight_payload_includes_validation_telemetry(monkeypatc
     monkeypatch.setattr(mod, "detect_scene_type_from_code", lambda *_: "STANDARD")
     monkeypatch.setattr(mod, "describe_scene_from_covers", lambda **_: None)
     monkeypatch.setattr(mod, "summarize_positions", lambda *_: {})
-    monkeypatch.setattr(
-        mod,
-        "generate_titles_with_insight",
-        lambda **_: {
+    def _fake_generate_titles(**kwargs):
+        captured["title_kwargs"] = kwargs
+        return {
             "titles": [{"text": "POV Scene With Performer"}],
             "long_description": "short",
             "categories": ["POV"],
@@ -54,8 +54,9 @@ def test_generate_scene_insight_payload_includes_validation_telemetry(monkeypatc
             "retrieval_stage": "titles",
             "retrieval_scope": "titles",
             "retrieved_examples_count": 2,
-        },
-    )
+        }
+
+    monkeypatch.setattr(mod, "generate_titles_with_insight", _fake_generate_titles)
 
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"x")
@@ -82,3 +83,8 @@ def test_generate_scene_insight_payload_includes_validation_telemetry(monkeypatc
     assert payload["retrieval_stage"] == "titles"
     assert payload["retrieval_scope"] == "titles"
     assert payload["retrieved_examples_count"] == 2
+    assert payload["metadata_fact_sheet_path"] is None
+    assert "POV" in payload["metadata_fact_sheet_summary"]["category_candidates"]
+    assert "pov" in payload["metadata_fact_sheet_summary"]["tag_candidates"]
+    assert captured["title_kwargs"]["metadata_fact_sheet"]["source"]["studio"] == "StudioX"
+    assert "category candidates" in captured["title_kwargs"]["analysis_context"]

@@ -598,14 +598,33 @@ class _FFmpegCudaBackend:
             )
             return self._delegate.get_frames_at(timestamps_sec)
 
-        results: List[Optional[np.ndarray]] = []
+        results: List[Optional[np.ndarray]] = [None] * len(timestamps_sec)
         failures = 0
-        for ts in timestamps_sec:
-            ok, frame = self._read_frame_at_pipe(float(ts), width=width, height=height)
-            if not ok:
-                failures += 1
-                frame = self._delegate.get_frame_at(float(ts))
-            results.append(frame)
+        batched_groups = 0
+        indexed = [(idx, float(ts)) for idx, ts in enumerate(timestamps_sec)]
+        for group in self._group_random_access_timestamps(indexed):
+            if len(group) < 3:
+                for idx, ts in group:
+                    ok, frame = self._read_frame_at_pipe(ts, width=width, height=height)
+                    if not ok:
+                        failures += 1
+                        frame = self._delegate.get_frame_at(ts)
+                    results[idx] = frame
+                continue
+
+            ok, frames_by_idx = self._read_frames_window_pipe(group, width=width, height=height)
+            if ok:
+                batched_groups += 1
+                for idx, frame in frames_by_idx.items():
+                    results[idx] = frame
+
+            missing = [(idx, ts) for idx, ts in group if results[idx] is None]
+            for idx, ts in missing:
+                ok_one, frame = self._read_frame_at_pipe(ts, width=width, height=height)
+                if not ok_one:
+                    failures += 1
+                    frame = self._delegate.get_frame_at(ts)
+                results[idx] = frame
 
         if failures:
             log.warn(
@@ -613,7 +632,159 @@ class _FFmpegCudaBackend:
                 failures=failures,
                 requested=len(timestamps_sec),
             )
+        if batched_groups:
+            log.info(
+                "ffmpeg-cuda batched clustered random access",
+                groups=batched_groups,
+                requested=len(timestamps_sec),
+            )
         return results
+
+    @staticmethod
+    def _group_random_access_timestamps(
+        indexed_timestamps: List[Tuple[int, float]],
+        *,
+        max_gap_sec: float = 2.25,
+        max_span_sec: float = 3.0,
+    ) -> List[List[Tuple[int, float]]]:
+        if not indexed_timestamps:
+            return []
+        ordered = sorted(indexed_timestamps, key=lambda item: item[1])
+        groups: List[List[Tuple[int, float]]] = [[ordered[0]]]
+        for item in ordered[1:]:
+            gap = float(item[1]) - float(groups[-1][-1][1])
+            span = float(item[1]) - float(groups[-1][0][1])
+            if gap <= max_gap_sec and span <= max_span_sec:
+                groups[-1].append(item)
+            else:
+                groups.append([item])
+        return groups
+
+    def _read_frames_window_pipe(
+        self,
+        indexed_timestamps: List[Tuple[int, float]],
+        *,
+        width: int,
+        height: int,
+    ) -> Tuple[bool, dict]:
+        duration_sec = self._duration_sec_safe()
+        valid = [
+            (idx, ts)
+            for idx, ts in indexed_timestamps
+            if ts >= 0 and (not duration_sec or ts <= duration_sec)
+        ]
+        if not valid:
+            return True, {}
+
+        fps = self._fps_safe(default=30.0)
+        output_fps = min(12.0, max(1.0, fps))
+        first_ts = min(ts for _, ts in valid)
+        last_ts = max(ts for _, ts in valid)
+        pad = max(0.25, 1.0 / output_fps)
+        start_sec = max(0.0, first_ts - pad)
+        end_sec = last_ts + pad
+        if duration_sec:
+            end_sec = min(duration_sec, end_sec)
+        span = max(0.1, end_sec - start_sec)
+
+        frame_bytes = int(width) * int(height) * 3
+        if frame_bytes <= 0:
+            return False, {}
+
+        cmd = [
+            str(self._ffmpeg_path),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-hwaccel",
+            "cuda",
+            "-ss",
+            f"{start_sec:.6f}",
+            "-t",
+            f"{span:.6f}",
+            "-i",
+            str(self.video_path),
+            "-vf",
+            f"fps={output_fps:.6f}",
+            "-an",
+            "-sn",
+            "-dn",
+            "-pix_fmt",
+            "bgr24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]
+
+        best: dict[int, Tuple[float, np.ndarray]] = {}
+        proc = None
+        emitted = 0
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=frame_bytes * 2,
+            )
+            if proc.stdout is None:
+                raise IOError("ffmpeg-cuda started without stdout pipe")
+
+            while True:
+                buf = proc.stdout.read(frame_bytes)
+                if not buf or len(buf) < frame_bytes:
+                    break
+                frame_ts = start_sec + (float(emitted) / output_fps)
+                frame = np.frombuffer(buf, dtype=np.uint8).reshape((height, width, 3))
+                for idx, target_ts in valid:
+                    distance = abs(frame_ts - target_ts)
+                    prev = best.get(idx)
+                    if prev is None or distance < prev[0]:
+                        best[idx] = (distance, frame)
+                emitted += 1
+
+            rc = proc.wait(timeout=10.0)
+            if rc != 0:
+                err = b""
+                if proc.stderr is not None:
+                    err = proc.stderr.read()
+                raise IOError(
+                    f"ffmpeg-cuda batch decode failed with exit={rc}: "
+                    f"{err.decode('utf-8', 'ignore')[:200]}"
+                )
+        except Exception as e:
+            log.warn(
+                "ffmpeg-cuda clustered random access failed",
+                count=len(valid),
+                error=str(e),
+            )
+            return False, {}
+        finally:
+            if proc is not None:
+                try:
+                    if proc.poll() is None:
+                        proc.kill()
+                except Exception:
+                    pass
+
+        # Do not let one emitted frame stand in for an entire target cluster.
+        # A partial hardware-decode failure can still produce stdout before
+        # exiting; each accepted frame must be close to its requested timestamp.
+        max_distance = max(0.2, 0.75 / output_fps)
+        accepted = {
+            idx: frame
+            for idx, (distance, frame) in best.items()
+            if float(distance) <= max_distance
+        }
+        if len(accepted) < len(valid):
+            log.warn(
+                "ffmpeg-cuda clustered random access missing precise frames",
+                requested=len(valid),
+                accepted=len(accepted),
+                max_distance_sec=round(max_distance, 3),
+            )
+
+        return True, accepted
 
     def _read_frame_at_pipe(
         self,
@@ -622,7 +793,8 @@ class _FFmpegCudaBackend:
         width: int,
         height: int,
     ) -> Tuple[bool, Optional[np.ndarray]]:
-        if timestamp_sec < 0 or (self.duration_sec and timestamp_sec > self.duration_sec):
+        duration_sec = self._duration_sec_safe()
+        if timestamp_sec < 0 or (duration_sec and timestamp_sec > duration_sec):
             return True, None
 
         frame_bytes = int(width) * int(height) * 3
@@ -692,6 +864,19 @@ class _FFmpegCudaBackend:
                 error=str(e),
             )
             return False, None
+
+    def _fps_safe(self, *, default: float) -> float:
+        try:
+            fps = float(getattr(self._delegate, "fps", 0.0) or 0.0)
+        except Exception:
+            fps = 0.0
+        return fps if fps > 0 else default
+
+    def _duration_sec_safe(self) -> float:
+        try:
+            return float(getattr(self._delegate, "duration_sec", 0.0) or 0.0)
+        except Exception:
+            return 0.0
 
     def _should_use_cuda_pipe(self) -> bool:
         if _HWACCEL_MODE not in {"cuda", "nvdec"}:

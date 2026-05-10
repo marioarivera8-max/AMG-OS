@@ -29,6 +29,11 @@ from amg.scoring.scene_describer import (
 from amg.learning.rule_packs import resolve_rule_pack_for_scene
 from amg.review.distribution_gate import validate_metadata_for_platforms
 from amg.analysis.scene_analysis import build_analysis_summary, compact_prompt_context, load_scene_analysis
+from amg.analysis.metadata_fact_sheet import (
+    build_metadata_fact_sheet,
+    compact_fact_sheet_prompt_context,
+    write_metadata_fact_sheet,
+)
 from amg.utils.logging import get_logger
 
 log = get_logger("scoring.insight_pipeline")
@@ -74,13 +79,33 @@ def generate_scene_insight_payload(
     rule_resolution = resolve_rule_pack_for_scene(video_path.parent.name or video_path.stem)
     active_rule_pack = rule_resolution.get("rule_pack") if isinstance(rule_resolution, dict) else None
     analysis = load_scene_analysis(work_dir)
-    analysis_context = compact_prompt_context(analysis)
 
     insight_obj = describe_scene_from_covers(
         contact_sheet_path=contact_sheet,
         cover_paths=cover_paths,
         ai_client=ai_client,
     )
+    scene_context = {
+        "scene_id": video_path.parent.name or video_path.stem,
+        "studio": studio_name,
+        "performers": performers,
+        "scene_type": primary_type,
+        "genres": title_info.get("detected_genres", []),
+        "description": description_for_prompt,
+    }
+    metadata_fact_sheet = build_metadata_fact_sheet(
+        analysis=analysis,
+        scene_context=scene_context,
+        saved_covers=saved_covers or [],
+        insight=insight_obj.to_dict() if insight_obj else {},
+    )
+    metadata_fact_sheet_path = None
+    if persist and work_dir:
+        metadata_fact_sheet_path = write_metadata_fact_sheet(Path(work_dir), metadata_fact_sheet)
+    fact_context = compact_fact_sheet_prompt_context(metadata_fact_sheet)
+    analysis_context = compact_prompt_context(analysis)
+    if fact_context:
+        analysis_context = f"{fact_context}; {analysis_context}" if analysis_context else fact_context
     position_summary = summarize_positions(saved_covers or [])
     title_payload = generate_titles_with_insight(
         studio=studio_name,
@@ -94,6 +119,7 @@ def generate_scene_insight_payload(
         ai_client=ai_client,
         rule_pack=active_rule_pack,
         analysis_context=analysis_context,
+        metadata_fact_sheet=metadata_fact_sheet,
     )
     target_platforms = list(PLATFORM_REQUIREMENTS.keys())
     metadata_initial = _validate_generated_metadata(
@@ -150,6 +176,8 @@ def generate_scene_insight_payload(
         "position_summary": position_summary,
         "analysis_context": analysis_context,
         "analysis_summary": build_analysis_summary(analysis) if isinstance(analysis, dict) else {},
+        "metadata_fact_sheet_path": str(metadata_fact_sheet_path) if metadata_fact_sheet_path else None,
+        "metadata_fact_sheet_summary": _metadata_fact_sheet_summary(metadata_fact_sheet),
         "ai_titles": title_payload.get("titles", []),
         "long_description": title_payload.get("long_description", ""),
         "title_tone": title_payload.get("title_tone", title_tone),
@@ -184,6 +212,31 @@ def generate_scene_insight_payload(
     if persist and work_dir:
         _write_insight_json(Path(work_dir), payload)
     return payload
+
+
+def _metadata_fact_sheet_summary(fact_sheet: Dict[str, Any]) -> Dict[str, Any]:
+    fact_sheet = fact_sheet if isinstance(fact_sheet, dict) else {}
+    return {
+        "schema_version": fact_sheet.get("schema_version"),
+        "sections_count": len(fact_sheet.get("sections") or []),
+        "action_beats": [
+            str(x.get("label"))
+            for x in (fact_sheet.get("action_beats") or [])[:8]
+            if isinstance(x, dict) and x.get("label")
+        ],
+        "category_candidates": [
+            str(x.get("category"))
+            for x in (fact_sheet.get("category_candidates") or [])[:12]
+            if isinstance(x, dict) and x.get("category")
+        ],
+        "tag_candidates": [
+            str(x.get("tag"))
+            for x in (fact_sheet.get("tag_candidates") or [])[:20]
+            if isinstance(x, dict) and x.get("tag")
+        ],
+        "policy_warning_count": len(fact_sheet.get("policy_warnings") or []),
+        "ocr_text_count": len(fact_sheet.get("ocr_text") or []),
+    }
 
 
 def _resolve_performers(folder_ctx, title_info: Dict[str, Any]) -> List[str]:

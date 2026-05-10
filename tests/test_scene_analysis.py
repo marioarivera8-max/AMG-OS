@@ -134,3 +134,76 @@ def test_scene_analysis_includes_cover_validation_evidence():
     assert flags
     assert flags[0]["flag"] == "PENETRATION_TYPE_WITHOUT_VISIBLE_PENETRATION"
     assert any(ev.get("kind") == "cover_validation" for ev in analysis["evidence"])
+
+
+def test_metadata_fact_sheet_distills_retail_signals(tmp_path):
+    from amg.analysis.metadata_fact_sheet import (
+        build_metadata_fact_sheet,
+        compact_fact_sheet_prompt_context,
+        load_metadata_fact_sheet,
+        write_metadata_fact_sheet,
+    )
+
+    analysis = {
+        "scene_id": "scene_x",
+        "source": {"duration_sec": 120, "resolution": "1920x1080"},
+        "sections": [
+            {
+                "section_tag": "ORAL_BJ",
+                "time_segments": [{"start_seconds": 8, "end_seconds": 22}],
+                "thumbnail_timestamp": 14.2,
+                "confidence": 0.91,
+                "relative_activity": 5.0,
+                "evidence_ids": ["ev_001"],
+            }
+        ],
+        "tags": [
+            {"tag": "POV", "probability": 0.87, "count": 4},
+            {"tag": "DOGGY", "probability": 0.72, "count": 2},
+            {"tag": "MISSIONARY", "confidence": 0.68, "count": 1},
+        ],
+        "thumbnail_moments": [{"timestamp_sec": 14.2, "score": 89, "evidence_id": "ev_001"}],
+        "ocr_results": [{"full_text": "example watermark"}],
+        "policy_flags": [{"flag": "URL", "type": "ocr_policy", "review_only": True}],
+        "evidence": [{"id": "ev_001"}],
+    }
+
+    fact = build_metadata_fact_sheet(
+        analysis=analysis,
+        scene_context={
+            "scene_id": "scene_x",
+            "studio": "StudioX",
+            "performers": ["Alice Blue"],
+            "scene_type": "STANDARD",
+            "genres": ["POV"],
+            "description": "bedroom pov scene",
+        },
+        saved_covers=[
+            {
+                "type": "SEX_ACT",
+                "position_label": "DOGGY",
+                "position_label_confidence": 0.8,
+                "score": 88,
+                "genre_tags": ["POV"],
+                "subgenre_tags": ["BLOWJOB"],
+            }
+        ],
+        insight={"setting": "bedroom", "mood": "intense"},
+    )
+
+    cats = [c["category"] for c in fact["category_candidates"]]
+    tags = [t["tag"] for t in fact["tag_candidates"]]
+    assert "POV" in cats
+    assert "Blowjob" in cats
+    assert "pov" in tags
+    assert "doggy style" in tags
+    assert "missionary" in tags
+    assert fact["action_beats"][0]["label"] == "ORAL_BJ"
+    brief = compact_fact_sheet_prompt_context(fact)
+    assert "StudioX" in brief
+    assert "category candidates" in brief
+
+    out = write_metadata_fact_sheet(tmp_path, fact)
+    assert out is not None
+    loaded = load_metadata_fact_sheet(tmp_path)
+    assert loaded["schema_version"] == "1.0"

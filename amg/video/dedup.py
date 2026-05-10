@@ -91,6 +91,22 @@ def compute_perceptual_hash(frame_bgr: np.ndarray) -> Optional[PerceptualHash]:
         return None
 
 
+def compute_perceptual_hash_from_gray(gray: np.ndarray) -> Optional[PerceptualHash]:
+    """Compute dHash from an already-grayscale analysis frame."""
+    if gray is None:
+        return None
+    try:
+        hs = max(1, int(DEDUP_HASH_SIZE))
+        small = cv2.resize(gray, (hs + 1, hs), interpolation=cv2.INTER_AREA)
+        diff = small[:, 1:] > small[:, :-1]
+        bits = 0
+        for bit in diff.reshape(-1):
+            bits = (bits << 1) | int(bool(bit))
+        return PerceptualHash(bits=bits, size=hs)
+    except Exception:
+        return None
+
+
 def are_near_duplicates(hash1, hash2, threshold: int = DEDUP_HAMMING_THRESHOLD) -> bool:
     """
     Compare two perceptual hashes.

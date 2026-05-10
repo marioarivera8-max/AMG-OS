@@ -88,3 +88,22 @@ def test_ai_client_text_generation_falls_back_to_secondary_model():
     assert result.raw_text == "fallback output"
     assert session.posts[0]["json"]["model"] == "text-primary"
     assert session.posts[1]["json"]["model"] == "text-fallback"
+
+
+def test_ai_client_structured_text_sends_schema_format():
+    from amg.scoring.ai_client import AIClient
+
+    client = AIClient(model="vision-model-x", text_model="text-model-y")
+    session = _Session()
+    client._session = session
+    schema = {
+        "type": "object",
+        "properties": {"title": {"type": "string"}},
+        "required": ["title"],
+    }
+
+    result = client.generate_structured_text("write metadata", schema)
+
+    assert result.success is True
+    assert session.posts[-1]["json"]["model"] == "text-model-y"
+    assert session.posts[-1]["json"]["format"] == schema

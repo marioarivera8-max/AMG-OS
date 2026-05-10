@@ -460,6 +460,7 @@ def build_enriched_title_prompt(
     top_examples: Optional[List[dict]] = None,
     retrieval_scope: str = "titles",
     analysis_context: str = "",
+    metadata_fact_sheet_context: str = "",
 ) -> str:
     """Title-generation prompt enriched with vision insight + position rollup.
 
@@ -501,7 +502,7 @@ def build_enriched_title_prompt(
             "to what is visible in-scene."
         )
     retrieval_scope_note = _retrieval_scope_note(retrieval_scope)
-    examples_block = _format_top_examples(top_examples or [])
+    examples_block = _format_top_examples(top_examples or [], retrieval_scope=retrieval_scope)
 
     return f"""Generate retail-optimized titles AND a marketing-ready long description for an adult VOD scene.
 
@@ -518,6 +519,7 @@ SCENE CONTEXT:
   Mood: {mood}
   Position rollup across selected covers: {pos_str}
   AMG scene analysis: {analysis_context or "(none)"}
+  Metadata fact sheet: {metadata_fact_sheet_context or "(none)"}
   Seed categories from scene signals: {seed_categories}
   Seed tags from scene signals: {seed_tags}
   Retrieval scope: {retrieval_scope}
@@ -530,6 +532,7 @@ REQUIREMENTS:
   - Each title 30-80 characters, in the requested language.
   - Vary the patterns across the {n_suggestions} suggestions.
   - Prefer concrete details (setting, performer name, position, mood) over generic adjectives.
+  - Treat the metadata fact sheet as the highest-signal source for categories, tags, action beats, and warnings.
   - Avoid clichéd words: "wild", "crazy", "naughty".
   - Do not repeat near-identical title phrasing across TITLE_1..TITLE_5.
   - Keep punctuation clean: no emoji, no all-caps shouting, no repeated exclamation marks.
@@ -583,22 +586,44 @@ END
 """
 
 
-def _format_top_examples(rows: List[dict]) -> str:
+def _format_top_examples(rows: List[dict], *, retrieval_scope: str = "titles") -> str:
     if not rows:
         return "  (none)"
+    scope = str(retrieval_scope or "titles").strip().lower()
     lines: List[str] = []
     for idx, row in enumerate(rows[:5], start=1):
         title = str((row or {}).get("title") or "").strip() or "(no title)"
         studio = str((row or {}).get("studio") or "").strip() or "unknown"
         scene_type = str((row or {}).get("scene_type") or "").strip() or "STANDARD"
         genres = ", ".join((row or {}).get("genres") or []) or "none"
-        desc = str((row or {}).get("long_description") or "").strip()
-        if len(desc) > 180:
-            desc = desc[:180].rstrip() + "..."
-        lines.append(
-            f"  EXAMPLE_{idx}: studio={studio}; type={scene_type}; genres={genres}; title={title}; description={desc}"
-        )
+        line = f"  EXAMPLE_{idx}: studio={studio}; type={scene_type}; genres={genres}; title={title}"
+        if scope in {"titles_description", "full"}:
+            desc = str((row or {}).get("long_description") or "").strip()
+            if len(desc) > 180:
+                desc = desc[:180].rstrip() + "..."
+            if _example_description_ready(row):
+                line += f"; description={desc}"
+            else:
+                line += "; description=omitted_low_quality"
+        if scope == "full" and _example_full_metadata_ready(row):
+            tags = ", ".join(str(x) for x in ((row or {}).get("tags") or [])[:20])
+            cats = ", ".join(str(x) for x in ((row or {}).get("categories") or [])[:12])
+            line += f"; categories={cats}; tags={tags}"
+        elif scope == "full":
+            line += "; categories_tags=omitted_low_quality"
+        lines.append(line)
     return "\n".join(lines)
+
+
+def _example_description_ready(row: dict) -> bool:
+    desc = str((row or {}).get("long_description") or "").strip()
+    return 120 <= len(desc) <= 600
+
+
+def _example_full_metadata_ready(row: dict) -> bool:
+    tags = (row or {}).get("tags") or []
+    cats = (row or {}).get("categories") or []
+    return _example_description_ready(row) and len(tags) >= 12 and len(cats) >= 6
 
 
 def _retrieval_scope_note(scope: str) -> str:
