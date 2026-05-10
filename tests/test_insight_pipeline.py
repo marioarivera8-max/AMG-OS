@@ -40,7 +40,11 @@ def test_generate_scene_insight_payload_includes_validation_telemetry(monkeypatc
     monkeypatch.setattr(mod, "parse_title_with_context", lambda *_: {"detected_genres": ["POV"], "description": "desc", "metadata_title": "meta"})
     monkeypatch.setattr(mod, "derive_primary_scene_type", lambda *_: "STANDARD")
     monkeypatch.setattr(mod, "detect_scene_type_from_code", lambda *_: "STANDARD")
-    monkeypatch.setattr(mod, "describe_scene_from_covers", lambda **_: None)
+    monkeypatch.setattr(
+        mod,
+        "describe_scene_from_covers",
+        lambda **_: (_ for _ in ()).throw(AssertionError("scene insight should be skipped")),
+    )
     monkeypatch.setattr(mod, "summarize_positions", lambda *_: {})
     def _fake_generate_titles(**kwargs):
         captured["title_kwargs"] = kwargs
@@ -69,6 +73,7 @@ def test_generate_scene_insight_payload_includes_validation_telemetry(monkeypatc
         work_dir=tmp_path / "work",
         ai_client=_FakeClient(),
         persist=False,
+        include_scene_insight=False,
     )
     assert payload["vision_model_used"] == "vision-test"
     assert payload["text_model_used"] == "text-test"
@@ -84,6 +89,7 @@ def test_generate_scene_insight_payload_includes_validation_telemetry(monkeypatc
     assert payload["retrieval_scope"] == "titles"
     assert payload["retrieved_examples_count"] == 2
     assert payload["metadata_fact_sheet_path"] is None
+    assert payload["scene_insight_enabled"] is False
     assert "POV" in payload["metadata_fact_sheet_summary"]["category_candidates"]
     assert "pov" in payload["metadata_fact_sheet_summary"]["tag_candidates"]
     assert captured["title_kwargs"]["metadata_fact_sheet"]["source"]["studio"] == "StudioX"

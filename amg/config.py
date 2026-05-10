@@ -1264,6 +1264,10 @@ ENABLE_SCENE_INSIGHT = _profile_bool(
     True,
     turbo=False,
 )
+ENABLE_TEXT_METADATA = _profile_bool(
+    "AMG_ENABLE_TEXT_METADATA",
+    True,
+)
 ENABLE_PROVIDED_THUMBNAIL_SCORING = _profile_bool(
     "AMG_ENABLE_PROVIDED_THUMBNAIL_SCORING",
     True,

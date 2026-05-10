@@ -40,6 +40,7 @@ from amg.config import (
     ENABLE_CLUSTER_EXPANSION,
     ENABLE_POSITION_CLASSIFIER,
     ENABLE_SCENE_INSIGHT,
+    ENABLE_TEXT_METADATA,
     ENABLE_PROVIDED_THUMBNAIL_SCORING,
     ENABLE_SCENE_ANALYSIS,
     ENABLE_ANALYSIS_OCR_POLICY,
@@ -1165,7 +1166,8 @@ def process_scene(
     # Best-effort. Always degrades safely on AI offline / parse fail.
     insight_dict = None
     title_payload = None
-    if not dry_run and saved_covers and ENABLE_SCENE_INSIGHT:
+    should_generate_text_metadata = bool(ENABLE_TEXT_METADATA or ENABLE_SCENE_INSIGHT)
+    if not dry_run and saved_covers and should_generate_text_metadata:
         try:
             with phase_timer("scene_insight") as t_ins:
                 insight_dict, title_payload = _generate_scene_insight_and_titles(
@@ -1174,9 +1176,12 @@ def process_scene(
                     work_dir=work_dir,
                     ai_client=ai_client,
                     title_tone=TITLE_TONE_DEFAULT,
+                    include_scene_insight=ENABLE_SCENE_INSIGHT,
                 )
             phase_results["scene_insight"] = {
                 "duration_sec": t_ins.elapsed,
+                "scene_insight_enabled": bool(ENABLE_SCENE_INSIGHT),
+                "text_metadata_enabled": bool(ENABLE_TEXT_METADATA),
                 "insight_ok": insight_dict is not None,
                 "ai_titles_ok": bool(title_payload and title_payload.get("ai_used")),
                 "n_titles": len(title_payload.get("titles", [])) if title_payload else 0,
@@ -1185,7 +1190,13 @@ def process_scene(
             log.warn(f"[scene_insight] failed: {e}")
             phase_results["scene_insight"] = {"duration_sec": 0, "error": str(e)}
     elif not dry_run and saved_covers:
-        phase_results["scene_insight"] = {"duration_sec": 0.0, "skipped": True, "reason": "disabled"}
+        phase_results["scene_insight"] = {
+            "duration_sec": 0.0,
+            "skipped": True,
+            "reason": "disabled",
+            "scene_insight_enabled": bool(ENABLE_SCENE_INSIGHT),
+            "text_metadata_enabled": bool(ENABLE_TEXT_METADATA),
+        }
 
     # --- PHASE 12: OPTIONAL SOFT THUMBNAIL (NON-NUDE) ---
     soft_thumb_info = None
@@ -1358,6 +1369,7 @@ def _generate_scene_insight_and_titles(
     work_dir,
     ai_client,
     title_tone,
+    include_scene_insight=True,
 ):
     """Phase 11 helper: vision insight + AI-driven titles & long description.
 
@@ -1372,6 +1384,7 @@ def _generate_scene_insight_and_titles(
         title_tone=title_tone,
         ai_client=ai_client,
         persist=True,
+        include_scene_insight=include_scene_insight,
     )
     insight_dict = payload.get("insight")
     title_payload = {

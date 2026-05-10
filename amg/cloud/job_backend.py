@@ -664,6 +664,7 @@ class RunpodBackend(JobBackend):
                 "AMG_ENABLE_CLUSTER_EXPANSION",
                 "AMG_ENABLE_POSITION_CLASSIFIER",
                 "AMG_ENABLE_SCENE_INSIGHT",
+                "AMG_ENABLE_TEXT_METADATA",
                 "AMG_ENABLE_PROVIDED_THUMBNAIL_SCORING",
                 "AMG_ENABLE_SCENE_ANALYSIS",
                 "AMG_ENABLE_ANALYSIS_OCR_POLICY",

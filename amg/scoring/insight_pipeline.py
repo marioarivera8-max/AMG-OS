@@ -47,6 +47,7 @@ def generate_scene_insight_payload(
     title_tone: str = TITLE_TONE_DEFAULT,
     ai_client: Optional[AIClient] = None,
     persist: bool = True,
+    include_scene_insight: bool = True,
 ) -> Dict[str, Any]:
     """
     Build scene insight + title payload, optionally writing insight.json.
@@ -80,11 +81,13 @@ def generate_scene_insight_payload(
     active_rule_pack = rule_resolution.get("rule_pack") if isinstance(rule_resolution, dict) else None
     analysis = load_scene_analysis(work_dir)
 
-    insight_obj = describe_scene_from_covers(
-        contact_sheet_path=contact_sheet,
-        cover_paths=cover_paths,
-        ai_client=ai_client,
-    )
+    insight_obj = None
+    if include_scene_insight:
+        insight_obj = describe_scene_from_covers(
+            contact_sheet_path=contact_sheet,
+            cover_paths=cover_paths,
+            ai_client=ai_client,
+        )
     scene_context = {
         "scene_id": video_path.parent.name or video_path.stem,
         "studio": studio_name,
@@ -172,6 +175,7 @@ def generate_scene_insight_payload(
             "metadata_documents_found": len(folder_ctx.metadata_documents),
             "ancestor_names": folder_ctx.ancestor_names,
         },
+        "scene_insight_enabled": bool(include_scene_insight),
         "insight": insight_obj.to_dict() if insight_obj else None,
         "position_summary": position_summary,
         "analysis_context": analysis_context,

@@ -293,6 +293,7 @@ def test_runpod_backend_forwards_processing_profile_env(runpod_backend, tmp_path
     monkeypatch.setenv("AMG_TIER_SCAN_MODE", "single_pass")
     monkeypatch.setenv("AMG_SINGLE_PASS_MAX_AI_FRAMES", "24")
     monkeypatch.setenv("AMG_ENABLE_CLUSTER_EXPANSION", "0")
+    monkeypatch.setenv("AMG_ENABLE_TEXT_METADATA", "1")
     monkeypatch.setenv("AMG_VISION_MODEL_OVERRIDE", "qwen2.5vl:3b")
     monkeypatch.setenv("AMG_TEXT_STRUCTURED_OUTPUT", "0")
 
@@ -312,6 +313,7 @@ def test_runpod_backend_forwards_processing_profile_env(runpod_backend, tmp_path
     assert env["AMG_TIER_SCAN_MODE"] == "single_pass"
     assert env["AMG_SINGLE_PASS_MAX_AI_FRAMES"] == "24"
     assert env["AMG_ENABLE_CLUSTER_EXPANSION"] == "0"
+    assert env["AMG_ENABLE_TEXT_METADATA"] == "1"
     assert env["AMG_VISION_MODEL_OVERRIDE"] == "qwen2.5vl:3b"
     assert env["AMG_TEXT_STRUCTURED_OUTPUT"] == "0"
 

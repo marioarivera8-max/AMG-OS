@@ -6,6 +6,7 @@ import numpy as np
 def test_process_scene_mocked_smoke(monkeypatch, tmp_path):
     import amg.pipeline as p
 
+    insight_calls = {}
     video_path = tmp_path / "scene" / "clip.mp4"
     video_path.parent.mkdir(parents=True, exist_ok=True)
     video_path.write_text("stub")
@@ -124,14 +125,17 @@ def test_process_scene_mocked_smoke(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(p, "score_and_save_provided_thumbnails", lambda **_: ([], {"discovered": 0, "scanned": 0, "accepted": 0, "imported": 0}))
     monkeypatch.setattr(p, "build_contact_sheet", lambda *_, **__: None)
-    monkeypatch.setattr(
-        p,
-        "_generate_scene_insight_and_titles",
-        lambda **_: (
+    monkeypatch.setattr(p, "ENABLE_SCENE_INSIGHT", False)
+    monkeypatch.setattr(p, "ENABLE_TEXT_METADATA", True)
+
+    def _fake_generate_scene_insight_and_titles(**kwargs):
+        insight_calls.update(kwargs)
+        return (
             {"setting": "indoor", "notable_features": [], "action_summary": "", "mood": "", "location_hint": "", "raw_text": ""},
             {"titles": [], "long_description": "", "title_tone": "retail_safe", "categories": [], "tags": [], "ai_used": False},
-        ),
-    )
+        )
+
+    monkeypatch.setattr(p, "_generate_scene_insight_and_titles", _fake_generate_scene_insight_and_titles)
     monkeypatch.setattr(p, "SOFT_THUMB_ENABLED", False)
     monkeypatch.setattr(p, "write_decision_log", lambda **_: tmp_path / "decision.json")
     monkeypatch.setattr(p, "record_scene_outcome", lambda **_: None)
@@ -146,6 +150,7 @@ def test_process_scene_mocked_smoke(monkeypatch, tmp_path):
     assert result["analysis_path"] == tmp_path / "work" / "scene_analysis.json"
     assert result["analysis_summary"]["sections_count"] >= 1
     assert (tmp_path / "work" / "scene_analysis.json").exists()
+    assert insight_calls["include_scene_insight"] is False
 
 
 def test_sensitive_content_summary_flags_review():
