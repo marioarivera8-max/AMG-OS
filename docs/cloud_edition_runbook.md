@@ -61,6 +61,49 @@ ssh -i "$HOME/.ssh/id_ed25519" root@5.161.231.249 "journalctl -u amg-controller 
 ssh -i "$HOME/.ssh/id_ed25519" root@5.161.231.249 "grep -E '^(AMG_JOB_BACKEND|AMG_RUNPOD_IMAGE|AMG_PROCESSING_PROFILE|AMG_STREAMING_SCAN|AMG_RUNPOD_VIDEO_BACKEND|AMG_VIDEO_HWACCEL|AMG_GPU_CV_ENABLED|AMG_GPU_CV_BACKEND|AMG_GPU_DEDUP_ENABLED|AMG_RUNPOD_OLLAMA_NUM_PARALLEL|AMG_RUNPOD_AI_PARALLEL_WORKERS|AMG_ENABLE_SCENE_INSIGHT|AMG_ENABLE_PROVIDED_THUMBNAIL_SCORING|AMG_SOFT_THUMB_ENABLED|AMG_RUNPOD_IDLE_TERMINATE_SEC)=' /etc/amg/controller.env"
 ```
 
+## Disk Maintenance
+
+The controller disk usually fills from old Docker image tags, especially pod
+images. AMG data artifacts are normally much smaller, but stale
+`cloud_submit_fallback/` folders can temporarily hold full source videos.
+
+Inspect usage:
+
+```bash
+ssh -i "$HOME/.ssh/id_ed25519" root@5.161.231.249 "df -h && docker system df && du -xh --max-depth=1 /var/lib/amg/data | sort -h"
+```
+
+Dry-run AMG data cleanup from inside the controller image:
+
+```bash
+amg clean --dry-run
+```
+
+Apply safe transient cleanup:
+
+```bash
+amg clean --auto
+```
+
+Host-level cleanup, including old AMG Docker image tags, must run on the
+Hetzner host:
+
+```bash
+cd /path/to/AMG_OS
+python3 scripts/controller_disk_maintenance.py --json
+python3 scripts/controller_disk_maintenance.py --apply --keep-docker-tags 2
+```
+
+Do not mount the Docker socket into the public web container just for cleanup;
+use the host-side script or a root-owned systemd timer instead.
+
+Optional daily timer on the Hetzner host:
+
+```bash
+cd /path/to/AMG_OS
+sudo scripts/install_controller_disk_maintenance_timer.sh
+```
+
 ## Operational Constraints
 
 - No closed API vision services.

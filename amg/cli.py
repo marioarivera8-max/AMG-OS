@@ -134,10 +134,17 @@ def main():
     p_cal.add_argument("studio", type=str)
 
     # clean
-    p_clean = subparsers.add_parser("clean", help="Clean old work directories")
-    p_clean.add_argument("--older-than", type=str, default="30d")
-    p_clean.add_argument("--dry-run", action="store_true")
-    p_clean.add_argument("--auto", action="store_true")
+    p_clean = subparsers.add_parser("clean", help="Report or clean AMG disk usage")
+    p_clean.add_argument("--older-than", type=str, default="60d", help="Age for work_dirs when --include-work-dirs is used")
+    p_clean.add_argument("--cloud-fallback-older-than", type=str, default="2d")
+    p_clean.add_argument("--ui-uploads-older-than", type=str, default="14d")
+    p_clean.add_argument("--pod-uploads-older-than", type=str, default="2d")
+    p_clean.add_argument("--artifact-tmp-older-than", type=str, default="6h")
+    p_clean.add_argument("--include-work-dirs", action="store_true", help="Also clean old review work_dirs")
+    p_clean.add_argument("--dry-run", action="store_true", help="Report only")
+    p_clean.add_argument("--yes", action="store_true", help="Actually delete matching cleanup targets")
+    p_clean.add_argument("--auto", action="store_true", help="Actually delete safe transient targets; work_dirs still require --include-work-dirs")
+    p_clean.add_argument("--json", action="store_true", help="Print machine-readable cleanup report")
 
     # ui
     p_ui = subparsers.add_parser("ui", help="Start local web UI (run + review)")
@@ -953,18 +960,67 @@ def cmd_calibrate(args):
 
 
 def cmd_clean(args):
-    """Clean old work directories."""
+    """Report or clean AMG disk usage."""
+    from amg.maintenance.disk_cleanup import clean_amg_data
+
     init_logging()
-    age_str = args.older_than
-    if age_str.endswith("d"):
-        days = int(age_str[:-1])
-    else:
-        print(f"Invalid age format: {age_str}. Use like '30d' or '7d'.")
+    dry_run = bool(args.dry_run or not (args.yes or args.auto))
+    try:
+        report = clean_amg_data(
+            data_dir=DATA_DIR,
+            dry_run=dry_run,
+            cloud_fallback_older_than=args.cloud_fallback_older_than,
+            ui_uploads_older_than=args.ui_uploads_older_than,
+            pod_uploads_older_than=args.pod_uploads_older_than,
+            artifact_tmp_older_than=args.artifact_tmp_older_than,
+            include_work_dirs=bool(args.include_work_dirs),
+            work_dirs_older_than=args.older_than,
+        )
+    except ValueError as exc:
+        print(f"Invalid cleanup age: {exc}")
         return 1
 
-    print(f"Looking for work directories older than {days} days...")
-    print("Cleanup feature coming in v11.1.1")
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, default=str))
+        return 0 if not report.errors else 1
+
+    action = "Would delete" if report.dry_run else "Deleted"
+    print("=" * 64)
+    print("AMG disk cleanup")
+    print("=" * 64)
+    print(f"Data dir:       {report.data_dir}")
+    print(f"Mode:           {'dry-run' if report.dry_run else 'apply'}")
+    print(f"Targets:        {len(report.targets)}")
+    print(f"Reclaimable:    {_fmt_bytes(report.reclaimable_bytes)}")
+    print(f"Deleted:        {_fmt_bytes(report.deleted_bytes)}")
+    print(f"Free before:    {_fmt_bytes(report.free_before_bytes)}")
+    print(f"Free after:     {_fmt_bytes(report.free_after_bytes)}")
+    if not args.include_work_dirs:
+        print("Work dirs:      report-only/off (pass --include-work-dirs to clean old review artifacts)")
+    print()
+    for target in report.targets[:40]:
+        print(
+            f"  - {action}: [{target.category}] {_fmt_bytes(target.size_bytes):>9} "
+            f"{target.path}"
+        )
+    if len(report.targets) > 40:
+        print(f"  ... {len(report.targets) - 40} more")
+    if report.errors:
+        print()
+        print("Errors:")
+        for err in report.errors:
+            print(f"  - {err.get('path')}: {err.get('error')}")
+    print("=" * 64)
     return 0
+
+
+def _fmt_bytes(num: int) -> str:
+    value = float(num or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024.0 or unit == "TB":
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{value:.1f} TB"
 
 
 def cmd_ui(args):
