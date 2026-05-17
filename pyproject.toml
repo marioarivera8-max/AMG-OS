@@ -55,7 +55,12 @@ include = ["amg*"]
 exclude = ["tests*", "data*", "scripts*", "docs*"]
 
 [tool.setuptools.package-data]
-amg = ["ui/templates/*.html"]
+amg = [
+    "ui/templates/*.html",
+    "prompts/registry/*.prompt.md",
+    "translate/data/*.yaml",
+    "translate/data/archetypes/*.yaml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

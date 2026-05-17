@@ -6,10 +6,16 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence
 
 from amg.config import TRAINING_DATASETS_DIR, TRAINING_TEXT_DIR
 from amg.learning.training_registry import record_training_artifact
+from amg.prompts.loader import load_prompt_registry
+
+
+_TRAINING_MESSAGES_SYSTEM_PROMPT = load_prompt_registry("training_messages_system")
+_TRAINING_INSTRUCTION_PROMPT = load_prompt_registry("training_instruction")
+_TRAINING_USER_CONTEXT_PROMPT = load_prompt_registry("training_user_context")
 
 
 @dataclass
@@ -130,7 +136,7 @@ def export_text_training_bundle(
 
     TRAINING_TEXT_DIR.mkdir(parents=True, exist_ok=True)
     manifest_path = TRAINING_TEXT_DIR / f"{_safe_name(dataset_name)}_{fmt}_bundle_manifest.json"
-    payload = {
+    payload: Dict[str, object] = {
         "dataset_name": dataset_name,
         "format_type": fmt,
         "splits": list(splits),
@@ -154,11 +160,14 @@ def export_text_training_bundle(
     )
 
 
-def _to_text_example(row: Dict[str, object], format_type: str) -> Optional[dict]:
+def _to_text_example(
+    row: Dict[str, object], format_type: str
+) -> Optional[Dict[str, object]]:
     title = _clean(row.get("title"))
     description = _clean(row.get("description"))
 
-    label = row.get("label") if isinstance(row.get("label"), dict) else {}
+    raw_label = row.get("label")
+    label: Dict[str, object] = raw_label if isinstance(raw_label, dict) else {}
     categories = _clean_list(label.get("categories")) or []
     tags = _clean_list(label.get("tags")) or []
 
@@ -209,7 +218,7 @@ def _to_text_example(row: Dict[str, object], format_type: str) -> Optional[dict]
             "messages": [
                 {
                     "role": "system",
-                    "content": "You generate high-performing adult retail metadata. Output valid JSON only.",
+                    "content": _TRAINING_MESSAGES_SYSTEM_PROMPT,
                 },
                 {"role": "user", "content": user_prompt},
                 {"role": "assistant", "content": json.dumps(assistant_payload, ensure_ascii=True)},
@@ -219,20 +228,16 @@ def _to_text_example(row: Dict[str, object], format_type: str) -> Optional[dict]
 
     return {
         "task": "title_description_tags",
-        "instruction": "Generate a strong adult retail title, long description, categories, and tags from scene context.",
+        "instruction": _TRAINING_INSTRUCTION_PROMPT,
         "context": context,
         "target": target,
         "meta": base_meta,
     }
 
 
-def _build_user_prompt(context: Dict[str, object]) -> str:
-    compact = json.dumps(context, ensure_ascii=True)
-    return (
-        "Generate title, description, categories, and tags for this scene context. "
-        "Return strict JSON with keys: title, description, categories, tags.\n"
-        f"Context: {compact}"
-    )
+def _build_user_prompt(context: Mapping[str, object]) -> str:
+    compact = json.dumps(dict(context), ensure_ascii=True)
+    return _TRAINING_USER_CONTEXT_PROMPT.format(compact=compact)
 
 
 def _normalize_format(format_type: str) -> str:

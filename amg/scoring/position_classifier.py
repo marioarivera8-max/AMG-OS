@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from amg.config import (
     AI_PARALLEL_WORKERS,
@@ -19,6 +19,7 @@ from amg.config import (
     POSITION_CLASSIFIER_CONTEXT_WINDOW_SEC,
     POSITION_LABELS,
 )
+from amg.prompts.loader import load_prompt_registry
 from amg.scoring.ai_client import AIClient
 from amg.utils.logging import get_logger
 
@@ -27,14 +28,15 @@ log = get_logger("scoring.position_classifier")
 _VALID = set(POSITION_LABELS)
 _RE_POSITION = re.compile(r"POSITION:\s*([A-Z_]+)", re.IGNORECASE)
 _RE_POS_CONF = re.compile(r"POSITION_CONFIDENCE:\s*(-?\d+\.?\d*)", re.IGNORECASE)
+_POSITION_PROMPT_TEMPLATE = load_prompt_registry("position_classifier")
 
 
-def _score(entry: dict) -> float:
+def _score(entry: dict[str, Any]) -> float:
     scored = entry.get("scored_frame")
     return float(scored.score) if scored else 0.0
 
 
-def _is_candidate_worthy(entry: dict) -> bool:
+def _is_candidate_worthy(entry: dict[str, Any]) -> bool:
     scored = entry.get("scored_frame")
     if not scored or not scored.parse_succeeded:
         return False
@@ -50,16 +52,7 @@ def _is_candidate_worthy(entry: dict) -> bool:
 
 def _build_prompt() -> str:
     labels = ", ".join(POSITION_LABELS)
-    return (
-        "Classify the primary explicit sexual position shown in this frame.\n"
-        "This frame is already penetration-positive, but position can still be uncertain.\n"
-        "If uncertain, choose OTHER.\n"
-        f"Allowed labels: {labels}\n\n"
-        "Respond exactly in this format:\n"
-        "POSITION: <ONE_LABEL>\n"
-        "POSITION_CONFIDENCE: <0.00-1.00>\n"
-        "END"
-    )
+    return _POSITION_PROMPT_TEMPLATE.format(labels=labels)
 
 
 def _parse_label(raw_text: str) -> tuple[str, float]:
@@ -81,7 +74,9 @@ def _parse_label(raw_text: str) -> tuple[str, float]:
     return label, conf
 
 
-def _supports_by_context(entry: dict, classified: List[dict]) -> bool:
+def _supports_by_context(
+    entry: dict[str, Any], classified: List[dict[str, Any]]
+) -> bool:
     """Require nearby temporal support for fragile labels."""
     ts = entry.get("timestamp_sec")
     label = entry.get("position_label", "OTHER")
@@ -107,7 +102,7 @@ def _supports_by_context(entry: dict, classified: List[dict]) -> bool:
 
 
 def classify_candidate_positions(
-    candidates: List[dict],
+    candidates: List[dict[str, Any]],
     *,
     ai_client: Optional[AIClient] = None,
     max_candidates: int = POSITION_CLASSIFIER_MAX_CANDIDATES,
@@ -131,7 +126,7 @@ def classify_candidate_positions(
     client = ai_client or AIClient()
     prompt = _build_prompt()
 
-    def _one(entry: dict) -> tuple[dict, str, float, bool]:
+    def _one(entry: dict[str, Any]) -> tuple[dict[str, Any], str, float, bool]:
         frame = entry.get("frame")
         if frame is None:
             return entry, "OTHER", 0.0, False
@@ -143,7 +138,7 @@ def classify_candidate_positions(
 
     errors = 0
     classified = 0
-    classified_entries: List[dict] = []
+    classified_entries: List[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = [ex.submit(_one, e) for e in workset]
         for fut in as_completed(futs):
