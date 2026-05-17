@@ -84,6 +84,10 @@ config.yaml
 
 # Source content paths (always local)
 incoming/
+inbox/
+downloads/
+delivery_intake/
+deliveries/
 processing/
 ready/
 *.mp4
@@ -95,6 +99,17 @@ ready/
 2257*.jpg
 2257*.png
 id.pdf
+
+# AMG delivery/organizer runtime state (generated, local, or cloud-output)
+organizer_logs/
+browser_profiles/
+logs/
+manifest*.csv
+_download_queue.html
+.translate_state.json
+.translate_watcher.lock
+--delivery-name
+--manifest
 
 # Backups created by setup.sh
 *.amg_backup_*

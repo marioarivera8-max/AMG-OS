@@ -127,3 +127,17 @@ harness in commit cd38015).
 - Show concrete output (file lists, JSON, log lines) over claims.
 - One question at a time when asking for input.
 - Run things end-to-end before claiming success.
+
+## AMG file routing and archive policy
+
+Before creating new non-code files, research saves, backup manifests, staging outputs, or Google Drive/T9 archive items, read:
+
+`/Users/mariorivera/AMG_OS_NEXT/docs/runbook/claude_file_routing_and_archive_policy_2026-05-17.md`
+
+Short version: temp/scratch files go to `/Users/mariorivera/Desktop/AMG_LOCAL_STAGING_DO_NOT_SYNC`; final synced archive files go to `/Users/mariorivera/Desktop/AMG_SYNC_TO_GOOGLE_DRIVE/MAC BACKUP FILES`; large durable backups go to `/Volumes/T9/AMGOS_Archive_2026-05-17`; repo code/docs stay in the relevant repo. Do not re-enable Desktop, Downloads, or Documents sync in Google Drive without operator approval.
+
+## AMG OS NOW priority
+
+Before strategic, workflow, or cross-agent work, read `docs/AMG_OS_NOW_PLAN_2026-05-17.md`.
+
+Short version: `AMG_OS` is the immediate internal operating system for Amy and Mario. Stabilize real workflow, reduce payroll/tool waste, and make deliveries auditable now. `AMG_OS_NEXT` is later productization after internal workflows prove savings.

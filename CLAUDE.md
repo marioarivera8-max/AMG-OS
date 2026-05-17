@@ -10,7 +10,19 @@ AMG OS processes adult VOD content (B2B distribution). Anthropic / OpenAI / Goog
 
 `CLAUDE_CODE_HANDOFF.md` at the repo root is the operator's hand-written brief for AI agents. It contains the current strategic state, locked decisions (Tauri, Python 3.12, HTMX), the v11.2 regression history, the v11.3 web-UI plan, known bugs to fix opportunistically, and Mario's working preferences. Read it before doing anything substantive — it overrides assumptions you'd otherwise make from the code alone.
 
+## Local archive and reference library
+
+As of 2026-05-17, nonessential local originals and reference material may be archived off the internal Mac drive:
+- Primary T9 archive: `/Volumes/T9/AMGOS_Archive_2026-05-17`
+- Clearable local originals backup: `/Volumes/T9/AMGOS_Archive_2026-05-17/06_Clearable_Local_Originals`
+- Curated reference library on T9: `/Volumes/T9/AMGOS_Archive_2026-05-17/02_AMG_Reference_Library`
+- Google Drive synced reference mirror: `/Users/mariorivera/Library/CloudStorage/GoogleDrive-triedtrue411@gmail.com/My Drive/AMGOS_Reference_Library_2026-05-17`
+- Searchable manifests and transfer logs: `/Volumes/T9/AMGOS_Archive_2026-05-17/00_MANIFESTS` and `/Volumes/T9/AMGOS_Archive_2026-05-17/99_Logs`
+
+If a historical backup, processing run, handoff, Cursor/Claude state file, or reference document is missing from its original home path, check those archive locations before treating it as lost. Do not assume archived folders are active working directories; copy back the specific file or folder needed for a restore.
+
 Key takeaways that shape every change:
+- **AMG OS is the NOW goal.** Read `docs/AMG_OS_NOW_PLAN_2026-05-17.md` before strategic or workflow work. `AMG_OS` is the internal business operating system for Amy and Mario now; `AMG_OS_NEXT` is later productization after internal workflows prove savings.
 - **v11.1 is the known-good baseline.** v11.2 was built and rolled back (regressed cover quality). Do not reintroduce v11.2 as-is.
 - **Test on scene 8** (`/Users/mariorivera/AMG_Processing/incoming/YasminaBrady/4 BG - bath teasing scene`) — 1080p, ~10 min, fastest iteration. Never iterate against `amg batch` on the full 10-scene set.
 - **Single-scene processing only when iterating:** `amg process <path>`, not `amg batch`.
@@ -115,3 +127,11 @@ Vision model: `qwen2.5vl:7b`. Don't switch the default model without running the
 - Don't auto-upload to platforms in any v11.x. That's v12 territory and Amy hasn't approved automation scope.
 - Don't `amg batch` against the full incoming folder while iterating — use `amg process` on scene 8.
 - Don't rewrite the v11.x pipeline core when building v11.3; wrap it.
+
+## AMG file routing and archive policy
+
+Before creating new non-code files, research saves, backup manifests, staging outputs, or Google Drive/T9 archive items, read:
+
+`/Users/mariorivera/AMG_OS_NEXT/docs/runbook/claude_file_routing_and_archive_policy_2026-05-17.md`
+
+Short version: temp/scratch files go to `/Users/mariorivera/Desktop/AMG_LOCAL_STAGING_DO_NOT_SYNC`; final synced archive files go to `/Users/mariorivera/Desktop/AMG_SYNC_TO_GOOGLE_DRIVE/MAC BACKUP FILES`; large durable backups go to `/Volumes/T9/AMGOS_Archive_2026-05-17`; repo code/docs stay in the relevant repo. Do not re-enable Desktop, Downloads, or Documents sync in Google Drive without operator approval.
