@@ -1,0 +1,48 @@
+language: ko
+language_name: Korean
+mappings:
+  - match: [새엄마, 계모]
+    archetype: stepmom
+    tags: [MILF, Stepmom, Taboo]
+    risk: MED
+    priority: 9
+  - match: [새언니, 계자매]
+    archetype: stepsister
+    tags: [Stepsister, Fantasy]
+    risk: MED
+    priority: 8
+  - match: [비서, 사무실]
+    archetype: secretary
+    tags: [Secretary, Office]
+    risk: LOW
+    priority: 8
+  - match: [간호사]
+    archetype: nurse
+    tags: [Nurse, Uniform]
+    risk: LOW
+    priority: 7
+  - match: [선생님, 교사]
+    archetype: teacher
+    tags: [Teacher, Classroom]
+    risk: MED
+    priority: 8
+  - match: [승무원]
+    archetype: stewardess
+    tags: [Stewardess, Uniform]
+    risk: LOW
+    priority: 6
+  - match: [경찰]
+    archetype: cop
+    tags: [Cop, Uniform]
+    risk: LOW
+    priority: 6
+  - match: [메이드]
+    archetype: maid
+    tags: [Maid, Service]
+    risk: LOW
+    priority: 6
+  - match: [이웃]
+    archetype: neighbor
+    tags: [Neighbor, Sneaky]
+    risk: LOW
+    priority: 6

@@ -1,0 +1,48 @@
+language: pt
+language_name: Portuguese
+mappings:
+  - match: [madrasta]
+    archetype: stepmom
+    tags: [MILF, Stepmom, Taboo]
+    risk: MED
+    priority: 9
+  - match: [meia-irmã, meia irma]
+    archetype: stepsister
+    tags: [Stepsister, Fantasy]
+    risk: MED
+    priority: 8
+  - match: [secretária, secretaria]
+    archetype: secretary
+    tags: [Secretary, Office]
+    risk: LOW
+    priority: 8
+  - match: [enfermeira]
+    archetype: nurse
+    tags: [Nurse, Uniform]
+    risk: LOW
+    priority: 7
+  - match: [professora, aluna]
+    archetype: teacher
+    tags: [Teacher, Classroom]
+    risk: MED
+    priority: 8
+  - match: [comissária]
+    archetype: stewardess
+    tags: [Stewardess, Uniform]
+    risk: LOW
+    priority: 6
+  - match: [policial]
+    archetype: cop
+    tags: [Cop, Uniform]
+    risk: LOW
+    priority: 6
+  - match: [empregada]
+    archetype: maid
+    tags: [Maid, Service]
+    risk: LOW
+    priority: 6
+  - match: [vizinha, vizinho]
+    archetype: neighbor
+    tags: [Neighbor, Sneaky]
+    risk: LOW
+    priority: 6

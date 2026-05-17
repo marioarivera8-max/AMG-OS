@@ -1,0 +1,24 @@
+language: universal
+language_name: Universal
+mappings:
+  - {match: [joi], archetype: joi, tags: [JOI, Solo, Dirty Talk], risk: LOW, priority: 7}
+  - {match: [pov], archetype: pov_solo, tags: [POV, Solo], risk: LOW, priority: 5}
+  - {match: [cei], archetype: cei, tags: [JOI, CEI, Femdom], risk: LOW, priority: 8}
+  - {match: [milf], archetype: milf_solo, tags: [MILF, Solo], risk: LOW, priority: 4}
+  - {match: [cuckold, cuck], archetype: cuckold, tags: [Cuckold, Hotwife, Femdom], risk: LOW, priority: 8}
+  - {match: [hotwife], archetype: cuckold, tags: [Cuckold, Hotwife, Femdom], risk: LOW, priority: 8}
+  - {match: [femdom], archetype: femdom, tags: [Femdom, Domination], risk: LOW, priority: 8}
+  - {match: [creampie], archetype: creampie, tags: [Creampie, Cum], risk: LOW, priority: 7}
+  - {match: [squirt, squirting], archetype: squirt, tags: [Squirt, Solo], risk: LOW, priority: 7}
+  - {match: [bukkake], archetype: facial, tags: [Bukkake, Facial, Cum], risk: LOW, priority: 7}
+  - {match: [anal], archetype: anal, tags: [Anal Play, Solo], risk: LOW, priority: 6}
+  - {match: [foot, footjob], archetype: foot, tags: [Foot Fetish, Femdom], risk: LOW, priority: 7}
+  - {match: [yoga], archetype: yoga, tags: [Yoga, Solo, Flexible], risk: LOW, priority: 5}
+  - {match: [fitness, gym], archetype: fitness, tags: [Fitness, Solo, Sweaty], risk: LOW, priority: 5}
+  - {match: [bikini], archetype: bikini, tags: [Bikini, Solo, Tease], risk: LOW, priority: 5}
+  - {match: [latex], archetype: latex, tags: [Latex, Femdom], risk: LOW, priority: 6}
+  - {match: [leather], archetype: leather, tags: [Leather], risk: LOW, priority: 5}
+  - {match: [wetlook], archetype: wetlook, tags: [Wetlook, Solo, Tease], risk: LOW, priority: 6}
+  - {match: [webcam, livecam], archetype: cam, tags: [Cam, Solo, Dirty Talk], risk: LOW, priority: 6}
+  - {match: [selfie], archetype: selfie, tags: [Selfie, Solo, Amateur], risk: LOW, priority: 5}
+  - {match: [edge, edging, gooning], archetype: edging, tags: [JOI, Edging, Solo], risk: LOW, priority: 7}

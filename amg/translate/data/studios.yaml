@@ -1,0 +1,49 @@
+studios:
+  BlondeHexe:
+    geo_identifier: German
+    source_language: de
+    default_archetype: milf_solo
+    code_prefix: BH
+    voice_notes: "Mature blonde MILF, German taboo aesthetic, JOI/femdom forward"
+
+  Shinaryen:
+    geo_identifier: Asian
+    source_language: ja
+    default_archetype: milf_solo
+    code_prefix: SHN
+    voice_notes: "Placeholder until first batch arrives — verify language"
+
+  MaximoGarcia:
+    geo_identifier: Latino
+    source_language: es
+    default_archetype: hardcore
+    code_prefix: MG
+    voice_notes: "Spanish-language hardcore studio"
+
+  RaulsBud:
+    geo_identifier: Latino
+    source_language: es
+    default_archetype: hardcore
+    code_prefix: RB
+    voice_notes: "Spanish-language hardcore studio"
+
+  YeriBlue:
+    geo_identifier: Asian
+    source_language: ko
+    default_archetype: milf_solo
+    code_prefix: YB
+    voice_notes: "Placeholder until first batch arrives — verify language"
+
+  YasminaBrady:
+    geo_identifier: Latina
+    source_language: es
+    default_archetype: milf_solo
+    code_prefix: YBR
+    voice_notes: "Spanish-language solo MILF studio"
+
+default:
+  geo_identifier: ""
+  source_language: ""
+  default_archetype: milf_solo
+  code_prefix: ""
+  voice_notes: ""

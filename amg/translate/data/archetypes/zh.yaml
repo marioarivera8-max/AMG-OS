@@ -1,0 +1,48 @@
+language: zh
+language_name: Chinese
+mappings:
+  - match: [继母, 后妈]
+    archetype: stepmom
+    tags: [MILF, Stepmom, Taboo]
+    risk: MED
+    priority: 9
+  - match: [继姐, 继妹]
+    archetype: stepsister
+    tags: [Stepsister, Fantasy]
+    risk: MED
+    priority: 8
+  - match: [秘书, 辦公室, 办公室]
+    archetype: secretary
+    tags: [Secretary, Office]
+    risk: LOW
+    priority: 8
+  - match: [护士, 護士]
+    archetype: nurse
+    tags: [Nurse, Uniform]
+    risk: LOW
+    priority: 7
+  - match: [老师, 教師, 教师]
+    archetype: teacher
+    tags: [Teacher, Classroom]
+    risk: MED
+    priority: 8
+  - match: [空姐]
+    archetype: stewardess
+    tags: [Stewardess, Uniform]
+    risk: LOW
+    priority: 6
+  - match: [警察]
+    archetype: cop
+    tags: [Cop, Uniform]
+    risk: LOW
+    priority: 6
+  - match: [女仆, 女僕]
+    archetype: maid
+    tags: [Maid, Service]
+    risk: LOW
+    priority: 6
+  - match: [邻居, 鄰居]
+    archetype: neighbor
+    tags: [Neighbor, Sneaky]
+    risk: LOW
+    priority: 6

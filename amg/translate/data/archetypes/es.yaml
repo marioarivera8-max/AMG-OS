@@ -1,0 +1,73 @@
+language: es
+language_name: Spanish
+mappings:
+  - match: [madrastra, mamaastra]
+    archetype: stepmom
+    tags: [MILF, Stepmom, Taboo]
+    risk: MED
+    priority: 9
+  - match: [hermanastra]
+    archetype: stepsister
+    tags: [Stepsister, Tease, Fantasy]
+    risk: MED
+    priority: 8
+  - match: [secretaria, secretario, oficina]
+    archetype: secretary
+    tags: [Secretary, Office, Latina]
+    risk: LOW
+    priority: 8
+  - match: [enfermera, enfermero]
+    archetype: nurse
+    tags: [Nurse, Uniform, Clinica]
+    risk: LOW
+    priority: 7
+  - match: [profesora, profesor, estudiante]
+    archetype: teacher
+    tags: [Teacher, Classroom, Roleplay]
+    risk: MED
+    priority: 8
+  - match: [azafata]
+    archetype: stewardess
+    tags: [Stewardess, Uniform, Viaje]
+    risk: LOW
+    priority: 6
+  - match: [policia, poli]
+    archetype: cop
+    tags: [Cop, Uniform, Latina]
+    risk: LOW
+    priority: 6
+  - match: [criada, mucama]
+    archetype: maid
+    tags: [Maid, Servicio, Fantasia]
+    risk: LOW
+    priority: 6
+  - match: [jefa, jefe]
+    archetype: boss
+    tags: [Boss, Oficina, Poder]
+    risk: LOW
+    priority: 6
+  - match: [terapeuta]
+    archetype: therapist
+    tags: [Therapist, Confesion]
+    risk: LOW
+    priority: 5
+  - match: [profesor de gym, entrenadora]
+    archetype: gym_teacher
+    tags: [Fitness, Coach, Sudor]
+    risk: MED
+    priority: 7
+  - match: [vecina, vecino]
+    archetype: neighbor
+    tags: [Neighbor, Infidelidad]
+    risk: LOW
+    priority: 6
+  - match: [playa, bikini]
+    archetype: bikini
+    tags: [Bikini, Outdoor, Latina]
+    risk: LOW
+    priority: 6
+  - match: [corrida interna]
+    archetype: creampie
+    tags: [Creampie, Pareja]
+    risk: LOW
+    priority: 8

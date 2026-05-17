@@ -1,0 +1,90 @@
+hard_ban:
+  - teen
+  - teenage
+  - teenager
+  - schoolgirl
+  - schoolboy
+  - barely legal
+  - barely-legal
+  - underage
+  - minor
+  - child
+  - young girl
+  - little girl
+  - young boy
+  - little boy
+  - jailbait
+  - lolita
+  - forced
+  - rape
+  - raped
+  - drugged
+  - unconscious
+  - sleeping
+  - passed out
+  - blackout drunk
+  - non-consensual
+  - nonconsensual
+  - against her will
+  - against his will
+  - kidnapped
+  - hostage
+  - abducted
+  - choked
+  - choking
+  - strangled
+  - strangling
+  - strangulation
+  - beaten
+  - bleeding
+  - bloody
+  - real sister
+  - real brother
+  - real mother
+  - real father
+  - real daughter
+  - real son
+  - biological
+  - blood relative
+  - incest
+  - animal
+  - bestiality
+  - zoo
+
+soften:
+  forced: makes
+  forces: makes
+  cruel: strict
+  drunk: tipsy
+  wasted: tipsy
+  passed out: relaxed
+  slut: naughty
+
+watch:
+  stepfamily:
+    - stepmom
+    - step-mom
+    - stepmother
+    - stepson
+    - step-son
+    - stepsister
+    - step-sister
+    - stepbrother
+    - step-brother
+    - stepdad
+    - step-dad
+    - stepfather
+    - stepdaughter
+    - step-daughter
+    - step
+    - stiefmutter
+    - stiefschwester
+    - stiefbruder
+  authority_age_gap:
+    - teacher
+    - student
+    - professor
+    - tutor
+    - coach
+    - babysitter
+    - nanny

@@ -1,0 +1,88 @@
+language: de
+language_name: German
+mappings:
+  - match: [stiefmu, stiefmutter, stiefmutti, stiefmama]
+    archetype: stepmom
+    tags: [MILF, Stepmom, Taboo]
+    risk: MED
+    priority: 9
+  - match: [stiefschwester]
+    archetype: stepsister
+    tags: [Stepsister, Tease, Fantasy]
+    risk: MED
+    priority: 8
+  - match: [sekretär, sekretärin, assistentin, büro]
+    archetype: secretary
+    tags: [Secretary, Office, Tease]
+    risk: LOW
+    priority: 7
+  - match: [krankenschwester, nurse, klinik]
+    archetype: nurse
+    tags: [Nurse, Uniform, Care]
+    risk: LOW
+    priority: 7
+  - match: [lehrerin, professor, uni]
+    archetype: teacher
+    tags: [Teacher, Classroom, Roleplay]
+    risk: MED
+    priority: 8
+  - match: [stewardess, flug]
+    archetype: stewardess
+    tags: [Stewardess, Uniform, Travel]
+    risk: LOW
+    priority: 6
+  - match: [polizist, cop, uniform]
+    archetype: cop
+    tags: [Cop, Uniform, Authority]
+    risk: LOW
+    priority: 6
+  - match: [dienstmädchen, maid]
+    archetype: maid
+    tags: [Maid, Service, Roleplay]
+    risk: LOW
+    priority: 6
+  - match: [chefin, boss]
+    archetype: boss
+    tags: [Boss, Power, Office]
+    risk: LOW
+    priority: 6
+  - match: [therapeut, therapeutin]
+    archetype: therapist
+    tags: [Therapist, Confession, Intimate]
+    risk: LOW
+    priority: 5
+  - match: [sportlehrer, gym]
+    archetype: gym_teacher
+    tags: [Gym, Coach, Sweat]
+    risk: MED
+    priority: 7
+  - match: [nachbar, nachbarin]
+    archetype: neighbor
+    tags: [Neighbor, Cheating, Sneaky]
+    risk: LOW
+    priority: 6
+  - match: [dirndl, oktoberfest, wiesn]
+    archetype: dirndl
+    tags: [Dirndl, Festival, Tease]
+    risk: LOW
+    priority: 7
+  - match: [feucht, squirten]
+    archetype: squirt
+    tags: [Squirt, Wet, Intense]
+    risk: LOW
+    priority: 7
+  - match: [party girl, partygirl, clubnight]
+    archetype: party_girl
+    tags: [Party, Tease, MILF]
+    risk: LOW
+    priority: 6
+  - match: [kneipe, an der bar, bar flirt]
+    archetype: bar
+    tags: [Bar, Nightlife, Tease]
+    risk: LOW
+    priority: 6
+  - match: [große tits, großen tits, grosse tits, big tits, titten]
+    archetype: big_tits
+    tags: [Big Tits, Tease, MILF]
+    risk: LOW
+    priority: 7
