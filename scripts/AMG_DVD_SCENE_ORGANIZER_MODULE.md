@@ -72,13 +72,19 @@ python3 scripts/amy_delivery.py \
 python3 scripts/amy_delivery.py \
   --manifest "/Users/mariorivera/Downloads/Web VOD - Delivery 6.csv" \
   --delivery-name "Delivery 6" \
+  audit-file-proof
+
+python3 scripts/amy_delivery.py \
+  --manifest "/Users/mariorivera/Downloads/Web VOD - Delivery 6.csv" \
+  --delivery-name "Delivery 6" \
   audit-video-specs
 ```
 
 The cloud layout audit proves no scenes are loose at the root and no expected
-title folder is empty. The video spec audit checks codec, resolution, frame
-rate, time base, and audio profile by DVD/title group so future full-movie
-compilation has a clean compatibility report.
+title folder is empty. The file proof audit writes file size and SHA-256 for
+each expected local scene file. The video spec audit checks codec, resolution,
+frame rate, time base, and audio profile by DVD/title group so future
+full-movie compilation has a clean compatibility report.
 
 The module also runs a Drive-root hygiene audit:
 

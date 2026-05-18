@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import csv
+import hashlib
 import json
 import os
 import re
@@ -1502,6 +1503,73 @@ def cmd_audit_data(args: argparse.Namespace) -> int:
     return 1 if problems else 0
 
 
+def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def cmd_audit_file_proof(args: argparse.Namespace) -> int:
+    rows, _columns, missing = load_manifest(Path(args.manifest).expanduser())
+    delivery_name, out_dir = safe_delivery_dir_from_args(args)
+    if missing:
+        print(f"missing required columns: {', '.join(missing)}", file=sys.stderr)
+        return 2
+
+    reports_dir = out_dir / "_cloud_reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    proof_path = reports_dir / f"{safe_name(delivery_name, 'Delivery')}_file_proof.csv"
+    fields = [
+        "csv_row",
+        "delivery_folder",
+        "scene_id",
+        "scene_title",
+        "filename",
+        "relative_path",
+        "status",
+        "file_size_bytes",
+        "sha256",
+    ]
+    problems = 0
+    with proof_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            target = target_for(out_dir, row)
+            status = "ok"
+            size = 0
+            digest = ""
+            if not target.exists():
+                status = "missing_file"
+                problems += 1
+            elif target.stat().st_size <= 0:
+                status = "empty_file"
+                problems += 1
+            else:
+                size = target.stat().st_size
+                digest = sha256_file(target)
+            writer.writerow(
+                {
+                    "csv_row": row.source_row,
+                    "delivery_folder": row.folder_name,
+                    "scene_id": row.scene_id,
+                    "scene_title": row.scene_title,
+                    "filename": row.filename,
+                    "relative_path": str(target.relative_to(out_dir)),
+                    "status": status,
+                    "file_size_bytes": size,
+                    "sha256": digest,
+                }
+            )
+
+    print(f"file proof audit: {proof_path}")
+    print(f"rows audited: {len(rows)}")
+    print(f"problems: {problems}")
+    return 1 if problems else 0
+
+
 def cmd_audit_assets(args: argparse.Namespace) -> int:
     rows, columns, missing = load_manifest(Path(args.manifest).expanduser())
     _delivery_name, out_dir = safe_delivery_dir_from_args(args)
@@ -2263,6 +2331,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     audit_data = sub.add_parser("audit-data")
     audit_data.set_defaults(func=cmd_audit_data)
+
+    audit_file_proof = sub.add_parser("audit-file-proof")
+    audit_file_proof.set_defaults(func=cmd_audit_file_proof)
 
     audit_assets = sub.add_parser("audit-assets")
     audit_assets.add_argument("--limit", type=int, default=25)

@@ -155,6 +155,11 @@ python3 scripts/amy_delivery.py \
 python3 scripts/amy_delivery.py \
   --manifest manifest_delivery3.csv \
   --delivery-name "Delivery 3" \
+  audit-file-proof
+
+python3 scripts/amy_delivery.py \
+  --manifest manifest_delivery3.csv \
+  --delivery-name "Delivery 3" \
   audit-assets
 ```
 
@@ -325,6 +330,9 @@ python3 scripts/amy_delivery.py \
 - `_delivery_status.json` and `_download_queue.html` are excluded from Drive uploads.
 - `_delivery_manifest.csv` and each `_folder_manifest.csv` do upload, because
   that is the spreadsheet context Amy needs alongside the sorted files.
+- `audit-file-proof` writes `_cloud_reports/<Delivery>_file_proof.csv` with
+  file size and SHA-256 for every expected scene file, so a completed delivery
+  has durable file-identity proof instead of only folder presence.
 - The script refuses to upload if manifest files are missing unless you pass `--allow-incomplete`.
 - `rclone` is already configured on this machine with the remote `gdrive_amy:`.
 - A direct `download` command still exists for URLs that do not require
