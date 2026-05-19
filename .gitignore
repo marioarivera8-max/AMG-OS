@@ -88,6 +88,7 @@ inbox/
 downloads/
 delivery_intake/
 deliveries/
+delivery_work/
 processing/
 ready/
 *.mp4

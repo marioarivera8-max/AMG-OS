@@ -20,11 +20,13 @@ Usage:
 Environment:
   AMG_DVD_WORKERS      Parallel cloud transfers. Default: 3.
   AMG_DVD_REMOTE_BASE  Google Drive base folder. Default: Amy Deliveries.
-  AMG_DVD_OUT_DIR      Local metadata/report folder. Default: /Users/mariorivera/AMG_OS/deliveries.
+  AMG_DVD_OUT_DIR      Local delivery staging folder. Default: /Users/mariorivera/AMG_OS/deliveries.
 
-This creates Amy-ready Google Drive delivery folders, uploads spreadsheet
-metadata/review files, streams valid scene videos into the matching DVD folders,
-then audits cloud layout and video specs.
+This creates Amy-ready Google Drive delivery folders, streams valid scene
+videos into the matching DVD folders, then audits cloud layout and video specs.
+Internal manifests, queues, review HTML, status, and transfer reports stay under
+/Users/mariorivera/AMG_OS/delivery_work unless explicitly uploaded by an
+operator.
 USAGE
   exit 2
 fi

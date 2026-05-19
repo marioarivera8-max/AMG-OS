@@ -39,6 +39,7 @@ from xml.etree import ElementTree as ET
 
 DEFAULT_ROOT = Path(os.environ.get("AMG_ROOT", "~/AMG_OS")).expanduser()
 DEFAULT_DELIVERIES_DIR = DEFAULT_ROOT / "deliveries"
+DEFAULT_WORK_DIR = DEFAULT_ROOT / "delivery_work"
 DEFAULT_REMOTE = "gdrive_amy:"
 DEFAULT_REMOTE_BASE = "Amy Deliveries"
 DEFAULT_INTAKE_DIR = DEFAULT_ROOT / "delivery_intake"
@@ -57,6 +58,7 @@ FORBIDDEN_DELIVERY_OUTPUT_DIRS = {
     Path.home().resolve(),
     Path("/").resolve(),
 }
+SYNC_OR_MIRROR_PATH_MARKERS = {"CloudStorage", "Volumes"}
 
 SERIES_NAME_MAP = {
     "ADD": "American Daydreams",
@@ -394,7 +396,12 @@ def delivery_dir(base_dir: Path, delivery_name: str) -> Path:
     return base_dir / safe_name(delivery_name, "Delivery")
 
 
-def assert_safe_delivery_dir(out_dir: Path, delivery_name: str) -> None:
+def process_dir_for_delivery(out_dir: Path) -> Path:
+    """Local-only process state for manifests, audits, queues, and receipts."""
+    return DEFAULT_WORK_DIR / safe_name(out_dir.name, "Delivery")
+
+
+def assert_safe_delivery_dir(out_dir: Path, delivery_name: str, allow_synced_output: bool = False) -> None:
     resolved = out_dir.resolve()
     expected_name = safe_name(delivery_name, "Delivery")
     if resolved.name != expected_name:
@@ -403,12 +410,26 @@ def assert_safe_delivery_dir(out_dir: Path, delivery_name: str) -> None:
         )
     if resolved in FORBIDDEN_DELIVERY_OUTPUT_DIRS:
         raise ValueError(f"refusing to write generated delivery files directly into {resolved}")
+    if not allow_synced_output and any(marker in resolved.parts for marker in SYNC_OR_MIRROR_PATH_MARKERS):
+        raise ValueError(
+            f"refusing synced/mirror output directory {resolved}; use the local default "
+            f"{DEFAULT_DELIVERIES_DIR} for delivery work and upload/copy only final approved packages"
+        )
+
+
+def assert_safe_source_dir(source_dir: Path, allow_synced_source: bool = False) -> None:
+    resolved = source_dir.resolve()
+    if not allow_synced_source and any(marker in resolved.parts for marker in SYNC_OR_MIRROR_PATH_MARKERS):
+        raise ValueError(
+            f"refusing synced/mirror source directory {resolved}; use the local intake folder "
+            f"{DEFAULT_INTAKE_DIR} and copy in only files that are ready to import"
+        )
 
 
 def safe_delivery_dir_from_args(args: argparse.Namespace) -> tuple[str, Path]:
     delivery_name = effective_delivery_name(args)
     out_dir = delivery_dir(Path(args.out_dir).expanduser(), delivery_name)
-    assert_safe_delivery_dir(out_dir, delivery_name)
+    assert_safe_delivery_dir(out_dir, delivery_name, getattr(args, "allow_synced_output", False))
     return delivery_name, out_dir
 
 
@@ -417,7 +438,7 @@ def row_key(row: ManifestRow) -> str:
 
 
 def status_path(out_dir: Path) -> Path:
-    return out_dir / "_delivery_status.json"
+    return process_dir_for_delivery(out_dir) / "_delivery_status.json"
 
 
 def load_status(out_dir: Path) -> dict:
@@ -431,7 +452,7 @@ def load_status(out_dir: Path) -> dict:
 
 
 def save_status(out_dir: Path, state: dict) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
+    process_dir_for_delivery(out_dir).mkdir(parents=True, exist_ok=True)
     path = status_path(out_dir)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
@@ -580,8 +601,9 @@ def expected_companion_rows(rows: list[ManifestRow], out_dir: Path) -> list[dict
 
 
 def write_delivery_manifests(rows: list[ManifestRow], out_dir: Path) -> None:
-    """Write root and per-folder manifests so spreadsheet context travels."""
-    out_dir.mkdir(parents=True, exist_ok=True)
+    """Write local-only manifests so spreadsheet context never pollutes deliverables."""
+    process_dir = process_dir_for_delivery(out_dir)
+    process_dir.mkdir(parents=True, exist_ok=True)
     routing_fields = [
         "csv_row",
         "expected_filename",
@@ -608,20 +630,20 @@ def write_delivery_manifests(rows: list[ManifestRow], out_dir: Path) -> None:
                         "csv_row": row.source_row,
                         "expected_filename": row.filename,
                         "relative_path": str(target.relative_to(out_dir)),
-                        "file_present": "yes" if target.exists() else "no",
+                        "file_present": "yes" if target.exists() and target.stat().st_size > 0 else "no",
                         "effective_dvd_title": row.dvd_title,
                         "spreadsheet_dvd_title_cell": row.display_dvd_title,
                         **row.raw,
                     }
                 )
 
-    write_rows(out_dir / "_delivery_manifest.csv", rows)
-    write_rows(out_dir / "_source_spreadsheet_with_paths.csv", rows)
+    write_rows(process_dir / "_delivery_manifest.csv", rows)
+    write_rows(process_dir / "_source_spreadsheet_with_paths.csv", rows)
     by_folder: dict[str, list[ManifestRow]] = {}
     for row in rows:
         by_folder.setdefault(row.folder_name, []).append(row)
     for folder, folder_rows in by_folder.items():
-        folder_dir = out_dir / folder
+        folder_dir = process_dir / folder
         folder_dir.mkdir(parents=True, exist_ok=True)
         write_rows(folder_dir / "_folder_manifest.csv", folder_rows)
         write_rows(folder_dir / "_folder_spreadsheet_rows.csv", folder_rows)
@@ -646,7 +668,9 @@ def write_companion_asset_manifests(
         "file_present",
         "source_url",
     ]
-    root_path = out_dir / "_companion_assets.csv"
+    process_dir = process_dir_for_delivery(out_dir)
+    process_dir.mkdir(parents=True, exist_ok=True)
+    root_path = process_dir / "_companion_assets.csv"
     with root_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -672,7 +696,7 @@ def write_companion_asset_manifests(
     for asset in assets:
         by_folder.setdefault(asset.folder_name, []).append(asset)
     for folder, folder_assets in by_folder.items():
-        folder_dir = out_dir / folder
+        folder_dir = process_dir / folder
         folder_dir.mkdir(parents=True, exist_ok=True)
         with (folder_dir / "_companion_assets.csv").open("w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fields)
@@ -746,16 +770,18 @@ def ensure_folders(rows: list[ManifestRow], out_dir: Path) -> None:
         (target_for(out_dir, row).parent / "2257").mkdir(exist_ok=True)
 
 
-def download_one(row: ManifestRow, dst: Path, timeout: int) -> tuple[bool, str]:
-    return download_url_to_path(row.video_url, dst, timeout)
+def download_one(row: ManifestRow, dst: Path, timeout: int, tmp_dir: Path | None = None) -> tuple[bool, str]:
+    return download_url_to_path(row.video_url, dst, timeout, tmp_dir)
 
 
-def download_url_to_path(url: str, dst: Path, timeout: int) -> tuple[bool, str]:
+def download_url_to_path(url: str, dst: Path, timeout: int, tmp_dir: Path | None = None) -> tuple[bool, str]:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() and dst.stat().st_size > 0:
         return True, "already_exists"
 
-    fd, tmp_name = tempfile.mkstemp(prefix=dst.name + ".", suffix=".part", dir=dst.parent)
+    temp_parent = tmp_dir or dst.parent
+    temp_parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=dst.name + ".", suffix=".part", dir=temp_parent)
     os.close(fd)
     tmp = Path(tmp_name)
     request = urllib.request.Request(
@@ -769,7 +795,10 @@ def download_url_to_path(url: str, dst: Path, timeout: int) -> tuple[bool, str]:
         if tmp.stat().st_size <= 0:
             tmp.unlink(missing_ok=True)
             return False, "empty_download"
-        os.replace(tmp, dst)
+        try:
+            os.replace(tmp, dst)
+        except OSError:
+            shutil.move(str(tmp), str(dst))
         return True, "downloaded"
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         tmp.unlink(missing_ok=True)
@@ -788,7 +817,7 @@ def cmd_download_assets(args: argparse.Namespace) -> int:
     assets = write_companion_asset_manifests(rows, columns, out_dir)
     if not assets:
         print("no companion asset URLs found in spreadsheet columns")
-        print("wrote companion manifest anyway so this is visible in the delivery folder")
+        print(f"wrote local companion manifest under {process_dir_for_delivery(out_dir)}")
         return 0
 
     selected = assets[: args.limit] if args.limit else assets
@@ -799,7 +828,12 @@ def cmd_download_assets(args: argparse.Namespace) -> int:
             continue
         dst = companion_target(out_dir, asset)
         print(f"[{index}/{len(selected)}] asset {asset.filename} -> {asset.relative_path}")
-        ok, detail = download_url_to_path(asset.url, dst, args.timeout)
+        ok, detail = download_url_to_path(
+            asset.url,
+            dst,
+            args.timeout,
+            process_dir_for_delivery(out_dir) / "_asset_download_tmp",
+        )
         counts[detail if detail in counts else ("failed" if not ok else "downloaded")] += 1
         if not ok:
             print(f"  failed: {detail}", file=sys.stderr)
@@ -908,13 +942,18 @@ def cmd_download(args: argparse.Namespace) -> int:
             print(f"[{index}/{len(rows)}] unavailable {row.scene_id} {row.scene_title}")
             continue
         existing = state["rows"].get(key, {})
-        if existing.get("state") == "downloaded" and dst.exists():
+        if existing.get("state") == "downloaded" and dst.exists() and dst.stat().st_size > 0:
             counts["already_exists"] += 1
             print(f"[{index}/{len(rows)}] skip {row.filename}")
             continue
 
         print(f"[{index}/{len(rows)}] download {row.filename} -> {row.folder_name}")
-        ok, detail = download_one(row, dst, args.timeout)
+        ok, detail = download_one(
+            row,
+            dst,
+            args.timeout,
+            process_dir_for_delivery(out_dir) / "_scene_download_tmp",
+        )
         state["rows"][key] = {
             "csv_row": row.source_row,
             "scene_id": row.scene_id,
@@ -1015,7 +1054,7 @@ def cmd_browser_download(args: argparse.Namespace) -> int:
             str(profile_dir),
             headless=False,
             accept_downloads=True,
-            downloads_path=str(out_dir / "_browser_downloads_tmp"),
+            downloads_path=str(process_dir_for_delivery(out_dir) / "_browser_downloads_tmp"),
         )
         page = context.pages[0] if context.pages else context.new_page()
         if args.login_url:
@@ -1264,10 +1303,11 @@ def cmd_review(args: argparse.Namespace) -> int:
     if missing:
         print(f"missing required columns: {', '.join(missing)}", file=sys.stderr)
         return 2
-    out_dir.mkdir(parents=True, exist_ok=True)
+    process_dir = process_dir_for_delivery(out_dir)
+    process_dir.mkdir(parents=True, exist_ok=True)
     write_delivery_manifests(rows, out_dir)
     write_companion_asset_manifests(rows, columns, out_dir)
-    review_path = out_dir / "_AMY_REVIEW.html"
+    review_path = process_dir / "_AMY_REVIEW.html"
     review_path.write_text(
         render_review_html(rows, columns, delivery_name, out_dir),
         encoding="utf-8",
@@ -1282,10 +1322,11 @@ def cmd_queue(args: argparse.Namespace) -> int:
     if missing:
         print(f"missing required columns: {', '.join(missing)}", file=sys.stderr)
         return 2
-    out_dir.mkdir(parents=True, exist_ok=True)
+    process_dir = process_dir_for_delivery(out_dir)
+    process_dir.mkdir(parents=True, exist_ok=True)
     write_delivery_manifests(rows, out_dir)
     write_companion_asset_manifests(rows, columns, out_dir)
-    queue_path = out_dir / "_download_queue.html"
+    queue_path = process_dir / "_download_queue.html"
     queue_path.write_text(render_queue_html(rows, delivery_name, out_dir), encoding="utf-8")
     print(queue_path)
     return 0
@@ -1323,6 +1364,7 @@ def cmd_import(args: argparse.Namespace) -> int:
     rows, columns, missing = load_manifest(Path(args.manifest).expanduser())
     _delivery_name, out_dir = safe_delivery_dir_from_args(args)
     source_dir = Path(args.source_dir).expanduser()
+    assert_safe_source_dir(source_dir, getattr(args, "allow_synced_source", False))
     if missing:
         print(f"missing required columns: {', '.join(missing)}", file=sys.stderr)
         return 2
@@ -1376,6 +1418,7 @@ def cmd_import(args: argparse.Namespace) -> int:
 
 def cmd_watch_import(args: argparse.Namespace) -> int:
     source_dir = Path(args.source_dir).expanduser()
+    assert_safe_source_dir(source_dir, getattr(args, "allow_synced_source", False))
     source_dir.mkdir(parents=True, exist_ok=True)
     print(f"watching intake: {source_dir}")
     print("press Ctrl-C to stop")
@@ -1403,7 +1446,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     missing_files: list[ManifestRow] = []
     present = 0
     for row in rows:
-        if target_for(out_dir, row).exists():
+        target = target_for(out_dir, row)
+        if target.exists() and target.stat().st_size > 0:
             present += 1
         else:
             missing_files.append(row)
@@ -1436,7 +1480,9 @@ def cmd_audit_data(args: argparse.Namespace) -> int:
         print(f"missing required columns: {', '.join(missing)}", file=sys.stderr)
         return 2
 
-    audit_path = out_dir / "_data_audit.csv"
+    process_dir = process_dir_for_delivery(out_dir)
+    process_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = process_dir / "_data_audit.csv"
     fields = [
         "csv_row",
         "dvd_title",
@@ -1453,15 +1499,16 @@ def cmd_audit_data(args: argparse.Namespace) -> int:
         "status",
     ]
     problems = 0
-    root_manifest = out_dir / "_source_spreadsheet_with_paths.csv"
+    root_manifest = process_dir / "_source_spreadsheet_with_paths.csv"
     with audit_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for row in rows:
             target = target_for(out_dir, row)
             folder_dir = target.parent
-            folder_manifest = folder_dir / "_folder_manifest.csv"
-            folder_spreadsheet = folder_dir / "_folder_spreadsheet_rows.csv"
+            process_folder_dir = process_dir / row.folder_name
+            folder_manifest = process_folder_dir / "_folder_manifest.csv"
+            folder_spreadsheet = process_folder_dir / "_folder_spreadsheet_rows.csv"
             present = target.exists() and target.stat().st_size > 0
             status = "ok"
             if not present:
@@ -1518,7 +1565,7 @@ def cmd_audit_file_proof(args: argparse.Namespace) -> int:
         print(f"missing required columns: {', '.join(missing)}", file=sys.stderr)
         return 2
 
-    reports_dir = out_dir / "_cloud_reports"
+    reports_dir = process_dir_for_delivery(out_dir) / "_cloud_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     proof_path = reports_dir / f"{safe_name(delivery_name, 'Delivery')}_file_proof.csv"
     fields = [
@@ -1581,7 +1628,9 @@ def cmd_audit_assets(args: argparse.Namespace) -> int:
     assets = write_companion_asset_manifests(rows, columns, out_dir)
     expected = expected_companion_rows(rows, out_dir)
 
-    audit_path = out_dir / "_asset_audit.csv"
+    process_dir = process_dir_for_delivery(out_dir)
+    process_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = process_dir / "_asset_audit.csv"
     fields = [
         "scope",
         "delivery_folder",
@@ -1638,7 +1687,7 @@ def cmd_audit_cloud_layout(args: argparse.Namespace) -> int:
     missing_mp4 = sorted(path for path in expected if path not in remote_files)
 
     _delivery_name, out_dir = safe_delivery_dir_from_args(args)
-    reports_dir = out_dir / "_cloud_reports"
+    reports_dir = process_dir_for_delivery(out_dir) / "_cloud_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     audit_path = reports_dir / f"{safe_name(delivery_name, 'Delivery')}_cloud_layout_audit.csv"
     fields = ["status", "relative_path", "csv_row", "delivery_folder", "scene_title"]
@@ -1736,7 +1785,7 @@ def cmd_audit_video_specs(args: argparse.Namespace) -> int:
     delivery_name = effective_delivery_name(args)
     selected = rows[: args.limit] if args.limit else rows
     _delivery_name, out_dir = safe_delivery_dir_from_args(args)
-    reports_dir = out_dir / "_cloud_reports"
+    reports_dir = process_dir_for_delivery(out_dir) / "_cloud_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     audit_path = reports_dir / f"{safe_name(delivery_name, 'Delivery')}_video_spec_audit.csv"
     fields = [
@@ -1898,8 +1947,9 @@ def cmd_audit_drive_roots(args: argparse.Namespace) -> int:
         print(f"drive root audit failed: {exc}", file=sys.stderr)
         return 1
 
-    out_dir = Path(args.out_dir).expanduser()
-    reports_dir = out_dir / "_cloud_reports"
+    delivery_name = effective_delivery_name(args)
+    out_dir = delivery_dir(Path(args.out_dir).expanduser(), delivery_name)
+    reports_dir = process_dir_for_delivery(out_dir) / "_cloud_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     audit_path = reports_dir / "drive_root_hygiene_audit.csv"
     with audit_path.open("w", encoding="utf-8", newline="") as f:
@@ -1919,12 +1969,56 @@ def cmd_audit_drive_roots(args: argparse.Namespace) -> int:
     return 1 if problems else 0
 
 
+def cmd_clean_work(args: argparse.Namespace) -> int:
+    """Expire old local process state without touching source or delivery files."""
+    work_dir = DEFAULT_WORK_DIR.resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - (args.days * 24 * 60 * 60)
+    old_dirs: list[tuple[str, float, Path]] = []
+
+    for path in sorted(work_dir.iterdir(), key=lambda item: item.name.lower()):
+        try:
+            resolved = path.resolve()
+            stat = path.stat()
+        except OSError:
+            continue
+        if work_dir not in resolved.parents:
+            continue
+        if not path.is_dir() or stat.st_mtime >= cutoff:
+            continue
+        if path.name.startswith("drive_root_quarantine") and not args.include_quarantine:
+            continue
+        old_dirs.append((path.name, stat.st_mtime, path))
+
+    print(f"delivery work dir: {work_dir}")
+    print(f"retention days: {args.days}")
+    print(f"old local process folders found: {len(old_dirs)}")
+    for name, mtime, path in old_dirs[: args.limit]:
+        print(f"  {datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')}  {name}  {path}")
+    if len(old_dirs) > args.limit:
+        print(f"  ... {len(old_dirs) - args.limit} more")
+
+    if not args.apply:
+        print("dry run only; pass --apply to remove old local process folders")
+        return 0
+
+    removed = 0
+    for _name, _mtime, path in old_dirs:
+        try:
+            shutil.rmtree(path)
+            removed += 1
+        except OSError as exc:
+            print(f"failed to remove {path}: {exc}", file=sys.stderr)
+    print(f"removed local process folders: {removed}")
+    return 0
+
+
 def write_cloud_failure_report(
     rows: list[dict[str, str]],
     delivery_name: str,
     out_dir: Path,
 ) -> Path:
-    reports_dir = out_dir / "_cloud_reports"
+    reports_dir = process_dir_for_delivery(out_dir) / "_cloud_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = reports_dir / f"{safe_name(delivery_name, 'Delivery')}_cloud_failures_{stamp}.csv"
@@ -1941,7 +2035,7 @@ def write_cloud_transfer_report(
     delivery_name: str,
     out_dir: Path,
 ) -> Path:
-    reports_dir = out_dir / "_cloud_reports"
+    reports_dir = process_dir_for_delivery(out_dir) / "_cloud_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = reports_dir / f"{safe_name(delivery_name, 'Delivery')}_cloud_transfers_{stamp}.csv"
@@ -2004,10 +2098,11 @@ def cmd_cloud_copyurls(args: argparse.Namespace) -> int:
     selected = rows[: args.limit] if args.limit else rows
     delivery_name, out_dir = safe_delivery_dir_from_args(args)
     remote_delivery = remote_target(args.remote, args.remote_base, delivery_name)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    process_dir = process_dir_for_delivery(out_dir)
+    process_dir.mkdir(parents=True, exist_ok=True)
     write_delivery_manifests(rows, out_dir)
     write_companion_asset_manifests(rows, columns, out_dir)
-    (out_dir / "_AMY_REVIEW.html").write_text(
+    (process_dir / "_AMY_REVIEW.html").write_text(
         render_review_html(rows, columns, delivery_name, out_dir),
         encoding="utf-8",
     )
@@ -2015,7 +2110,7 @@ def cmd_cloud_copyurls(args: argparse.Namespace) -> int:
         meta_cmd = [
             "rclone",
             "copy",
-            str(out_dir),
+            str(process_dir),
             remote_delivery,
             "--create-empty-src-dirs",
             "--filter",
@@ -2207,12 +2302,12 @@ def cmd_cloud_copyurls(args: argparse.Namespace) -> int:
         transfer_report = write_cloud_transfer_report(
             transfer_rows,
             delivery_name,
-            Path(args.out_dir).expanduser(),
+            out_dir,
         )
         report = write_cloud_failure_report(
             failures,
             delivery_name,
-            Path(args.out_dir).expanduser(),
+            out_dir,
         )
         print(f"cloud copyurl complete with failures: copied={copied} skipped={skipped} failed={len(failures)}")
         print(f"transfer report: {transfer_report}")
@@ -2221,7 +2316,7 @@ def cmd_cloud_copyurls(args: argparse.Namespace) -> int:
     transfer_report = write_cloud_transfer_report(
         transfer_rows,
         delivery_name,
-        Path(args.out_dir).expanduser(),
+        out_dir,
     )
     print(f"cloud copyurl complete: copied={copied} skipped={skipped} failed=0")
     print(f"transfer report: {transfer_report}")
@@ -2234,7 +2329,7 @@ def cmd_upload(args: argparse.Namespace) -> int:
     if missing:
         print(f"missing required columns: {', '.join(missing)}", file=sys.stderr)
         return 2
-    absent = [row for row in rows if not target_for(out_dir, row).exists()]
+    absent = [row for row in rows if not target_for(out_dir, row).exists() or target_for(out_dir, row).stat().st_size <= 0]
     if absent and not args.allow_incomplete:
         print(f"upload stopped: {len(absent)} manifest files are missing", file=sys.stderr)
         print("run report for details, or pass --allow-incomplete", file=sys.stderr)
@@ -2252,7 +2347,51 @@ def cmd_upload(args: argparse.Namespace) -> int:
         "--exclude",
         "_delivery_status.json",
         "--exclude",
+        "**/_delivery_status.json",
+        "--exclude",
         "_download_queue.html",
+        "--exclude",
+        "**/_download_queue.html",
+        "--exclude",
+        "_delivery_manifest.csv",
+        "--exclude",
+        "**/_delivery_manifest.csv",
+        "--exclude",
+        "_source_spreadsheet_with_paths.csv",
+        "--exclude",
+        "**/_source_spreadsheet_with_paths.csv",
+        "--exclude",
+        "_companion_assets.csv",
+        "--exclude",
+        "**/_companion_assets.csv",
+        "--exclude",
+        "_asset_audit.csv",
+        "--exclude",
+        "**/_asset_audit.csv",
+        "--exclude",
+        "_data_audit.csv",
+        "--exclude",
+        "**/_data_audit.csv",
+        "--exclude",
+        "_AMY_REVIEW.html",
+        "--exclude",
+        "**/_AMY_REVIEW.html",
+        "--exclude",
+        "_cloud_reports/**",
+        "--exclude",
+        "**/_cloud_reports/**",
+        "--exclude",
+        "_browser_downloads_tmp/**",
+        "--exclude",
+        "**/_browser_downloads_tmp/**",
+        "--exclude",
+        "_folder_manifest.csv",
+        "--exclude",
+        "**/_folder_manifest.csv",
+        "--exclude",
+        "_folder_spreadsheet_rows.csv",
+        "--exclude",
+        "**/_folder_spreadsheet_rows.csv",
     ]
     if args.dry_run:
         cmd.append("--dry-run")
@@ -2278,6 +2417,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delivery-prefix", default="", help="Optional text before the inferred/provided delivery name.")
     parser.add_argument("--delivery-suffix", default="", help="Optional text after the inferred/provided delivery name.")
     parser.add_argument("--out-dir", default=str(DEFAULT_DELIVERIES_DIR))
+    parser.add_argument(
+        "--allow-synced-output",
+        action="store_true",
+        help=(
+            "Override the safety rail that blocks Google Drive/T9-style output paths. "
+            "Use only for an explicitly approved final package run."
+        ),
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("validate").set_defaults(func=cmd_validate)
@@ -2313,12 +2460,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     importer = sub.add_parser("import")
     importer.add_argument("--source-dir", default=str(DEFAULT_INTAKE_DIR))
+    importer.add_argument("--allow-synced-source", action="store_true")
     importer.add_argument("--copy", action="store_true", help="Copy files instead of moving them.")
     importer.add_argument("--move-unmatched", action="store_true", help="Move unmatched files into _unmatched.")
     importer.set_defaults(func=cmd_import)
 
     watch_import = sub.add_parser("watch-import")
     watch_import.add_argument("--source-dir", default=str(DEFAULT_INTAKE_DIR))
+    watch_import.add_argument("--allow-synced-source", action="store_true")
     watch_import.add_argument("--copy", action="store_true", help="Copy files instead of moving them.")
     watch_import.add_argument("--move-unmatched", action="store_true", help="Move unmatched files into _unmatched.")
     watch_import.add_argument("--interval", type=int, default=5)
@@ -2356,6 +2505,13 @@ def build_parser() -> argparse.ArgumentParser:
     audit_video_specs.add_argument("--local", action="store_true")
     audit_video_specs.set_defaults(func=cmd_audit_video_specs)
 
+    clean_work = sub.add_parser("clean-work")
+    clean_work.add_argument("--days", type=int, default=14)
+    clean_work.add_argument("--limit", type=int, default=50)
+    clean_work.add_argument("--include-quarantine", action="store_true")
+    clean_work.add_argument("--apply", action="store_true")
+    clean_work.set_defaults(func=cmd_clean_work)
+
     review = sub.add_parser("review")
     review.set_defaults(func=cmd_review)
 
@@ -2384,10 +2540,13 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_copyurls.add_argument("--limit", type=int, default=0)
     cloud_copyurls.add_argument("--stop-on-error", action="store_true")
     cloud_copyurls.add_argument(
-        "--no-upload-metadata",
+        "--upload-metadata",
         dest="upload_metadata",
-        action="store_false",
-        help="Skip uploading root and per-folder CSV/HTML metadata package.",
+        action="store_true",
+        help=(
+            "Upload local process CSV/HTML metadata to the remote delivery. "
+            "Default is off so operator-internal files do not pollute Amy deliverables."
+        ),
     )
     cloud_copyurls.add_argument(
         "--no-skip-existing",
@@ -2430,7 +2589,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=900,
         help="Maximum seconds to allow one cloud copyurl transfer before reporting it as failed.",
     )
-    cloud_copyurls.set_defaults(skip_existing=True, disable_http2=True, upload_metadata=True)
+    cloud_copyurls.set_defaults(skip_existing=True, disable_http2=True, upload_metadata=False)
     cloud_copyurls.set_defaults(func=cmd_cloud_copyurls)
 
     link = sub.add_parser("link")
@@ -2443,7 +2602,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

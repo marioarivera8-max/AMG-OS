@@ -44,7 +44,7 @@ python3 scripts/amy_delivery.py \
 The command writes:
 
 ```text
-<delivery>/_cloud_reports/<Delivery>_file_proof.csv
+~/AMG_OS/delivery_work/<Delivery>/_cloud_reports/<Delivery>_file_proof.csv
 ```
 
 Each row records:
@@ -63,19 +63,19 @@ Each row records:
 
 | Requirement | Status | Artifact |
 |---|---|---|
-| Source row preserved | Present | `_source_spreadsheet_with_paths.csv` |
-| Delivery manifest | Present | `_delivery_manifest.csv` |
-| Per-folder manifest | Present | `_folder_manifest.csv` |
-| Per-folder source rows | Present | `_folder_spreadsheet_rows.csv` |
-| Companion assets captured | Present | `_companion_assets.csv` |
-| Missing 2257/assets visible | Present | `_asset_audit.csv`, `_AMY_REVIEW.html` |
-| Missing scene files visible | Present | `report`, `_AMY_REVIEW.html`, `_data_audit.csv` |
+| Source row preserved | Present locally | `~/AMG_OS/delivery_work/<Delivery>/_source_spreadsheet_with_paths.csv` |
+| Delivery manifest | Present locally | `~/AMG_OS/delivery_work/<Delivery>/_delivery_manifest.csv` |
+| Per-folder manifest | Present locally | `~/AMG_OS/delivery_work/<Delivery>/<Folder>/_folder_manifest.csv` |
+| Per-folder source rows | Present locally | `~/AMG_OS/delivery_work/<Delivery>/<Folder>/_folder_spreadsheet_rows.csv` |
+| Companion assets captured | Present locally | `~/AMG_OS/delivery_work/<Delivery>/_companion_assets.csv` |
+| Missing 2257/assets visible | Present locally | `_asset_audit.csv`, `_AMY_REVIEW.html` |
+| Missing scene files visible | Present locally | `report`, `_AMY_REVIEW.html`, `_data_audit.csv` |
 | File count proof | Present | `report`, `audit-data`, `audit-cloud-layout` |
 | Local file identity proof | Present after this pass | `audit-file-proof` |
-| Cloud transfer proof | Present | `_cloud_reports/*_cloud_transfers_*.csv` |
-| Cloud failure proof | Present | `_cloud_reports/*_cloud_failures_*.csv` |
+| Cloud transfer proof | Present locally | `~/AMG_OS/delivery_work/<Delivery>/_cloud_reports/*_cloud_transfers_*.csv` |
+| Cloud failure proof | Present locally | `~/AMG_OS/delivery_work/<Delivery>/_cloud_reports/*_cloud_failures_*.csv` |
 | Cloud folder hygiene | Present | `audit-cloud-layout`, `audit-drive-roots` |
-| Video spec proof | Present | `_cloud_reports/*_video_spec_audit.csv` |
+| Video spec proof | Present locally | `~/AMG_OS/delivery_work/<Delivery>/_cloud_reports/*_video_spec_audit.csv` |
 
 ## Operating Decision
 
@@ -101,7 +101,7 @@ python3 scripts/amy_delivery.py \
 
 Expected result:
 
-- creates `_cloud_reports/Delivery 6_file_proof.csv`,
+- creates `~/AMG_OS/delivery_work/Delivery 6/_cloud_reports/Delivery 6_file_proof.csv`,
 - exits `0` only if every expected scene file exists and is non-empty,
 - exits non-zero if any expected file is missing or empty.
 
@@ -110,7 +110,7 @@ Expected result:
 The first run against Delivery 6 created:
 
 ```text
-/Users/mariorivera/AMG_OS/deliveries/Delivery 6/_cloud_reports/Delivery 6_file_proof.csv
+/Users/mariorivera/AMG_OS/delivery_work/Delivery 6/_cloud_reports/Delivery 6_file_proof.csv
 ```
 
 It audited 76 expected scene rows and reported 76 local missing files. This is

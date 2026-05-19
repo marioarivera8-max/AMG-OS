@@ -10,18 +10,20 @@ This is the repeatable path for Amy's spreadsheet deliveries:
 5. Review the report.
 6. Upload the complete delivery folder to `gdrive_amy:` only after review.
 
-The script can work local-first or directly into the Google Drive for Desktop
-folder. When Amy's sheet contains valid signed URLs, the automation downloads
-the scene files and any companion asset URLs directly into the delivery shape.
+The script is local-first. Do not point `--out-dir` at Google Drive, T9, or any
+other synced/mirrored location for normal work. When Amy's sheet contains valid
+signed URLs, the automation downloads the scene files and any companion asset
+URLs into a local delivery shape first. Only final approved delivery packages
+should be uploaded or copied to Drive.
 If a sheet only contains video URLs, the asset audit will call out the missing
 Delivery 1-style companion files instead of silently treating the delivery as
 complete.
 
-The spreadsheet data travels with the delivery:
+The spreadsheet/process data stays local under `~/AMG_OS/delivery_work/`:
 
-- `_delivery_manifest.csv` at the delivery root contains every row and its
+- `_delivery_manifest.csv` contains every row and its
   expected sorted path.
-- Each DVD folder contains `_folder_manifest.csv` with only that title's
+- Each local process DVD folder contains `_folder_manifest.csv` with only that title's
   scenes.
 - These manifests update after prepare/import/report-oriented actions, so
   they show whether each expected file is present.
@@ -30,6 +32,9 @@ The spreadsheet data travels with the delivery:
 - `_asset_audit.csv` checks the folder against the Delivery 1 pattern: sleeve
   PSD in the DVD root, DVD-level model-release PDF, and 2257/model-release
   coverage for each person present in each scene.
+
+Those process files are not Amy-facing deliverables and should not be uploaded
+to Drive unless an operator explicitly requests a metadata package for review.
 
 ## Target Drive Shape
 
@@ -249,7 +254,7 @@ Desktop synced intake folder.
 
 For the daily studio workflow, use the browser downloader. It opens a real
 browser profile, lets you log in once, then downloads each spreadsheet URL
-into the matching Google Drive-synced DVD folder.
+into the matching local DVD folder.
 
 First test one file:
 
@@ -257,7 +262,6 @@ First test one file:
 python3 scripts/amy_delivery.py \
   --manifest manifest_delivery3.csv \
   --delivery-name "Delivery 3" \
-  --out-dir "/Users/mariorivera/Library/CloudStorage/GoogleDrive-triedtrue411@gmail.com/My Drive/Amy Deliveries" \
   browser-download --limit 1 --pause-for-login --stop-on-error
 ```
 
@@ -267,7 +271,6 @@ After the login/profile works, run the full delivery:
 python3 scripts/amy_delivery.py \
   --manifest manifest_delivery3.csv \
   --delivery-name "Delivery 3" \
-  --out-dir "/Users/mariorivera/Library/CloudStorage/GoogleDrive-triedtrue411@gmail.com/My Drive/Amy Deliveries" \
   browser-download
 ```
 
@@ -282,7 +285,6 @@ If the spreadsheet includes URLs in columns whose names mention cover art,
 python3 scripts/amy_delivery.py \
   --manifest manifest_delivery3.csv \
   --delivery-name "Delivery 3" \
-  --out-dir "/Users/mariorivera/Library/CloudStorage/GoogleDrive-triedtrue411@gmail.com/My Drive/Amy Deliveries" \
   download-assets
 ```
 
@@ -326,14 +328,16 @@ python3 scripts/amy_delivery.py \
 
 - Required source columns: `DVD Title`, `Scene ID`, `Scene Title`, `Video file`.
 - Existing completed files are skipped, so interrupted imports can resume.
-- Per-row download state is stored in `_delivery_status.json` inside the local delivery folder.
-- `_delivery_status.json` and `_download_queue.html` are excluded from Drive uploads.
-- `_delivery_manifest.csv` and each `_folder_manifest.csv` do upload, because
-  that is the spreadsheet context Amy needs alongside the sorted files.
-- `audit-file-proof` writes `_cloud_reports/<Delivery>_file_proof.csv` with
+- Per-row download state is stored under `~/AMG_OS/delivery_work/<Delivery>/`.
+- `_delivery_status.json`, `_download_queue.html`, `_delivery_manifest.csv`,
+  `_folder_manifest.csv`, `_source_spreadsheet_with_paths.csv`, review HTML,
+  and audit CSVs are local process artifacts. They do not upload to Drive unless
+  an operator explicitly requests a metadata package.
+- `audit-file-proof` writes `_cloud_reports/<Delivery>_file_proof.csv` under
+  `~/AMG_OS/delivery_work/<Delivery>/` with
   file size and SHA-256 for every expected scene file, so a completed delivery
   has durable file-identity proof instead of only folder presence.
-- The script refuses to upload if manifest files are missing unless you pass `--allow-incomplete`.
+- The script refuses to upload if expected scene files are missing unless you pass `--allow-incomplete`.
 - `rclone` is already configured on this machine with the remote `gdrive_amy:`.
 - A direct `download` command still exists for URLs that do not require
   studio/browser auth, but the standard Amy workflow should use `queue` +

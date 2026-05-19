@@ -3,6 +3,11 @@
 Purpose: turn Amy's Web VOD spreadsheet into delivery-ready Google Drive
 folders with the same structure as the approved examples.
 
+Operator rule: work local first. Process manifests, audits, queues, browser
+download temp files, and transfer receipts are local-only under
+`~/AMG_OS/delivery_work/`. They are not Amy-facing deliverables and should not
+appear at Google Drive root, `Amy Deliveries` root, T9, or any mirror drive.
+
 ## What It Produces
 
 For each spreadsheet delivery, the module creates:
@@ -10,14 +15,7 @@ For each spreadsheet delivery, the module creates:
 ```text
 Amy Deliveries/
   Delivery 6/
-    _AMY_REVIEW.html
-    _delivery_manifest.csv
-    _source_spreadsheet_with_paths.csv
-    _companion_assets.csv
-    _cloud_reports/
     Naughty Office Vol. 98/
-      _folder_manifest.csv
-      _folder_spreadsheet_rows.csv
       nocascatyler_qt.mp4
       nosyrenalex_qt.mp4
       ...
@@ -25,10 +23,10 @@ Amy Deliveries/
       ...
 ```
 
-Every DVD/title folder keeps its own spreadsheet rows so the data travels with
-the files. Companion asset links from the spreadsheet are recorded and routed
-when usable. Missing video links and missing asset coverage are reported instead
-of being hidden.
+Every DVD/title folder contains only delivery assets. Spreadsheet rows,
+companion asset maps, review HTML, transfer logs, and audits stay in
+`~/AMG_OS/delivery_work/<Delivery Name>/`. Missing video links and missing asset
+coverage are reported there instead of being hidden.
 
 ## Daily Command
 
